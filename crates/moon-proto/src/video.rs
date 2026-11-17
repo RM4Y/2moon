@@ -30,6 +30,12 @@ pub const FLAG_SOF: u8 = 0x4;
 
 pub const FRAME_TYPE_P: u8 = 1;
 pub const FRAME_TYPE_IDR: u8 = 2;
+/// P-frame with intra-refresh blocks (Sunshine).
+pub const FRAME_TYPE_INTRA_REFRESH: u8 = 4;
+/// First P-frame after a reference frame invalidation (Sunshine).
+pub const FRAME_TYPE_RFI_RECOVERY: u8 = 5;
+/// NV header extra flag: this frame is a long-term reference (Sunshine RFI).
+pub const EXTRA_FLAG_LTR_FRAME: u8 = 0x1;
 
 /// Maximum shards per FEC block and number of blocks per frame.
 pub const MAX_SHARDS: usize = 255;
@@ -255,9 +261,20 @@ pub struct Frame {
     pub index: u32,
     pub timestamp: u32,
     pub idr: bool,
+    /// Frame type from the frame header (`FRAME_TYPE_*`).
+    pub frame_type: u8,
+    /// Long-term reference frame: the client acknowledges it when using RFI.
+    pub ltr: bool,
     pub data: Vec<u8>,
     /// Number of data shards that had to be rebuilt with FEC.
     pub recovered_shards: usize,
+}
+
+impl Frame {
+    /// Decoding can restart on this frame after a reference frame invalidation.
+    pub fn is_rfi_recovery_point(&self) -> bool {
+        self.idr || matches!(self.frame_type, FRAME_TYPE_IDR | FRAME_TYPE_INTRA_REFRESH | FRAME_TYPE_RFI_RECOVERY)
+    }
 }
 
 struct Block {
@@ -271,6 +288,7 @@ struct Block {
 
 struct PendingFrame {
     timestamp: u32,
+    ltr: bool,
     last_block: usize,
     blocks: Vec<Option<Block>>,
 }
@@ -331,7 +349,7 @@ impl Reassembler {
         if data_n == 0 || shard >= MAX_SHARDS || block_idx > h.last_block_index() || payload.len() <= NV_HEADER_LEN {
             return;
         }
-        let pf = self.pending.entry(frame).or_insert_with(|| PendingFrame { timestamp: h.timestamp, last_block: h.last_block_index(), blocks: (0..=h.last_block_index()).map(|_| None).collect() });
+        let pf = self.pending.entry(frame).or_insert_with(|| PendingFrame { timestamp: h.timestamp, ltr: h.extra_flags & EXTRA_FLAG_LTR_FRAME != 0, last_block: h.last_block_index(), blocks: (0..=h.last_block_index()).map(|_| None).collect() });
         let Some(slot) = pf.blocks.get_mut(block_idx) else { return };
         let blk = slot.get_or_insert_with(|| Block { data_shards: data_n, total: total.max(data_n), shards: vec![None; MAX_SHARDS], received: 0, recovered: 0, done: false });
         if blk.done || shard >= blk.shards.len() || blk.shards[shard].is_some() {
@@ -382,14 +400,15 @@ impl Reassembler {
             return None;
         }
         let shard_len = pf.blocks[0].as_ref().unwrap().shards[0].as_ref().unwrap().len() - NV_HEADER_LEN;
-        let idr = data[3] == FRAME_TYPE_IDR;
+        let frame_type = data[3];
+        let idr = frame_type == FRAME_TYPE_IDR;
         let last_len = u16::from_le_bytes([data[4], data[5]]) as usize;
         if last_len > 0 && last_len <= shard_len {
             let trimmed = data.len() - (shard_len - last_len);
             data.truncate(trimmed);
         }
         data.drain(..FRAME_HEADER_LEN);
-        Some(Frame { index, timestamp: pf.timestamp, idr, data, recovered_shards: recovered })
+        Some(Frame { index, timestamp: pf.timestamp, idr, frame_type, ltr: pf.ltr, data, recovered_shards: recovered })
     }
 
     fn drain(&mut self, newest: u32, out: &mut Vec<Event>) {

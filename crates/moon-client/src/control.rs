@@ -45,6 +45,22 @@ impl ControlSender {
         let _ = self.0.send(Cmd::Send { channel: CHANNEL_URGENT, msg_type: msg::REQUEST_IDR_FRAME, payload: vec![0; 16], reliable: true });
     }
 
+    /// Ask the host to stop referencing frames `first..=last` (lost on the
+    /// network) and to send a frame decodable without them (Sunshine RFI).
+    pub fn invalidate_ref_frames(&self, first: u32, last: u32) {
+        let mut p = vec![0u8; 24];
+        p[0..4].copy_from_slice(&first.to_le_bytes());
+        p[8..12].copy_from_slice(&last.to_le_bytes());
+        let _ = self.0.send(Cmd::Send { channel: CHANNEL_URGENT, msg_type: msg::INVALIDATE_REF_FRAMES, payload: p, reliable: true });
+    }
+
+    /// Acknowledge a long-term reference frame (needed by hosts using RFI).
+    pub fn ack_ltr_frame(&self, index: u32) {
+        let mut p = vec![0u8; 8];
+        p[0..4].copy_from_slice(&index.to_le_bytes());
+        let _ = self.0.send(Cmd::Send { channel: CHANNEL_URGENT, msg_type: msg::LTR_FRAME_ACK, payload: p, reliable: true });
+    }
+
     pub fn input(&self, ev: &input::Event) {
         let channel = match ev {
             input::Event::Key { .. } => CHANNEL_KEYBOARD,

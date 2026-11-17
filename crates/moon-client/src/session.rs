@@ -30,6 +30,8 @@ pub struct Stats {
     pub frames_lost: AtomicU64,
     pub shards_recovered: AtomicU64,
     pub idr_requests: AtomicU64,
+    /// Reference frame invalidation requests (RFI).
+    pub rfi_requests: AtomicU64,
     pub video_bytes: AtomicU64,
     pub audio_packets: AtomicU64,
     pub audio_recovered: AtomicU64,
@@ -47,7 +49,7 @@ impl Stats {
     pub fn summary(&self) -> String {
         let dec = self.frames_decoded.load(Ordering::Relaxed);
         format!(
-            "decoder {} | frames: {} received, {} decoded, {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | mic: {} packets sent | avg decode {:.2} ms",
+            "decoder {} | frames: {} received, {} decoded, {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests, {} RFI requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | mic: {} packets sent | avg decode {:.2} ms",
             self.decoder.lock().unwrap(),
             self.frames_received.load(Ordering::Relaxed),
             dec,
@@ -55,6 +57,7 @@ impl Stats {
             self.frames_lost.load(Ordering::Relaxed),
             self.shards_recovered.load(Ordering::Relaxed),
             self.idr_requests.load(Ordering::Relaxed),
+            self.rfi_requests.load(Ordering::Relaxed),
             self.video_bytes.load(Ordering::Relaxed) as f64 / 1e6,
             self.audio_packets.load(Ordering::Relaxed),
             self.audio_recovered.load(Ordering::Relaxed),
@@ -158,8 +161,9 @@ impl Session {
             let stop = stop.clone();
             let stats = stats.clone();
             let ctl = ctrl.sender.clone();
+            let rfi = neg.rfi;
             threads.push(std::thread::Builder::new().name("video-rx".into()).spawn(move || {
-                if let Err(e) = video_rx(addr, ping, ftx, stop, stats, ctl) {
+                if let Err(e) = video_rx(addr, ping, ftx, stop, stats, ctl, rfi) {
                     warn!("video receiver: {e:#}");
                 }
             })?);
@@ -259,15 +263,51 @@ fn ping_packet(payload: &Option<String>, seq: u32) -> Vec<u8> {
     }
 }
 
-fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moon_proto::video::Frame>, stop: Arc<AtomicBool>, stats: Arc<Stats>, ctl: ControlSender) -> Result<()> {
+/// What the receiver waits for after a loss before feeding the decoder again.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Recovery {
+    None,
+    /// A keyframe (IDR).
+    Idr,
+    /// A frame encoded without the invalidated references (RFI), or an IDR.
+    Rfi,
+}
+
+/// Frames newer than a missing one before it is declared lost. Packets are paced
+/// in frame order, so 1 (≈ one frame interval) is enough and recovers much
+/// faster than waiting several frames.
+const LOSS_WINDOW: u32 = 1;
+/// Give up on a pending recovery and (re-)request an IDR after this long.
+const RECOVERY_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moon_proto::video::Frame>, stop: Arc<AtomicBool>, stats: Arc<Stats>, ctl: ControlSender, rfi: bool) -> Result<()> {
     let sock = udp_socket(addr)?;
     let mut r = Reassembler::new();
+    r.window = LOSS_WINDOW;
     let mut buf = vec![0u8; 65536];
     let mut events = Vec::new();
     let mut ping_seq = 0u32;
     let mut last_ping = Instant::now() - Duration::from_secs(1);
     let mut last_idr = Instant::now() - Duration::from_secs(1);
     let mut got_any = false;
+    // The stream starts with an IDR; nothing before it can be decoded.
+    let mut recovery = Recovery::Idr;
+    let mut recovery_since = Instant::now();
+    if rfi {
+        info!("reference frame invalidation enabled");
+    }
+    // Test hook: drop this percentage of received video packets (simulated network loss).
+    let test_loss: f64 = std::env::var("MOON_TEST_VIDEO_LOSS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    if test_loss > 0.0 {
+        warn!("MOON_TEST_VIDEO_LOSS: dropping {test_loss}% of video packets");
+    }
+    let request_idr = |last_idr: &mut Instant, stats: &Stats| {
+        if last_idr.elapsed() > Duration::from_millis(250) {
+            ctl.request_idr();
+            stats.idr_requests.fetch_add(1, Ordering::Relaxed);
+            *last_idr = Instant::now();
+        }
+    };
     while !stop.load(Ordering::Relaxed) {
         // Keep pinging until traffic flows, then slowly as keep-alive (NAT mappings).
         let period = if got_any { Duration::from_millis(500) } else { Duration::from_millis(100) };
@@ -276,6 +316,13 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
             let _ = sock.send(&ping_packet(&ping, ping_seq));
             last_ping = Instant::now();
         }
+        // A recovery that takes too long (request or recovery frame lost): ask for an IDR.
+        if recovery != Recovery::None && got_any && recovery_since.elapsed() > RECOVERY_TIMEOUT {
+            debug!("no {recovery:?} recovery frame after {:?}, requesting IDR", recovery_since.elapsed());
+            recovery = Recovery::Idr;
+            recovery_since = Instant::now();
+            request_idr(&mut last_idr, &stats);
+        }
         let n = match sock.recv(&mut buf) {
             Ok(n) => n,
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
@@ -283,6 +330,9 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
             Err(e) => return Err(e.into()),
         };
         got_any = true;
+        if test_loss > 0.0 && rand::random::<f64>() * 100.0 < test_loss {
+            continue;
+        }
         stats.video_bytes.fetch_add(n as u64, Ordering::Relaxed);
         r.push(&buf[..n], &mut events);
         for ev in events.drain(..) {
@@ -290,17 +340,44 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
                 Event::Frame(f) => {
                     stats.frames_received.fetch_add(1, Ordering::Relaxed);
                     stats.shards_recovered.store(r.stats.shards_recovered, Ordering::Relaxed);
+                    let usable = match recovery {
+                        Recovery::None => true,
+                        Recovery::Idr => f.idr,
+                        Recovery::Rfi => f.is_rfi_recovery_point(),
+                    };
+                    if !usable {
+                        // References a lost frame: decoding it would show garbage.
+                        stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    if recovery != Recovery::None {
+                        debug!("recovered on frame {} (type {}) after {:?}", f.index, f.frame_type, recovery_since.elapsed());
+                        recovery = Recovery::None;
+                    }
+                    if rfi && f.ltr {
+                        ctl.ack_ltr_frame(f.index);
+                    }
                     if frames.send(f).is_err() {
                         return Ok(());
                     }
                 }
                 Event::Lost { first, last } => {
                     stats.frames_lost.fetch_add((last.wrapping_sub(first) + 1) as u64, Ordering::Relaxed);
-                    if last_idr.elapsed() > Duration::from_millis(250) {
+                    if rfi && recovery != Recovery::Idr {
+                        debug!("frames {first}..={last} lost, invalidating references");
+                        ctl.invalidate_ref_frames(first, last);
+                        stats.rfi_requests.fetch_add(1, Ordering::Relaxed);
+                        if recovery == Recovery::None {
+                            recovery_since = Instant::now();
+                        }
+                        recovery = Recovery::Rfi;
+                    } else {
                         debug!("frames {first}..={last} lost, requesting IDR");
-                        ctl.request_idr();
-                        stats.idr_requests.fetch_add(1, Ordering::Relaxed);
-                        last_idr = Instant::now();
+                        if recovery == Recovery::None {
+                            recovery_since = Instant::now();
+                        }
+                        recovery = Recovery::Idr;
+                        request_idr(&mut last_idr, &stats);
                     }
                 }
             }

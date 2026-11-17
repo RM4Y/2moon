@@ -20,6 +20,8 @@ pub mod msg {
     pub const INPUT_DATA: u16 = 0x0206;
     pub const INVALIDATE_REF_FRAMES: u16 = 0x0301;
     pub const REQUEST_IDR_FRAME: u16 = 0x0302;
+    /// Sunshine: client acknowledges a long-term reference frame.
+    pub const LTR_FRAME_ACK: u16 = 0x0350;
     pub const START_A: u16 = 0x0305;
     pub const START_B: u16 = 0x0307;
     pub const TERMINATION: u16 = 0x0109;

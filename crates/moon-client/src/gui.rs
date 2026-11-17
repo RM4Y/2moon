@@ -933,7 +933,7 @@ fn gamepad_icon(ui: &mut egui::Ui, h: f32) {
 
 fn short_stats(s: &Stats) -> String {
     format!(
-        "{} · décodage {:.1} ms · décodées {} · jetées (retard) {} · perdues {} · FEC {} · IDR {}",
+        "{} · décodage {:.1} ms · décodées {} · jetées {} · perdues {} · FEC {} · IDR {} · RFI {}",
         s.decoder.lock().unwrap(),
         {
             let n = s.frames_decoded.load(Ordering::Relaxed);
@@ -943,7 +943,8 @@ fn short_stats(s: &Stats) -> String {
         s.frames_dropped.load(Ordering::Relaxed),
         s.frames_lost.load(Ordering::Relaxed),
         s.shards_recovered.load(Ordering::Relaxed),
-        s.idr_requests.load(Ordering::Relaxed)
+        s.idr_requests.load(Ordering::Relaxed),
+        s.rfi_requests.load(Ordering::Relaxed)
     )
 }
 

@@ -24,6 +24,8 @@ pub struct StreamConfig {
     pub min_fec_packets: u32,
     /// Sunshine encryption flags we request (bit 0 = control v2, 1 = video, 2 = audio)
     pub encryption_requested: u32,
+    /// Use reference frame invalidation if the host supports it.
+    pub rfi: bool,
 }
 
 impl Default for StreamConfig {
@@ -40,6 +42,7 @@ impl Default for StreamConfig {
             audio_packet_ms: 5,
             min_fec_packets: 2,
             encryption_requested: 1 | 4,
+            rfi: true,
         }
     }
 }
@@ -60,6 +63,9 @@ pub struct Negotiated {
     pub encryption_requested: u32,
     /// Flags we told the host to use.
     pub encryption_enabled: u32,
+    /// Reference frame invalidation is in use (host supports it, and we asked
+    /// for multiple reference frames).
+    pub rfi: bool,
 }
 
 impl Negotiated {
@@ -219,7 +225,9 @@ impl RtspClient {
         n.session = self.session.clone().unwrap_or_default();
 
         n.encryption_enabled = n.encryption_supported & (cfg.encryption_requested | n.encryption_requested);
-        let sdp = announce_sdp(cfg, &self.host, n.encryption_enabled);
+        // RFI (Sunshine): the host advertises it; we then allow multiple reference frames.
+        n.rfi = cfg.rfi && n.describe_sdp.contains("x-nv-video[0].refPicInvalidation");
+        let sdp = announce_sdp(&StreamConfig { rfi: n.rfi, ..cfg.clone() }, &self.host, n.encryption_enabled);
         self.ok(Message::request("ANNOUNCE", "streamid=control/13/0").header("Content-type", "application/sdp").header("Content-length", sdp.len()).with_body(sdp.into_bytes())).await?;
         self.ok(Message::request("PLAY", "/")).await?;
         Ok(n)
@@ -258,7 +266,9 @@ pub fn announce_sdp(c: &StreamConfig, host: &str, encryption: u32) -> String {
     push("x-nv-clientSupportHevc", ((c.video_format == 1) as u32).to_string());
     push("x-nv-vqos[0].bitStreamFormat", c.video_format.to_string());
     push("x-nv-video[0].dynamicRangeMode", "0".into());
-    push("x-nv-video[0].maxNumReferenceFrames", "1".into());
+    // With RFI the encoder may keep several references (0 = its default), so it can
+    // recover from a loss with a P-frame; without it, one reference keeps decoders happy.
+    push("x-nv-video[0].maxNumReferenceFrames", if c.rfi { "0" } else { "1" }.into());
     push("x-nv-video[0].encoderCscMode", "0".into());
     push("x-ss-video[0].chromaSamplingType", "0".into());
     push("x-ss-video[0].intraRefresh", "0".into());
