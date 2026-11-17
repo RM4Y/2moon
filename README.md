@@ -116,6 +116,16 @@ contre de vraies captures Sunshine/Moonlight : matrice FEC vidéo de Cauchy (coe
 résolus sur trafic réel), IV GCM du contrôle et du RTSP chiffré (validés par le tag
 d'authentification), schéma d'IV de l'audio chiffré, en-tête de trame (latence hôte).
 
+## FFmpeg fourni avec le client
+
+L'archive du client contient son propre FFmpeg (`lib/`), réduit au décodage :
+H.264, HEVC et AV1 (décodeurs FFmpeg et dav1d), avec l'accélération VAAPI. Le client
+n'a donc pas besoin d'un FFmpeg complet sur la machine. Il est compilé par
+`scripts/build-ffmpeg.sh` à partir des archives officielles (sommes SHA-256 figées),
+sous Debian 12, et intégré par `scripts/package-release.sh`. `MOON_FFMPEG=system`
+force l'usage du FFmpeg du système. Le serveur utilise toujours le FFmpeg du système
+(pour NVENC).
+
 ## Tests
 
 ```sh
@@ -130,7 +140,7 @@ scripts/e2e.sh                     # 25 vérifications bout en bout client ↔ h
 
 - Capture : KWin, portail XDG ou PipeWire (Wayland). Pas de capture X11/KMS.
 - HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC). Côté client : NVDEC (NVIDIA),
-  VAAPI (Intel/AMD) ou un FFmpeg complet pour le décodage CPU.
+  VAAPI (Intel/AMD) ou le processeur.
 - Le micro n'existe qu'entre un client et un hôte 2moon.
 - Pas de HDR / 10 bits, ni de 4:4:4.
 - Les caractères absents de la disposition clavier de l'hôte (touches mortes) ne sont pas saisis.

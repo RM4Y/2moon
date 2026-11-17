@@ -63,9 +63,31 @@ fn load() -> std::result::Result<Api, String> {
             }
             Err(format!("cannot load {}: {last}", names[0]))
         };
-        // Matching libavcodec / libavutil pairs: FFmpeg 8, 7, 6, 5.
+        // FFmpeg shipped with the client (lib/ next to the executable, see
+        // scripts/build-ffmpeg.sh) first, then the system's.
+        // MOON_FFMPEG=system skips the bundled copy; MOON_FFMPEG_DIR points elsewhere.
         let mut pair = None;
+        if std::env::var("MOON_FFMPEG").as_deref() != Ok("system") {
+            let dir = std::env::var_os("MOON_FFMPEG_DIR").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("lib"))));
+            if let Some(dir) = dir {
+                let (u, c) = (dir.join("libavutil.so.60"), dir.join("libavcodec.so.62"));
+                if u.exists() && c.exists() {
+                    // avutil first: avcodec's dependency then resolves to it.
+                    match (Library::new(&u), Library::new(&c)) {
+                        (Ok(u), Ok(c)) => {
+                            info!("using the bundled FFmpeg from {}", dir.display());
+                            pair = Some((u, c));
+                        }
+                        (Err(e), _) | (_, Err(e)) => tracing::warn!("bundled FFmpeg in {} unusable ({e}); using the system's", dir.display()),
+                    }
+                }
+            }
+        }
+        // Matching libavcodec / libavutil pairs: FFmpeg 8, 7, 6, 5.
         for (c, u) in [(62, 60), (61, 59), (60, 58), (59, 57)] {
+            if pair.is_some() {
+                break;
+            }
             if let (Ok(u), Ok(c)) = (open(&[&format!("libavutil.so.{u}")]), open(&[&format!("libavcodec.so.{c}")])) {
                 pair = Some((u, c));
                 break;

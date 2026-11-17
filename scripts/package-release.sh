@@ -20,6 +20,8 @@ else
     BIN="$ROOT/target/bookworm/release"
 fi
 mkdir -p "$OUT"
+"$ROOT/scripts/build-ffmpeg.sh" >/dev/null
+FFMPEG_BUNDLE="$ROOT/target/ffmpeg-bundle/linux-x86_64"
 
 package() { # name binary [extra files...]
     local name="$1" bin="$2"; shift 2
@@ -30,6 +32,11 @@ package() { # name binary [extra files...]
     strip "$dir/$bin"
     cp "$ROOT/README.md" "$ROOT/LICENSE" "$dir/"
     for f in "$@"; do mkdir -p "$dir/$(dirname "$f")"; cp "$ROOT/$f" "$dir/$f"; done
+    # Client: bundled FFmpeg decoders (scripts/build-ffmpeg.sh), loaded from lib/.
+    if [ "$name" = client ]; then
+        cp -a "$FFMPEG_BUNDLE/lib" "$dir/lib"
+        cp -a "$FFMPEG_BUNDLE/LICENSES" "$dir/LICENSES"
+    fi
     tar -C "$OUT" -czf "$dir.tar.gz" "$(basename "$dir")"
     (cd "$OUT" && sha256sum "$(basename "$dir").tar.gz" >"$(basename "$dir").tar.gz.sha256")
     rm -rf "$dir"
