@@ -129,8 +129,11 @@ impl Packetizer {
         Self { shard_payload: packet_size.saturating_sub(NV_HEADER_LEN).max(64), fec_percent, min_parity, seq: 0, stream_index: 0, ssrc: 0, processing_latency: 0 }
     }
 
+    /// `streamPacketIndex` is a 24-bit packet counter (stored << 8). It must NOT
+    /// wrap with the 16-bit RTP sequence number: clients compare it modulo 2^24
+    /// and would discard every packet after a 16-bit wrap (~65k packets).
     fn seq_index(&self) -> u32 {
-        (self.seq as u32) << 8
+        (self.stream_index & 0x00ff_ffff) << 8
     }
 
     fn advance(&mut self) {
@@ -454,6 +457,30 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn stream_packet_index_does_not_wrap_with_rtp_seq() {
+        let mut p = Packetizer::new(1024, 0, 0);
+        let mut last_idx = None;
+        let mut last_seq = 0u16;
+        let mut wrapped = false;
+        for i in 0..2000u32 {
+            for pkt in p.packetize(i, 0, false, &frame_bytes(40 * 1008, 1)) {
+                let h = PacketHeader::parse(&pkt).unwrap();
+                if h.seq < last_seq {
+                    wrapped = true;
+                }
+                last_seq = h.seq;
+                let idx = h.stream_packet_index >> 8;
+                if let Some(prev) = last_idx {
+                    assert_eq!(idx, (prev + 1) & 0xff_ffff, "streamPacketIndex must increase across the RTP wrap");
+                }
+                last_idx = Some(idx);
+                assert_eq!(h.stream_packet_index & 0xff, 0);
+            }
+        }
+        assert!(wrapped, "test must cross the 16-bit RTP sequence wrap");
     }
 
     #[test]

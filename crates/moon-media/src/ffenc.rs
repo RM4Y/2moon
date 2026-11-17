@@ -542,3 +542,33 @@ mod tests {
         assert!(decoded >= 118);
     }
 }
+
+#[cfg(test)]
+mod idr_size_probe {
+    use super::*;
+
+    /// Diagnostic: size of forced IDR frames on busy content (run with --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn idr_sizes() {
+        for (codec, kbps) in [("hevc_nvenc", 20_000u32), ("hevc_nvenc", 50_000), ("h264_nvenc", 20_000)] {
+            let Ok(mut enc) = FfmpegEncoder::new(codec, 1920, 1080, 60, kbps) else { continue };
+            let mut f = I420Frame::new(1920, 1080);
+            let mut seed = 7u32;
+            let (mut p_max, mut idr_sizes) = (0usize, vec![]);
+            for i in 0..120i64 {
+                for p in f.y.iter_mut().step_by(3) {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    *p = 16 + (seed >> 24) as u8 % 200;
+                }
+                if i % 20 == 10 {
+                    enc.request_idr();
+                }
+                let e = enc.encode(&f, i * 1500).unwrap();
+                if e.idr { idr_sizes.push(e.data.len()) } else { p_max = p_max.max(e.data.len()) }
+            }
+            let shards: Vec<usize> = idr_sizes.iter().map(|s| (s + 8).div_ceil(1376)).collect();
+            eprintln!("{codec} {kbps} kbps: IDR sizes {idr_sizes:?} -> data shards {shards:?}; max P {p_max} B");
+        }
+    }
+}
