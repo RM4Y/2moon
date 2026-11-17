@@ -793,6 +793,12 @@ impl GuiApp {
         }
         // Make sure the whole area receives pointer input.
         let _ = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        // The host's cursor is drawn in the video: hide ours over it (and always
+        // when captured). Set every frame, or egui would show it again.
+        let over_video = ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| video.contains(p));
+        if st.captured || (over_video && size[0] > 0) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
 
         // Input forwarding.
         let (events, focused) = ctx.input(|i| (i.events.clone(), i.viewport().focused.unwrap_or(true)));
@@ -803,7 +809,6 @@ impl GuiApp {
             if st.captured {
                 st.captured = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
             }
         }
         for ev in events {
@@ -821,7 +826,6 @@ impl GuiApp {
                                 release_all(st, &ctl);
                                 st.captured = !st.captured;
                                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if st.captured { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!st.captured));
                                 continue;
                             }
                             Key::F => {

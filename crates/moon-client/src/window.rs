@@ -142,8 +142,8 @@ impl App {
             let _ = g.window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| g.window.set_cursor_grab(CursorGrabMode::Confined));
             g.window.set_cursor_visible(false);
         } else {
+            // The host's cursor is drawn in the video: keep ours hidden over the window.
             let _ = g.window.set_cursor_grab(CursorGrabMode::None);
-            g.window.set_cursor_visible(true);
         }
     }
 
@@ -227,6 +227,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attrs = Window::default_attributes().with_title(&self.title).with_inner_size(PhysicalSize::new(self.stream_w, self.stream_h));
         let window = Rc::new(el.create_window(attrs).expect("create window"));
+        // The host's cursor is part of the video.
+        window.set_cursor_visible(false);
         let ctx = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&ctx, window.clone()).expect("softbuffer surface");
         self.gfx = Some(Gfx { window, surface, _ctx: ctx });
