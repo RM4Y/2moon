@@ -13,6 +13,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 libc = "0.2.191"
+mdns-sd = "0.22.0"
 moon-media = { version = "0.1.0", path = "../moon-media" }
 moon-proto = { version = "0.1.0", path = "../moon-proto" }
 rand = "0.8"

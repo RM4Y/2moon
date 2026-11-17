@@ -29,6 +29,11 @@ enum Cmd {
     List { host: String },
     /// Show host information.
     Info { host: String },
+    /// Find GameStream hosts on the local network (mDNS).
+    Discover {
+        #[arg(long, default_value_t = 3)]
+        seconds: u64,
+    },
     /// Quit the running application on the host.
     Quit { host: String },
     /// Debug: launch, negotiate RTSP and dump raw UDP packets for a few seconds.
@@ -65,6 +70,9 @@ enum Cmd {
         /// Quit the app on the host when the stream window closes.
         #[arg(long)]
         quit_on_exit: bool,
+        /// Headless only: send a scripted sequence of input events (for tests).
+        #[arg(long)]
+        test_input: bool,
     },
 }
 
@@ -133,7 +141,22 @@ async fn main() -> Result<()> {
             let c = client_for(&store, &host);
             moon_client::probe::run(&c, &out, seconds).await?;
         }
-        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit } => {
+        Cmd::Discover { seconds } => {
+            let mdns = mdns_sd::ServiceDaemon::new()?;
+            let rx = mdns.browse("_nvstream._tcp.local.")?;
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
+                if let Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) = rx.recv_timeout(left) {
+                    let addrs: Vec<String> = info.get_addresses().iter().map(|a| a.to_string()).collect();
+                    if seen.insert(info.get_fullname().to_string()) {
+                        println!("{}\t{}\tport {}", info.get_fullname().trim_end_matches("._nvstream._tcp.local."), addrs.join(","), info.get_port());
+                    }
+                }
+            }
+            let _ = mdns.shutdown();
+        }
+        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input } => {
             let c = client_for(&store, &host);
             c.server_cert.as_ref().context("not paired with this host (run `pair` first)")?;
             let stream = StreamConfig {
@@ -157,6 +180,30 @@ async fn main() -> Result<()> {
                     f2.lock().unwrap().get_or_insert((p.width, p.height, p.pixels[p.pixels.len() / 2]));
                 }))
                 .await?;
+                if test_input {
+                    use moon_proto::control::input::{self as inp, Event as In};
+                    let ctl = session.control.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let evs = [
+                            In::Key { down: true, vk: 0x41, modifiers: inp::MOD_SHIFT },
+                            In::Key { down: false, vk: 0x41, modifiers: inp::MOD_SHIFT },
+                            In::MouseRel { dx: 12, dy: -7 },
+                            In::MouseAbs { x: 640, y: 360, width: 1280, height: 720 },
+                            In::MouseButton { down: true, button: inp::BUTTON_LEFT },
+                            In::MouseButton { down: false, button: inp::BUTTON_LEFT },
+                            In::Scroll { amount: -120 },
+                            In::HScroll { amount: 120 },
+                            In::Text("2moon".into()),
+                            In::Gamepad(inp::Gamepad { index: 0, active_mask: 1, buttons: inp::pad::A, left_trigger: 0, right_trigger: 200, ls_x: 1000, ls_y: -1000, rs_x: 0, rs_y: 0 }),
+                        ];
+                        for e in &evs {
+                            ctl.input(e);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        println!("sent {} input events", evs.len());
+                    });
+                }
                 let t = std::time::Instant::now();
                 while t.elapsed() < std::time::Duration::from_secs(seconds) {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;

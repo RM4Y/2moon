@@ -2,6 +2,7 @@ mod capture;
 mod control;
 mod http;
 mod input;
+mod mdns;
 mod rtsp;
 mod state;
 mod stream;
@@ -36,6 +37,9 @@ struct Args {
     /// Do not inject input into this machine; just log received events.
     #[arg(long)]
     no_input: bool,
+    /// Do not advertise the host on the local network.
+    #[arg(long)]
+    no_mdns: bool,
 }
 
 #[tokio::main]
@@ -77,6 +81,17 @@ async fn main() -> Result<()> {
         }
     });
     info!("2moon host '{}' uuid {}", host.cfg.hostname, host.uuid);
+    let _mdns = if args.no_mdns {
+        None
+    } else {
+        match mdns::advertise(&host.cfg.hostname, host.cfg.http_port) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("mDNS advertisement failed: {e:#}");
+                None
+            }
+        }
+    };
 
     // PINs typed in the console are delivered to waiting pairing requests.
     let h = host.clone();
