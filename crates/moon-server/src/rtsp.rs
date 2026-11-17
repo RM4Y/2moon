@@ -65,7 +65,9 @@ fn handle(host: &Host, req: &Message) -> Message {
             sdp.push_str("a=x-ss-general.featureFlags:0\r\n");
             sdp.push_str("a=x-ss-general.encryptionSupported:5\r\n");
             sdp.push_str("a=x-ss-general.encryptionRequested:1\r\n");
-            sdp.push_str("a=fmtp:97 surround-params=21101\r\n");
+            for l in [moon_media::opus::StreamLayout::stereo(), moon_media::opus::StreamLayout::surround51(), moon_media::opus::StreamLayout::surround71()] {
+                sdp.push_str(&format!("a=fmtp:97 surround-params={}\r\n", l.to_sdp()));
+            }
             // Codec support markers understood by clients.
             if host.cfg.hevc {
                 sdp.push_str("sprop-parameter-sets=AAAAAU\r\n");

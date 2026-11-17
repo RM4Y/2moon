@@ -238,10 +238,15 @@ impl Host {
                 Box::new(crate::portal::PipeWireSource::new(cap.clone()))
             }
         };
+        let ch = match self.stream_params().audio_channels {
+            6 => 6,
+            8 => 8,
+            _ => 2,
+        };
         let audio: Option<Box<dyn AudioSource>> = match self.cfg.audio_source {
             AudioSourceKind::None => None,
-            AudioSourceKind::Sine => Some(Box::new(SineSource::new(48000))),
-            AudioSourceKind::Desktop => match PulseMonitor::new(48000) {
+            AudioSourceKind::Sine => Some(Box::new(SineSource::new(48000, ch as usize))),
+            AudioSourceKind::Desktop => match PulseMonitor::new(48000, ch) {
                 Ok(m) => Some(Box::new(m)),
                 Err(e) => {
                     tracing::warn!("desktop audio capture unavailable: {e:#}");

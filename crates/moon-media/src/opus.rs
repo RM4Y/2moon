@@ -69,11 +69,11 @@ impl StreamLayout {
     }
 
     pub fn surround51() -> Self {
-        Self { channels: 6, streams: 4, coupled: 2, mapping: vec![0, 4, 1, 5, 2, 3] }
+        Self { channels: 6, streams: 4, coupled: 2, mapping: vec![0, 1, 2, 4, 5, 3] }
     }
 
     pub fn surround71() -> Self {
-        Self { channels: 8, streams: 5, coupled: 3, mapping: vec![0, 6, 1, 7, 2, 3, 4, 5] }
+        Self { channels: 8, streams: 5, coupled: 3, mapping: vec![0, 1, 2, 4, 5, 3, 6, 7] }
     }
 
     pub fn for_channels(ch: u32) -> Self {
@@ -205,7 +205,32 @@ mod tests {
     fn layout_sdp() {
         assert_eq!(StreamLayout::stereo().to_sdp(), "21101");
         assert_eq!(StreamLayout::from_sdp("21101"), Some(StreamLayout::stereo()));
-        assert_eq!(StreamLayout::from_sdp("642012453").unwrap().channels, 6);
+        assert_eq!(StreamLayout::from_sdp("642012453"), Some(StreamLayout::surround51()));
+        assert_eq!(StreamLayout::surround71().to_sdp(), "85301245367");
+    }
+
+    #[test]
+    fn surround_roundtrip_keeps_channels_apart() {
+        for layout in [StreamLayout::surround51(), StreamLayout::surround71()] {
+            let ch = layout.channels as usize;
+            let mut enc = OpusEncoder::new(layout.clone(), 48000, 5, 96_000 * ch as i32 / 2, true).unwrap();
+            let mut dec = OpusDecoder::new(layout.clone(), 48000).unwrap();
+            let (mut pkt, mut out) = (Vec::new(), Vec::new());
+            let mut energy = vec![0f64; ch];
+            for f in 0..200 {
+                // Tone only on channel 2 (front centre).
+                let pcm: Vec<i16> = (0..240 * ch).map(|i| if i % ch == 2 { (((f * 240 + i / ch) as f64 / 48000.0 * 880.0 * std::f64::consts::TAU).sin() * 8000.0) as i16 } else { 0 }).collect();
+                enc.encode(&pcm, &mut pkt).unwrap();
+                dec.decode(Some(&pkt), 0, &mut out).unwrap();
+                if f > 20 {
+                    for (i, s) in out.iter().enumerate() {
+                        energy[i % ch] += (*s as f64).powi(2);
+                    }
+                }
+            }
+            let loudest = (0..ch).max_by(|a, b| energy[*a].total_cmp(&energy[*b])).unwrap();
+            assert_eq!(loudest, 2, "{ch}ch energy {energy:?}");
+        }
     }
 
     #[test]

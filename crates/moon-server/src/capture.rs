@@ -67,12 +67,13 @@ fn bounce(t: usize, w: usize, h: usize) -> (usize, usize) {
 }
 
 pub trait AudioSource: Send {
-    /// Read exactly `pcm.len()` interleaved stereo samples (blocks at real-time pace).
+    /// Read exactly `pcm.len()` interleaved samples of `channels()` channels (blocks at real-time pace).
     fn read(&mut self, pcm: &mut [i16]) -> Result<()>;
 }
 
 /// 440 Hz sine tone, paced by the wall clock.
 pub struct SineSource {
+    channels: usize,
     phase: u64,
     start: Instant,
     produced: u64,
@@ -80,18 +81,18 @@ pub struct SineSource {
 }
 
 impl SineSource {
-    pub fn new(rate: u32) -> Self {
-        Self { phase: 0, start: Instant::now(), produced: 0, rate }
+    pub fn new(rate: u32, channels: usize) -> Self {
+        Self { channels: channels.max(1), phase: 0, start: Instant::now(), produced: 0, rate }
     }
 }
 
 impl AudioSource for SineSource {
     fn read(&mut self, pcm: &mut [i16]) -> Result<()> {
-        let frames = pcm.len() / 2;
+        let ch = self.channels;
+        let frames = pcm.len() / ch;
         for f in 0..frames {
             let s = ((self.phase as f64 * 440.0 / self.rate as f64 * std::f64::consts::TAU).sin() * 6000.0) as i16;
-            pcm[f * 2] = s;
-            pcm[f * 2 + 1] = s;
+            pcm[f * ch..f * ch + ch].fill(s);
             self.phase += 1;
         }
         self.produced += frames as u64;
@@ -107,8 +108,8 @@ impl AudioSource for SineSource {
 pub struct PulseMonitor(moon_media::pulse::PulseStream);
 
 impl PulseMonitor {
-    pub fn new(rate: u32) -> Result<Self> {
-        Ok(Self(moon_media::pulse::PulseStream::record(Some("@DEFAULT_MONITOR@"), rate, 2, 5)?))
+    pub fn new(rate: u32, channels: u8) -> Result<Self> {
+        Ok(Self(moon_media::pulse::PulseStream::record(Some("@DEFAULT_MONITOR@"), rate, channels, 5)?))
     }
 }
 

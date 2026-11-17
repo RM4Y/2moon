@@ -27,7 +27,24 @@ struct BufferAttr {
     fragsize: u32,
 }
 
-type New = unsafe extern "C" fn(*const c_char, *const c_char, c_int, *const c_char, *const c_char, *const SampleSpec, *const c_void, *const BufferAttr, *mut c_int) -> *mut c_void;
+#[repr(C)]
+struct ChannelMap {
+    channels: u8,
+    map: [c_int; 32],
+}
+
+/// GameStream channel order: FL FR FC LFE BL BR SL SR (PulseAudio positions).
+fn channel_map(channels: u8) -> Option<ChannelMap> {
+    const ORDER: [c_int; 8] = [1, 2, 3, 7, 5, 6, 10, 11];
+    if channels <= 2 {
+        return None;
+    }
+    let mut m = ChannelMap { channels, map: [0; 32] };
+    m.map[..channels as usize].copy_from_slice(&ORDER[..channels as usize]);
+    Some(m)
+}
+
+type New = unsafe extern "C" fn(*const c_char, *const c_char, c_int, *const c_char, *const c_char, *const SampleSpec, *const ChannelMap, *const BufferAttr, *mut c_int) -> *mut c_void;
 type Io = unsafe extern "C" fn(*mut c_void, *const c_void, usize, *mut c_int) -> c_int;
 type Read = unsafe extern "C" fn(*mut c_void, *mut c_void, usize, *mut c_int) -> c_int;
 type Free = unsafe extern "C" fn(*mut c_void);
@@ -97,8 +114,9 @@ impl PulseStream {
             BufferAttr { maxlength: u32::MAX, tlength: u32::MAX, prebuf: u32::MAX, minreq: u32::MAX, fragsize: latency_bytes }
         };
         let mut err = 0;
+        let map = channel_map(channels);
         let s = unsafe {
-            (a.new)(std::ptr::null(), app.as_ptr(), dir, dev.as_ref().map(|d| d.as_ptr()).unwrap_or(std::ptr::null()), sname.as_ptr(), &spec, std::ptr::null(), &attr, &mut err)
+            (a.new)(std::ptr::null(), app.as_ptr(), dir, dev.as_ref().map(|d| d.as_ptr()).unwrap_or(std::ptr::null()), sname.as_ptr(), &spec, map.as_ref().map(|m| m as *const _).unwrap_or(std::ptr::null()), &attr, &mut err)
         };
         if s.is_null() {
             bail!("pa_simple_new: {}", err_str(a, err));

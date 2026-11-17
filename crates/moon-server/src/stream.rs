@@ -245,14 +245,16 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
 
 fn audio_loop(p: StreamParams, mut src: Box<dyn AudioSource>, sock: UdpSocket, peer: Arc<Peer>, cipher: Option<AudioCipher>, stop: Arc<AtomicBool>, stats: Arc<StreamStats>) -> Result<()> {
     let ms = p.audio_packet_ms.clamp(5, 20);
-    let layout = StreamLayout::stereo();
-    let mut enc = OpusEncoder::new(layout, 48000, ms, 128_000, true)?;
+    let layout = StreamLayout::for_channels(p.audio_channels);
+    let ch = layout.channels as usize;
+    // ~128 kbps per stereo pair
+    let mut enc = OpusEncoder::new(layout, 48000, ms, 64_000 * ch as i32, true)?;
     let mut pk = AudioPacketizer::new(ms);
     let encrypted = cipher.is_some();
     pk.cipher = cipher;
-    let mut pcm = vec![0i16; enc.frame_size * 2];
+    let mut pcm = vec![0i16; enc.frame_size * ch];
     let mut opus = Vec::new();
-    info!("audio: stereo opus {ms} ms packets{}", if encrypted { ", encrypted" } else { "" });
+    info!("audio: {ch}-channel opus {ms} ms packets{}", if encrypted { ", encrypted" } else { "" });
     while !stop.load(Ordering::Relaxed) {
         src.read(&mut pcm)?;
         let Some(dest) = peer.get() else { continue };
