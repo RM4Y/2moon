@@ -35,7 +35,19 @@ moon-server --video test --audio sine      # mire et tonalité de test
 
 Options utiles : `--port` (47989 par défaut ; les autres ports en découlent),
 `--encoder auto|nvenc|software|<encodeur ffmpeg>`, `--output <écran>` (pour `kwin`),
-`--no-input` (n'injecte pas les entrées), `--no-mdns`, `--list-clients`, `--name`.
+`--nvenc-preset p1..p7` (qualité NVENC, `p4` par défaut), `--no-input` (n'injecte pas
+les entrées), `--no-mdns`, `--list-clients`, `--name`.
+
+Les paquets vidéo sont envoyés par un thread de *pacing* qui étale chaque image sur
+60 % de l'intervalle entre images (utile à 120 fps / haut débit, surtout en Wi-Fi).
+
+**Service systemd** (démarre avec la session Plasma, redémarre en cas d'échec) :
+
+```sh
+scripts/install-service.sh --port 57989 --nvenc-preset p7   # arguments passés à moon-server
+systemctl --user status 2moon-server
+journalctl --user -u 2moon-server -f      # stats vidéo toutes les 5 s (fps, débit, IDR)
+```
 
 **Appairage** : quand un client demande à s'appairer, tapez le PIN affiché par le
 client dans la console de l'hôte, ou `curl 'http://127.0.0.1:47989/pin?pin=1234'`.

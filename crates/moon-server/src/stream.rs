@@ -213,6 +213,11 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     frame.csc = Csc::from_mode(p.csc_mode);
     let (mut win_start, mut win_frames, mut win_bytes, mut win_idr) = (Instant::now(), 0u64, 0u64, 0u64);
     let period = Duration::from_secs_f64(1.0 / fps as f64);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(SocketAddr, Vec<Vec<u8>>)>(2);
+    let sender = {
+        let sock = sock.try_clone()?;
+        std::thread::Builder::new().name("video-pacer".into()).spawn(move || pacer(sock, rx, period))?
+    };
     let start = Instant::now();
     let mut next = start;
     let mut index: u32 = 0;
@@ -261,17 +266,48 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
             );
             (win_start, win_frames, win_bytes, win_idr) = (Instant::now(), 0, 0, 0);
         }
-        for pkt in &pkts {
-            stats.bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
-            if let Err(e) = sock.send_to(pkt, dest) {
-                if e.kind() != std::io::ErrorKind::WouldBlock {
-                    debug!("video send: {e}");
+        stats.bytes.fetch_add(pkts.iter().map(|p| p.len() as u64).sum::<u64>(), Ordering::Relaxed);
+        // Hand the frame to the pacing thread (bounded queue: if the network is
+        // slower than the encoder, the encoder waits instead of piling up latency).
+        if tx.send((dest, pkts)).is_err() {
+            break;
+        }
+    }
+    drop(tx);
+    let _ = sender.join();
+    Ok(())
+}
+
+/// Packet pacer: spreads each frame's packets over a fraction of the frame
+/// interval instead of bursting them, which avoids overflowing switch / Wi-Fi /
+/// client socket buffers at high bitrates and frame rates.
+fn pacer(sock: UdpSocket, rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<Vec<u8>>)>, period: Duration) {
+    const BATCH: usize = 8;
+    // Small frames go out at once; larger ones are spread over 60% of the interval.
+    let window = period.mul_f64(0.6);
+    while let Ok((dest, pkts)) = rx.recv() {
+        let n = pkts.len();
+        let start = Instant::now();
+        for (i, chunk) in pkts.chunks(BATCH).enumerate() {
+            for pkt in chunk {
+                if let Err(e) = sock.send_to(pkt, dest) {
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        debug!("video send: {e}");
+                    }
+                }
+            }
+            let sent = ((i + 1) * BATCH).min(n);
+            if n > BATCH * 2 && sent < n {
+                let due = start + window.mul_f64(sent as f64 / n as f64);
+                let now = Instant::now();
+                if due > now + Duration::from_micros(100) {
+                    std::thread::sleep(due - now);
                 }
             }
         }
     }
-    Ok(())
 }
+
 
 fn audio_loop(p: StreamParams, mut src: Box<dyn AudioSource>, sock: UdpSocket, peer: Arc<Peer>, cipher: Option<AudioCipher>, stop: Arc<AtomicBool>, stats: Arc<StreamStats>) -> Result<()> {
     let ms = p.audio_packet_ms.clamp(5, 20);
