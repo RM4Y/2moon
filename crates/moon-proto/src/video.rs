@@ -154,10 +154,15 @@ impl Packetizer {
 
     /// Packetize one encoded frame. `timestamp` is in 90 kHz units.
     pub fn packetize(&mut self, frame_index: u32, timestamp: u32, idr: bool, bitstream: &[u8]) -> Vec<Vec<u8>> {
+        self.packetize_typed(frame_index, timestamp, if idr { FRAME_TYPE_IDR } else { FRAME_TYPE_P }, bitstream)
+    }
+
+    /// Like [`Self::packetize`] with an explicit frame type (`FRAME_TYPE_*`).
+    pub fn packetize_typed(&mut self, frame_index: u32, timestamp: u32, frame_type: u8, bitstream: &[u8]) -> Vec<Vec<u8>> {
         // Prefix the frame header; lastPayloadLen is patched below.
         let mut payload = Vec::with_capacity(FRAME_HEADER_LEN + bitstream.len());
         let lat = self.processing_latency.to_le_bytes();
-        payload.extend_from_slice(&[0x01, lat[0], lat[1], if idr { FRAME_TYPE_IDR } else { FRAME_TYPE_P }, 0, 0, 0, 0]);
+        payload.extend_from_slice(&[0x01, lat[0], lat[1], frame_type, 0, 0, 0, 0]);
         payload.extend_from_slice(bitstream);
         let sp = self.shard_payload;
         let total_data = payload.len().div_ceil(sp);

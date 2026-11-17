@@ -86,6 +86,10 @@ fn handle(host: &Host, req: &Message) -> Message {
             if host.cfg.av1 {
                 sdp.push_str("a=rtpmap:98 AV1/90000\r\n");
             }
+            // Reference frame invalidation (direct NVENC): clients then ask for several references.
+            if host.cfg.rfi && matches!(host.cfg.encoder.as_str(), "auto" | "nvenc") {
+                sdp.push_str("a=x-nv-video[0].refPicInvalidation:1\r\n");
+            }
             // 2moon extension: the client may send its microphone (ignored by other clients).
             if let Some(port) = host.mic_port() {
                 sdp.push_str(&format!("a={}:{port}\r\n", moon_proto::audio::mic::SDP_ATTRIBUTE));

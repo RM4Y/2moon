@@ -12,3 +12,6 @@ tracing = "0.1.44"
 
 [dev-dependencies]
 moon-proto = { path = "../moon-proto" }
+
+[build-dependencies]
+cc = "1"

@@ -46,6 +46,13 @@ L'hôte crée alors un micro virtuel « 2moon Microphone » (PipeWire/PulseAudio
 entrée et le supprime à la fin. Ctrl+Alt+Maj+M coupe/réactive le micro. Les clients
 Moonlight officiels ignorent l'extension. `--no-mic` la désactive sur l'hôte.
 
+**Encodeur** : NVENC est piloté directement (en-tête `nvEncodeAPI.h` de nv-codec-headers,
+licence MIT, dans `crates/moon-media/csrc/`), avec repli sur NVENC via FFmpeg puis sur
+OpenH264. L'accès direct permet l'**invalidation d'images de référence (RFI)** : quand un
+client signale des images perdues, l'hôte envoie une simple image P qui ne s'appuie plus
+dessus, au lieu d'une image clé complète (H.264 et HEVC ; en AV1, NVENC répond par une
+image clé). Les clients Moonlight et 2moon l'utilisent automatiquement.
+
 Les paquets vidéo sont envoyés par un thread de *pacing* qui étale chaque image sur
 60 % de l'intervalle entre images (utile à 120 fps / haut débit, surtout en Wi-Fi).
 

@@ -404,11 +404,13 @@ pub struct EncoderOptions {
     pub csc: crate::frame::Csc,
     /// NVENC preset p1 (fastest) .. p7 (best quality).
     pub preset: String,
+    /// The client uses reference frame invalidation: keep several references.
+    pub rfi: bool,
 }
 
 impl Default for EncoderOptions {
     fn default() -> Self {
-        Self { max_refs: 1, csc: Default::default(), preset: "p4".into() }
+        Self { max_refs: 1, csc: Default::default(), preset: "p4".into(), rfi: false }
     }
 }
 

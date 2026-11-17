@@ -137,10 +137,18 @@ fn handle_message(host: &Host, t: u16, payload: &[u8], injector: &mut Option<Box
             }
             None => debug!("unknown input packet ({} bytes, magic {:02x?})", payload.len(), payload.get(4..8)),
         },
+        msg::INVALIDATE_REF_FRAMES if payload.len() >= 12 => {
+            // { first u32 LE, reserved, last u32 LE, reserved[3] }
+            let first = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+            let last = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+            debug!("client lost frames {first}..={last}: invalidating references");
+            host.invalidate_ref_frames(first, last);
+        }
         msg::REQUEST_IDR_FRAME | msg::INVALIDATE_REF_FRAMES => {
             debug!("client requested an IDR frame");
             host.request_idr();
         }
+        msg::LTR_FRAME_ACK => {}
         msg::PERIODIC_PING | msg::START_A | msg::START_B | msg::LOSS_STATS | msg::FRAME_STATS => {}
         other => debug!("unhandled control message 0x{other:04x} ({} bytes)", payload.len()),
     }

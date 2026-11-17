@@ -13,7 +13,7 @@ use moon_media::frame::{Csc, I420Frame};
 use moon_media::encoder::{Codec, VideoEncoder};
 use moon_media::opus::{OpusEncoder, StreamLayout};
 use moon_proto::audio::{AudioCipher, AudioPacketizer};
-use moon_proto::video::Packetizer;
+use moon_proto::video::{Packetizer, FRAME_TYPE_IDR, FRAME_TYPE_P, FRAME_TYPE_RFI_RECOVERY};
 use tracing::{debug, info, warn};
 
 use crate::capture::{AudioSource, VideoSource};
@@ -82,6 +82,8 @@ impl Peer {
 #[derive(Default)]
 pub struct StreamStats {
     pub frames: AtomicU64,
+    /// Losses recovered by reference frame invalidation (no IDR needed).
+    pub rfi: AtomicU64,
     pub bytes: AtomicU64,
     pub encode_us: AtomicU64,
     pub idr_frames: AtomicU64,
@@ -91,6 +93,8 @@ pub struct StreamStats {
 pub struct StreamHandle {
     pub stop: Arc<AtomicBool>,
     pub idr: Arc<AtomicBool>,
+    /// Frames the client lost, to invalidate as references (RFI).
+    pub invalidate: Arc<Mutex<Option<(u32, u32)>>>,
     pub stats: Arc<StreamStats>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -184,6 +188,7 @@ pub struct LiveStats {
 pub fn start(a: StartArgs) -> Result<StreamHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let idr = Arc::new(AtomicBool::new(true));
+    let invalidate: Arc<Mutex<Option<(u32, u32)>>> = Default::default();
     let stats = Arc::new(StreamStats::default());
     let vpeer = Arc::new(Peer::default());
     let apeer = Arc::new(Peer::default());
@@ -197,9 +202,9 @@ pub fn start(a: StartArgs) -> Result<StreamHandle> {
 
     {
         let sock = a.sockets.video.try_clone()?;
-        let (p, stop, idr, stats, src, live) = (a.params.clone(), stop.clone(), idr.clone(), stats.clone(), a.video, a.live.clone());
+        let (p, stop, idr, stats, src, live, inval) = (a.params.clone(), stop.clone(), idr.clone(), stats.clone(), a.video, a.live.clone(), invalidate.clone());
         threads.push(std::thread::Builder::new().name("video-enc".into()).spawn(move || {
-            if let Err(e) = video_loop(p, src, sock, vpeer, stop, idr, stats, live.clone()) {
+            if let Err(e) = video_loop(p, src, sock, vpeer, stop, idr, inval, stats, live.clone()) {
                 warn!("video pipeline stopped: {e:#}");
             }
         })?);
@@ -215,11 +220,11 @@ pub fn start(a: StartArgs) -> Result<StreamHandle> {
             }
         })?);
     }
-    Ok(StreamHandle { stop, idr, stats, threads })
+    Ok(StreamHandle { stop, idr, invalidate, stats, threads })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, peer: Arc<Peer>, stop: Arc<AtomicBool>, idr: Arc<AtomicBool>, stats: Arc<StreamStats>, live: Arc<Mutex<LiveStats>>) -> Result<()> {
+fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, peer: Arc<Peer>, stop: Arc<AtomicBool>, idr: Arc<AtomicBool>, invalidate: Arc<Mutex<Option<(u32, u32)>>>, stats: Arc<StreamStats>, live: Arc<Mutex<LiveStats>>) -> Result<()> {
     let fps = p.fps.clamp(1, 240);
     let mut enc = VideoEncoder::open(
         &p.encoder,
@@ -228,7 +233,8 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         p.height as usize,
         fps,
         p.bitrate_kbps,
-        &EncoderOptions { max_refs: if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames }, csc: Csc::from_mode(p.csc_mode), preset: p.nvenc_preset.clone() },
+        // maxNumReferenceFrames=0: the client uses RFI and lets us keep several references.
+        &EncoderOptions { max_refs: if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames }, csc: Csc::from_mode(p.csc_mode), preset: p.nvenc_preset.clone(), rfi: p.max_ref_frames == 0 },
     )?;
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
     let mut frame = I420Frame::new(p.width as usize, p.height as usize);
@@ -272,8 +278,20 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         if idr.swap(false, Ordering::Relaxed) {
             enc.request_idr();
         }
+        // Reference frame invalidation: everything from the first lost frame up to
+        // the last one we sent references lost data on the client.
+        let mut frame_type = None;
+        if let Some((first, _last)) = invalidate.lock().unwrap().take() {
+            if (index.wrapping_sub(first) as i32) >= 0 && enc.invalidate(first, index) {
+                debug!("invalidated frames {first}..={index}");
+                frame_type = Some(FRAME_TYPE_RFI_RECOVERY);
+                stats.rfi.fetch_add(1, Ordering::Relaxed);
+            } else {
+                enc.request_idr();
+            }
+        }
         let ts = (start.elapsed().as_micros() * 90 / 1000) as u32;
-        let e = enc.encode(&frame, ts as i64)?;
+        let e = enc.encode(&frame, ts as i64, index.wrapping_add(1))?;
         if e.data.is_empty() {
             continue;
         }
@@ -281,7 +299,8 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         let elapsed = t0.elapsed();
         pk.processing_latency = (elapsed.as_micros() / 100).min(u16::MAX as u128) as u16;
         let is_idr = e.idr;
-        let pkts = pk.packetize(index, ts, is_idr, e.data);
+        let ftype = if is_idr { FRAME_TYPE_IDR } else { frame_type.unwrap_or(FRAME_TYPE_P) };
+        let pkts = pk.packetize_typed(index, ts, ftype, e.data);
         stats.encode_us.fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
         stats.frames.fetch_add(1, Ordering::Relaxed);
         if is_idr {

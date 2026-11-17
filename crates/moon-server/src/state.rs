@@ -64,6 +64,8 @@ pub struct Config {
     /// Codecs the host can encode (filled at startup by probing).
     pub hevc: bool,
     pub av1: bool,
+    /// Reference frame invalidation available (direct NVENC).
+    pub rfi: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -110,6 +112,7 @@ impl Config {
             nvenc_preset: "p4".into(),
             hevc: false,
             av1: false,
+            rfi: false,
         }
     }
 }
@@ -327,12 +330,25 @@ impl Host {
             h.stop();
             let frames = st.frames.load(Ordering::Relaxed);
             tracing::info!(
-                "stream stopped: {frames} frames ({} IDR), {:.1} MB, avg encode {:.2} ms, {} audio packets",
+                "stream stopped: {frames} frames ({} IDR, {} RFI recoveries), {:.1} MB, avg encode {:.2} ms, {} audio packets",
                 st.idr_frames.load(Ordering::Relaxed),
+                st.rfi.load(Ordering::Relaxed),
                 st.bytes.load(Ordering::Relaxed) as f64 / 1e6,
                 if frames > 0 { st.encode_us.load(Ordering::Relaxed) as f64 / frames as f64 / 1000.0 } else { 0.0 },
                 st.audio_packets.load(Ordering::Relaxed)
             );
+        }
+    }
+
+    /// The client lost frames `first..=last` (RFI): invalidate them as references.
+    pub fn invalidate_ref_frames(&self, first: u32, last: u32) {
+        if let Some(h) = self.stream.lock().unwrap().as_ref() {
+            let mut p = h.invalidate.lock().unwrap();
+            // Merge with a pending request: keep the oldest first frame.
+            *p = Some(match *p {
+                Some((f, l)) => (if (first.wrapping_sub(f) as i32) < 0 { first } else { f }, last.max(l)),
+                None => (first, last),
+            });
         }
     }
 

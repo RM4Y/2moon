@@ -2013,6 +2013,7 @@ name = "moon-media"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "cc",
  "libloading 0.9.1",
  "moon-proto",
  "openh264",

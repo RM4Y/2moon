@@ -37,6 +37,9 @@ impl Codec {
 pub enum VideoEncoder {
     Software(H264Encoder),
     Ffmpeg(FfmpegEncoder),
+    /// NVENC driven directly (supports reference frame invalidation).
+    #[cfg(target_os = "linux")]
+    Nvenc(crate::nvenc::NvencEncoder),
 }
 
 impl VideoEncoder {
@@ -50,6 +53,18 @@ impl VideoEncoder {
             other => Some(other),
         };
         let choice = if codec != Codec::H264 && choice == "auto" { "nvenc" } else { choice };
+        // "auto" / "nvenc": NVENC directly first (RFI), FFmpeg's NVENC wrapper as fallback.
+        #[cfg(target_os = "linux")]
+        if matches!(choice, "auto" | "nvenc") {
+            let dpb = if opts.rfi { crate::nvenc::RFI_DPB } else { opts.max_refs.max(1) };
+            match crate::nvenc::NvencEncoder::new(codec, width, height, fps, bitrate_kbps, opts, dpb) {
+                Ok(e) => {
+                    info!("{codec:?} encoding with NVENC (direct{}) {width}x{height}@{fps} {bitrate_kbps} kbps", if e.supports_rfi() { ", RFI" } else { "" });
+                    return Ok(Self::Nvenc(e));
+                }
+                Err(e) => warn!("direct NVENC unavailable ({e:#}); trying FFmpeg"),
+            }
+        }
         if let Some(name) = ff_name {
             match FfmpegEncoder::with_options(name, width, height, fps, bitrate_kbps, opts) {
                 Ok(e) => return Ok(Self::Ffmpeg(e)),
@@ -65,6 +80,17 @@ impl VideoEncoder {
         match self {
             Self::Software(_) => "openh264",
             Self::Ffmpeg(e) => &e.codec_name,
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => &e.codec_name,
+        }
+    }
+
+    /// Stop referencing frames `first..=last`; false if only an IDR can recover.
+    pub fn invalidate(&mut self, first: u32, last: u32) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => e.invalidate(first, last),
+            _ => false,
         }
     }
 
@@ -72,13 +98,19 @@ impl VideoEncoder {
         match self {
             Self::Software(e) => e.request_idr(),
             Self::Ffmpeg(e) => e.request_idr(),
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => e.request_idr(),
         }
     }
 
-    pub fn encode(&mut self, f: &I420Frame, pts90k: i64) -> Result<EncodedFrame<'_>> {
+    /// `index`: the frame number this picture will carry (used to invalidate it later).
+    pub fn encode(&mut self, f: &I420Frame, pts90k: i64, index: u32) -> Result<EncodedFrame<'_>> {
+        let _ = index;
         match self {
             Self::Software(e) => e.encode(f),
             Self::Ffmpeg(e) => e.encode(f, pts90k),
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => e.encode(f, index as u64),
         }
     }
 }
