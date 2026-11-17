@@ -238,12 +238,15 @@ async fn pair(host: &Arc<Host>, q: &HashMap<String, String>, ctx: &Ctx) -> Resul
             None => {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 host.pin_waiters.lock().unwrap().push(tx);
+                host.pending_requests.lock().unwrap().push((name.clone(), ctx.peer.ip().to_string()));
                 info!(
                     "Pairing request from '{name}' ({}). Type the PIN shown on the client in this console, or run: curl 'http://127.0.0.1:{}/pin?pin=XXXX'",
                     ctx.peer.ip(),
                     host.cfg.http_port
                 );
-                tokio::time::timeout(Duration::from_secs(120), rx).await.context("timed out waiting for PIN")??
+                let r = tokio::time::timeout(Duration::from_secs(120), rx).await;
+                host.pending_requests.lock().unwrap().retain(|(n, _)| n != &name);
+                r.context("timed out waiting for PIN")??
             }
         };
         host.pending.lock().unwrap().insert(uid, PendingPair { pairing: ServerPairing::new(&salt, &pin, cert), device_name: name });

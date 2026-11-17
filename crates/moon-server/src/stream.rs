@@ -158,6 +158,27 @@ pub struct StartArgs {
     pub rikeyid: u32,
     pub video: Box<dyn VideoSource>,
     pub audio: Option<Box<dyn AudioSource>>,
+    pub live: Arc<Mutex<LiveStats>>,
+}
+
+/// Snapshot of the running stream, refreshed every second (admin panel).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LiveStats {
+    pub active: bool,
+    pub width: u32,
+    pub height: u32,
+    pub target_fps: u32,
+    pub bitrate_kbps: u32,
+    pub codec: String,
+    pub encoder: String,
+    pub source: String,
+    pub audio_channels: u32,
+    pub fps: f64,
+    pub mbps: f64,
+    pub encode_ms: f64,
+    pub frames: u64,
+    pub idr_frames: u64,
+    pub peer: Option<String>,
 }
 
 pub fn start(a: StartArgs) -> Result<StreamHandle> {
@@ -176,9 +197,9 @@ pub fn start(a: StartArgs) -> Result<StreamHandle> {
 
     {
         let sock = a.sockets.video.try_clone()?;
-        let (p, stop, idr, stats, src) = (a.params.clone(), stop.clone(), idr.clone(), stats.clone(), a.video);
+        let (p, stop, idr, stats, src, live) = (a.params.clone(), stop.clone(), idr.clone(), stats.clone(), a.video, a.live.clone());
         threads.push(std::thread::Builder::new().name("video-enc".into()).spawn(move || {
-            if let Err(e) = video_loop(p, src, sock, vpeer, stop, idr, stats) {
+            if let Err(e) = video_loop(p, src, sock, vpeer, stop, idr, stats, live.clone()) {
                 warn!("video pipeline stopped: {e:#}");
             }
         })?);
@@ -197,7 +218,8 @@ pub fn start(a: StartArgs) -> Result<StreamHandle> {
     Ok(StreamHandle { stop, idr, stats, threads })
 }
 
-fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, peer: Arc<Peer>, stop: Arc<AtomicBool>, idr: Arc<AtomicBool>, stats: Arc<StreamStats>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, peer: Arc<Peer>, stop: Arc<AtomicBool>, idr: Arc<AtomicBool>, stats: Arc<StreamStats>, live: Arc<Mutex<LiveStats>>) -> Result<()> {
     let fps = p.fps.clamp(1, 240);
     let mut enc = VideoEncoder::open(
         &p.encoder,
@@ -211,6 +233,19 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
     let mut frame = I420Frame::new(p.width as usize, p.height as usize);
     frame.csc = Csc::from_mode(p.csc_mode);
+    *live.lock().unwrap() = LiveStats {
+        active: true,
+        width: p.width,
+        height: p.height,
+        target_fps: fps,
+        bitrate_kbps: p.bitrate_kbps,
+        codec: format!("{:?}", Codec::from_format(p.video_format)),
+        encoder: enc.name().to_string(),
+        source: src.name().to_string(),
+        audio_channels: p.audio_channels,
+        ..Default::default()
+    };
+    let mut windows = 0u64;
     let (mut win_start, mut win_frames, mut win_bytes, mut win_idr) = (Instant::now(), 0u64, 0u64, 0u64);
     let period = Duration::from_secs_f64(1.0 / fps as f64);
     let (tx, rx) = std::sync::mpsc::sync_channel::<(SocketAddr, Vec<Vec<u8>>)>(2);
@@ -255,15 +290,25 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         win_frames += 1;
         win_idr += is_idr as u64;
         win_bytes += pkts.iter().map(|p| p.len() as u64).sum::<u64>();
-        if win_start.elapsed() >= Duration::from_secs(5) {
+        if win_start.elapsed() >= Duration::from_secs(1) {
             let secs = win_start.elapsed().as_secs_f64();
-            info!(
+            {
+                let mut l = live.lock().unwrap();
+                l.fps = win_frames as f64 / secs;
+                l.mbps = win_bytes as f64 * 8.0 / secs / 1e6;
+                l.encode_ms = stats.encode_us.load(Ordering::Relaxed) as f64 / stats.frames.load(Ordering::Relaxed).max(1) as f64 / 1000.0;
+                l.frames = stats.frames.load(Ordering::Relaxed);
+                l.idr_frames = stats.idr_frames.load(Ordering::Relaxed);
+                l.peer = Some(dest.to_string());
+            }
+            windows += 1;
+            if windows % 5 == 0 { info!(
                 "video: {:.1} fps, {:.1} Mbit/s, {} IDR, encode avg {:.2} ms",
                 win_frames as f64 / secs,
                 win_bytes as f64 * 8.0 / secs / 1e6,
                 win_idr,
                 stats.encode_us.load(Ordering::Relaxed) as f64 / stats.frames.load(Ordering::Relaxed).max(1) as f64 / 1000.0
-            );
+            ); }
             (win_start, win_frames, win_bytes, win_idr) = (Instant::now(), 0, 0, 0);
         }
         stats.bytes.fetch_add(pkts.iter().map(|p| p.len() as u64).sum::<u64>(), Ordering::Relaxed);
@@ -275,6 +320,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     }
     drop(tx);
     let _ = sender.join();
+    live.lock().unwrap().active = false;
     Ok(())
 }
 

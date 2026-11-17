@@ -133,6 +133,10 @@ pub struct Host {
     sockets: Arc<StreamSockets>,
     pub input_events: AtomicU64,
     pub portal: std::sync::OnceLock<Arc<crate::portal::PortalCapture>>,
+    pub live: Arc<Mutex<crate::stream::LiveStats>>,
+    /// Pairing requests waiting for a PIN: (device name, address).
+    pub pending_requests: Mutex<Vec<(String, String)>>,
+    pub started_at: std::time::Instant,
 }
 
 impl Host {
@@ -165,6 +169,9 @@ impl Host {
             sockets: Arc::new(StreamSockets::bind(cfg_video_port, cfg_audio_port)?),
             input_events: AtomicU64::new(0),
             portal: std::sync::OnceLock::new(),
+            live: Arc::new(Mutex::new(Default::default())),
+            pending_requests: Mutex::new(Vec::new()),
+            started_at: std::time::Instant::now(),
         });
         host.save()?;
         Ok(host)
@@ -200,6 +207,22 @@ impl Host {
     }
 
     /// Deliver a PIN to every pairing request currently waiting for one.
+    /// SHA-256 fingerprint (hex) identifying a paired client.
+    pub fn fingerprint(cert_der: &[u8]) -> String {
+        hex::encode(moon_proto::crypto::sha256(&[cert_der]))
+    }
+
+    pub fn unpair_fingerprint(&self, fp: &str) -> Result<bool> {
+        let cert = self.paired.lock().unwrap().iter().find(|c| Self::fingerprint(&c.cert_der) == fp).map(|c| c.cert_der.clone());
+        match cert {
+            Some(c) => {
+                self.remove_paired(&c)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub fn submit_pin(&self, pin: &str) -> usize {
         let waiters: Vec<_> = self.pin_waiters.lock().unwrap().drain(..).collect();
         let n = waiters.len();
@@ -264,6 +287,7 @@ impl Host {
             rikeyid: session.rikeyid,
             video,
             audio,
+            live: self.live.clone(),
         })?;
         *self.stream.lock().unwrap() = Some(h);
         Ok(())

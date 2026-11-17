@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2moon admin</title>
+<style>
+:root {
+  --bg: #0e1117; --panel: #161b24; --panel2: #1c2230; --border: #2a3242;
+  --text: #e6e9ef; --muted: #8b93a7; --accent: #7aa2ff; --ok: #3ecf8e; --warn: #f0b429; --bad: #ff6b6b;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f4f6fa; --panel: #ffffff; --panel2: #f0f2f7; --border: #dde2ec; --text: #1b2130; --muted: #5d6679; --accent: #3a6cf0; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+header .moon { font-size: 20px; }
+header .spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--panel2); color: var(--muted); }
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.live { color: var(--ok); } .pill.live .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; grid-column: span 12; min-width: 0; }
+@media (min-width: 900px) { .half { grid-column: span 6; } .third { grid-column: span 4; } .two-thirds { grid-column: span 8; } }
+.card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); font-weight: 650; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.stat { background: var(--panel2); border-radius: 10px; padding: 10px 12px; }
+.stat .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--muted); font-size: 12px; }
+canvas { width: 100%; height: 90px; display: block; margin-top: 12px; }
+button { font: inherit; border: 1px solid var(--border); background: var(--panel2); color: var(--text); padding: 7px 14px; border-radius: 8px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .45; cursor: default; }
+input { font: inherit; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; }
+input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.list li:last-child { border-bottom: 0; }
+.list .name { font-weight: 600; } .list .sub { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grow { flex: 1; min-width: 0; }
+.muted { color: var(--muted); }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
+dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; background: var(--panel2); margin-right: 4px; }
+.badge.on { color: var(--ok); } .badge.off { color: var(--muted); text-decoration: line-through; }
+pre#logs { margin: 0; max-height: 340px; overflow: auto; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel2); border-radius: 8px; padding: 10px; white-space: pre-wrap; word-break: break-word; }
+.pin { font-size: 22px; letter-spacing: 8px; text-align: center; max-width: 160px; }
+.highlight { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
+#auth { max-width: 380px; margin: 10vh auto; }
+#auth .card { display: grid; gap: 10px; }
+.err { color: var(--bad); min-height: 1.3em; font-size: 13px; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--border); padding: 9px 16px; border-radius: 10px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <span class="moon">🌗</span><h1>2moon <span class="muted" id="hostname"></span></h1>
+  <span class="pill" id="state-pill"><span class="dot"></span><span id="state-text">…</span></span>
+  <span class="spacer"></span>
+  <button id="logout" class="hidden">Déconnexion</button>
+</header>
+
+<div id="auth" class="hidden">
+  <form class="card" id="auth-form" autocomplete="on">
+    <h2 id="auth-title">Connexion</h2>
+    <p class="muted hidden" id="setup-help">Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (<code>journalctl --user -u 2moon-server</code>).</p>
+    <input id="f-token" class="hidden" placeholder="Jeton de configuration" autocomplete="off">
+    <input id="f-user" placeholder="Identifiant" autocomplete="username" required>
+    <input id="f-pass" type="password" placeholder="Mot de passe" autocomplete="current-password" required>
+    <div class="err" id="auth-err"></div>
+    <button class="primary" type="submit" id="auth-btn">Se connecter</button>
+  </form>
+</div>
+
+<main id="app" class="hidden">
+  <section class="card two-thirds">
+    <h2>Session</h2>
+    <p class="muted" id="session-idle">Aucun client ne streame en ce moment.</p>
+    <div id="session-live" class="hidden">
+      <div class="stats">
+        <div class="stat"><div class="v" id="s-fps">–</div><div class="l">images/s</div></div>
+        <div class="stat"><div class="v" id="s-mbps">–</div><div class="l">Mbit/s envoyés</div></div>
+        <div class="stat"><div class="v" id="s-enc">–</div><div class="l">ms d'encodage</div></div>
+        <div class="stat"><div class="v" id="s-idr">–</div><div class="l">images clés</div></div>
+      </div>
+      <canvas id="chart" aria-label="Débit des 2 dernières minutes"></canvas>
+      <p class="muted" id="s-desc"></p>
+    </div>
+    <div class="row">
+      <button class="danger" id="btn-stop" disabled>Arrêter la session</button>
+      <button id="btn-idr" disabled>Forcer une image clé</button>
+    </div>
+  </section>
+
+  <section class="card third" id="pair-card">
+    <h2>Appairage</h2>
+    <ul class="list" id="pending"></ul>
+    <p class="muted" id="pending-none">Lancez l'appairage depuis Moonlight : la demande apparaîtra ici.</p>
+    <form class="row" id="pin-form">
+      <input class="pin" id="pin" inputmode="numeric" maxlength="4" placeholder="PIN" aria-label="PIN">
+      <button class="primary" type="submit">Valider</button>
+    </form>
+  </section>
+
+  <section class="card half">
+    <h2>Appareils appairés</h2>
+    <ul class="list" id="clients"></ul>
+    <p class="muted hidden" id="clients-none">Aucun appareil appairé.</p>
+  </section>
+
+  <section class="card half">
+    <h2>Hôte</h2>
+    <dl id="host-info"></dl>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">Journal</h2><label class="muted"><input type="checkbox" id="follow" checked style="width:auto"> suivre</label></div>
+    <pre id="logs" style="margin-top:10px"></pre>
+  </section>
+
+  <section class="card half">
+    <h2>Mot de passe</h2>
+    <form class="row" id="pw-form">
+      <input type="password" id="pw-cur" placeholder="Actuel" autocomplete="current-password" style="flex:1;min-width:140px">
+      <input type="password" id="pw-new" placeholder="Nouveau (8+)" autocomplete="new-password" style="flex:1;min-width:140px">
+      <button type="submit">Changer</button>
+    </form>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-2moon": "1" }, body: JSON.stringify(body) };
+  const r = await fetch(path, { credentials: "same-origin", ...opt });
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (r.status === 401 && path !== "/api/login" && path !== "/api/setup" && path !== "/api/password") { showAuth(); throw new Error("non connecté"); }
+  if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
+  return data;
+}
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2500); }
+
+let setupMode = false, timers = [];
+function showAuth(setup) {
+  timers.forEach(clearInterval); timers = [];
+  if (setup !== undefined) setupMode = setup;
+  $("app").classList.add("hidden"); $("logout").classList.add("hidden"); $("auth").classList.remove("hidden");
+  $("auth-title").textContent = setupMode ? "Configuration initiale" : "Connexion";
+  $("auth-btn").textContent = setupMode ? "Créer le compte" : "Se connecter";
+  $("setup-help").classList.toggle("hidden", !setupMode);
+  $("f-token").classList.toggle("hidden", !setupMode);
+  $("f-pass").autocomplete = setupMode ? "new-password" : "current-password";
+}
+
+function showApp() {
+  $("auth").classList.add("hidden"); $("app").classList.remove("hidden"); $("logout").classList.remove("hidden");
+  refresh(); refreshClients(); refreshLogs();
+  timers = [setInterval(refresh, 1000), setInterval(refreshLogs, 2000), setInterval(refreshClients, 10000)];
+}
+
+$("auth-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("auth-err").textContent = "";
+  $("auth-btn").disabled = true;
+  try {
+    if (setupMode) await api("/api/setup", { token: $("f-token").value, user: $("f-user").value, password: $("f-pass").value });
+    else await api("/api/login", { user: $("f-user").value, password: $("f-pass").value });
+    $("f-pass").value = ""; showApp();
+  } catch (err) { $("auth-err").textContent = err.message; }
+  $("auth-btn").disabled = false;
+});
+
+$("logout").addEventListener("click", async () => { try { await api("/api/logout", {}); } catch (_) {} showAuth(false); });
+
+// ---- live status ----
+const history = [];
+function fmtUptime(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + " j " : "") + h + " h " + m + " min"; }
+
+function setInfo(rows) {
+  const dl = $("host-info"); dl.replaceChildren();
+  for (const [k, v] of rows) { dl.append(el("dt", null, k)); const dd = el("dd"); if (v instanceof Node) dd.append(v); else dd.textContent = v; dl.append(dd); }
+}
+
+async function refresh() {
+  let st;
+  try { st = await api("/api/status"); } catch (_) { return; }
+  $("hostname").textContent = "· " + st.hostname;
+  const live = st.live && st.live.active ? st.live : null;
+  $("state-pill").classList.toggle("live", !!live);
+  $("state-text").textContent = live ? "en streaming" : (st.session ? "session ouverte" : "en attente");
+  $("session-idle").classList.toggle("hidden", !!live);
+  $("session-live").classList.toggle("hidden", !live);
+  $("btn-stop").disabled = !st.session; $("btn-idr").disabled = !live;
+  if (live) {
+    $("s-fps").textContent = live.fps.toFixed(1);
+    $("s-mbps").textContent = live.mbps.toFixed(1);
+    $("s-enc").textContent = live.encode_ms.toFixed(2);
+    $("s-idr").textContent = live.idr_frames;
+    $("s-desc").textContent = `${live.width}×${live.height} @ ${live.target_fps} fps · ${live.codec} via ${live.encoder} · débit cible ${(live.bitrate_kbps / 1000).toFixed(0)} Mbit/s · audio ${live.audio_channels} canaux · client ${live.peer || (st.session && st.session.client) || "?"}`;
+    history.push(live.mbps); if (history.length > 120) history.shift();
+    drawChart(live.bitrate_kbps / 1000);
+  } else history.length = 0;
+
+  // pending pairing requests
+  const ul = $("pending"); ul.replaceChildren();
+  for (const p of st.pending) { const li = el("li"); const d = el("div", "grow"); d.append(el("div", "name", p.name), el("div", "sub", p.address)); li.append(el("span", null, "📱"), d); ul.append(li); }
+  $("pending-none").classList.toggle("hidden", st.pending.length > 0);
+  $("pair-card").classList.toggle("highlight", st.pending.length > 0);
+
+  const codecs = el("span");
+  for (const [k, on] of Object.entries(st.codecs)) codecs.append(el("span", "badge " + (on ? "on" : "off"), k.toUpperCase()));
+  setInfo([
+    ["Version", st.version], ["En service depuis", fmtUptime(st.uptime_s)],
+    ["Capture", `${st.video_source} · audio ${st.audio_source}`],
+    ["Encodeur", `${st.encoder} (preset ${st.nvenc_preset})`], ["Codecs", codecs],
+    ["Ports", `HTTP ${st.ports.http} · HTTPS ${st.ports.https} · RTSP ${st.ports.rtsp}`],
+    ["Entrées reçues", String(st.input_events)],
+  ]);
+}
+
+function drawChart(target) {
+  const c = $("chart"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const max = Math.max(target * 1.1, ...history, 1);
+  g.strokeStyle = css.getPropertyValue("--border"); g.setLineDash([4, 4]);
+  const ty = h - (target / max) * (h - 6); g.beginPath(); g.moveTo(0, ty); g.lineTo(w, ty); g.stroke(); g.setLineDash([]);
+  if (history.length < 2) return;
+  const step = w / 119, x0 = w - (history.length - 1) * step;
+  g.beginPath();
+  history.forEach((v, i) => { const x = x0 + i * step, y = h - (v / max) * (h - 6); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.strokeStyle = css.getPropertyValue("--accent"); g.lineWidth = 2; g.stroke();
+  g.lineTo(w, h); g.lineTo(x0, h); g.closePath(); g.globalAlpha = .15; g.fillStyle = css.getPropertyValue("--accent"); g.fill(); g.globalAlpha = 1;
+}
+
+async function refreshClients() {
+  let list; try { list = await api("/api/clients"); } catch (_) { return; }
+  const ul = $("clients"); ul.replaceChildren();
+  for (const c of list) {
+    const li = el("li"), d = el("div", "grow");
+    d.append(el("div", "name", c.name), el("div", "sub", c.fingerprint));
+    const b = el("button", "danger", "Révoquer");
+    b.addEventListener("click", async () => {
+      if (!confirm(`Révoquer « ${c.name} » ? Il devra se réappairer.`)) return;
+      try { await api("/api/clients/unpair", { fingerprint: c.fingerprint }); toast("Appareil révoqué"); refreshClients(); } catch (e) { toast(e.message); }
+    });
+    li.append(d, b); ul.append(li);
+  }
+  $("clients-none").classList.toggle("hidden", list.length > 0);
+}
+
+async function refreshLogs() {
+  if (!$("follow").checked) return;
+  let lines; try { lines = await api("/api/logs?n=300"); } catch (_) { return; }
+  const pre = $("logs"), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+  pre.textContent = lines.map(l => l.replace(/^\S+Z\s+/, (m) => m.slice(11, 19) + " ")).join("\n");
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+$("pin-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try { const r = await api("/api/pin", { pin: $("pin").value.trim() }); toast(r.delivered ? "PIN transmis ✔" : "Aucune demande d'appairage en attente"); $("pin").value = ""; }
+  catch (err) { toast(err.message); }
+});
+$("btn-stop").addEventListener("click", async () => { if (!confirm("Arrêter la session en cours ?")) return; try { await api("/api/session/stop", {}); toast("Session arrêtée"); } catch (e) { toast(e.message); } });
+$("btn-idr").addEventListener("click", async () => { try { await api("/api/session/idr", {}); toast("Image clé demandée"); } catch (e) { toast(e.message); } });
+$("pw-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try { await api("/api/password", { current: $("pw-cur").value, new: $("pw-new").value }); toast("Mot de passe changé"); $("pw-cur").value = $("pw-new").value = ""; }
+  catch (err) { toast(err.message); }
+});
+
+(async () => {
+  try { const s = await api("/api/state"); if (s.logged_in) showApp(); else showAuth(s.setup_required); }
+  catch (e) { showAuth(false); }
+})();
+</script>
+</body>
+</html>

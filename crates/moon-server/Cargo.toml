@@ -19,11 +19,13 @@ libloading = "0.9.1"
 mdns-sd = "0.22.0"
 moon-media = { version = "0.1.0", path = "../moon-media" }
 moon-proto = { version = "0.1.0", path = "../moon-proto" }
+pbkdf2 = "0.12"
 rand = "0.8"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rusty_enet = "0.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
 socket2 = "0.6.5"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }

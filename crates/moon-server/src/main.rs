@@ -1,8 +1,10 @@
+mod admin;
 mod capture;
 mod control;
 mod http;
 mod input;
 mod kwin;
+mod logbuf;
 mod mdns;
 mod pipewire;
 mod portal;
@@ -50,6 +52,12 @@ struct Args {
     /// Output to capture for --video kwin (substring of the output name; empty = first).
     #[arg(long, default_value = "")]
     output: String,
+    /// Admin web panel port (default: base port + 1).
+    #[arg(long)]
+    admin_port: Option<u16>,
+    /// Disable the admin web panel.
+    #[arg(long)]
+    no_admin: bool,
     /// List paired clients and exit.
     #[arg(long)]
     list_clients: bool,
@@ -68,6 +76,7 @@ struct Args {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_writer(|| logbuf::TeeWriter)
         .init();
     let args = Args::parse();
     if args.install_kwin_permission {
@@ -79,7 +88,7 @@ async fn main() -> Result<()> {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
         base.join("2moon-server")
     });
-    let hostname = args.name.unwrap_or_else(|| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into()));
+    let hostname = args.name.unwrap_or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into()));
     let mut cfg = state::Config::with_base_port(args.port, state_dir, hostname);
     cfg.preset_pin = args.pin;
     cfg.video_source = args.video;
@@ -126,6 +135,15 @@ async fn main() -> Result<()> {
             }
         }),
     )?;
+    if !args.no_admin {
+        let admin_host = host.clone();
+        let port = args.admin_port.unwrap_or(args.port + 1);
+        tokio::spawn(async move {
+            if let Err(e) = admin::run(admin_host, port).await {
+                tracing::error!("admin panel: {e:#}");
+            }
+        });
+    }
     let rtsp_host = host.clone();
     tokio::spawn(async move {
         if let Err(e) = rtsp::run(rtsp_host).await {

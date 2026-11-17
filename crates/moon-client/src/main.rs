@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
             c.server_cert = None;
             let pin = pin.unwrap_or_else(|| format!("{:04}", rand::random::<u16>() % 10000));
             println!("Enter PIN {pin} on the host to pair...");
-            let device = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into());
+            let device = std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into());
             c.pair(&pin, &device).await?;
             let info = c.server_info().await?;
             store.upsert(KnownHost {
