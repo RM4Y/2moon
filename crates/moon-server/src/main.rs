@@ -44,6 +44,9 @@ struct Args {
     /// PipeWire node for --video pipewire: numeric id or name substring.
     #[arg(long, default_value = "kwin-screencast")]
     pw_node: String,
+    /// NVENC quality preset: p1 (fastest) to p7 (best quality).
+    #[arg(long, default_value = "p4")]
+    nvenc_preset: String,
     /// Output to capture for --video kwin (substring of the output name; empty = first).
     #[arg(long, default_value = "")]
     output: String,
@@ -82,6 +85,7 @@ async fn main() -> Result<()> {
     cfg.video_source = args.video;
     cfg.audio_source = args.audio;
     cfg.encoder = args.encoder.clone();
+    cfg.nvenc_preset = args.nvenc_preset.clone();
     if cfg.encoder != "software" && cfg.encoder != "openh264" {
         cfg.hevc = moon_media::ffenc::probe("hevc_nvenc").is_ok();
         cfg.av1 = moon_media::ffenc::probe("av1_nvenc").is_ok();

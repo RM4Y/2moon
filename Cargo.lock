@@ -1457,6 +1457,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "if-addrs",
  "libc",
  "libloading 0.9.1",
  "mdns-sd",

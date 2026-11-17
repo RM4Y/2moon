@@ -42,7 +42,7 @@ pub enum VideoEncoder {
 impl VideoEncoder {
     /// `choice`: "auto" (hardware if available), "software", "nvenc", or any FFmpeg encoder name.
     /// HEVC and AV1 always need a hardware encoder.
-    pub fn open(choice: &str, codec: Codec, width: usize, height: usize, fps: u32, bitrate_kbps: u32, max_refs: u32) -> Result<Self> {
+    pub fn open(choice: &str, codec: Codec, width: usize, height: usize, fps: u32, bitrate_kbps: u32, opts: &crate::ffenc::EncoderOptions) -> Result<Self> {
         let ff_name = match choice {
             "software" | "openh264" if codec == Codec::H264 => None,
             "software" | "openh264" => anyhow::bail!("{codec:?} needs a hardware encoder"),
@@ -51,7 +51,7 @@ impl VideoEncoder {
         };
         let choice = if codec != Codec::H264 && choice == "auto" { "nvenc" } else { choice };
         if let Some(name) = ff_name {
-            match FfmpegEncoder::with_refs(name, width, height, fps, bitrate_kbps, max_refs) {
+            match FfmpegEncoder::with_options(name, width, height, fps, bitrate_kbps, opts) {
                 Ok(e) => return Ok(Self::Ffmpeg(e)),
                 Err(e) if choice == "auto" => warn!("hardware encoder unavailable ({e:#}); using software"),
                 Err(e) => return Err(e),

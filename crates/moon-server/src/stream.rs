@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use moon_media::frame::I420Frame;
+use moon_media::ffenc::EncoderOptions;
+use moon_media::frame::{Csc, I420Frame};
 use moon_media::encoder::{Codec, VideoEncoder};
 use moon_media::opus::{OpusEncoder, StreamLayout};
 use moon_proto::audio::{AudioCipher, AudioPacketizer};
@@ -34,6 +35,9 @@ pub struct StreamParams {
     pub encoder: String,
     /// Client's `maxNumReferenceFrames` (0 = unconstrained).
     pub max_ref_frames: u32,
+    /// Client's `encoderCscMode`.
+    pub csc_mode: u32,
+    pub nvenc_preset: String,
 }
 
 impl Default for StreamParams {
@@ -52,6 +56,8 @@ impl Default for StreamParams {
             encryption: 0,
             encoder: "auto".into(),
             max_ref_frames: 1,
+            csc_mode: 0,
+            nvenc_preset: "p4".into(),
         }
     }
 }
@@ -193,9 +199,19 @@ pub fn start(a: StartArgs) -> Result<StreamHandle> {
 
 fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, peer: Arc<Peer>, stop: Arc<AtomicBool>, idr: Arc<AtomicBool>, stats: Arc<StreamStats>) -> Result<()> {
     let fps = p.fps.clamp(1, 240);
-    let mut enc = VideoEncoder::open(&p.encoder, Codec::from_format(p.video_format), p.width as usize, p.height as usize, fps, p.bitrate_kbps, if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames })?;
+    let mut enc = VideoEncoder::open(
+        &p.encoder,
+        Codec::from_format(p.video_format),
+        p.width as usize,
+        p.height as usize,
+        fps,
+        p.bitrate_kbps,
+        &EncoderOptions { max_refs: if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames }, csc: Csc::from_mode(p.csc_mode), preset: p.nvenc_preset.clone() },
+    )?;
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
     let mut frame = I420Frame::new(p.width as usize, p.height as usize);
+    frame.csc = Csc::from_mode(p.csc_mode);
+    let (mut win_start, mut win_frames, mut win_bytes, mut win_idr) = (Instant::now(), 0u64, 0u64, 0u64);
     let period = Duration::from_secs_f64(1.0 / fps as f64);
     let start = Instant::now();
     let mut next = start;
@@ -230,6 +246,20 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         stats.frames.fetch_add(1, Ordering::Relaxed);
         if is_idr {
             stats.idr_frames.fetch_add(1, Ordering::Relaxed);
+        }
+        win_frames += 1;
+        win_idr += is_idr as u64;
+        win_bytes += pkts.iter().map(|p| p.len() as u64).sum::<u64>();
+        if win_start.elapsed() >= Duration::from_secs(5) {
+            let secs = win_start.elapsed().as_secs_f64();
+            info!(
+                "video: {:.1} fps, {:.1} Mbit/s, {} IDR, encode avg {:.2} ms",
+                win_frames as f64 / secs,
+                win_bytes as f64 * 8.0 / secs / 1e6,
+                win_idr,
+                stats.encode_us.load(Ordering::Relaxed) as f64 / stats.frames.load(Ordering::Relaxed).max(1) as f64 / 1000.0
+            );
+            (win_start, win_frames, win_bytes, win_idr) = (Instant::now(), 0, 0, 0);
         }
         for pkt in &pkts {
             stats.bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);

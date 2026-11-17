@@ -185,6 +185,11 @@ impl FfmpegEncoder {
     /// `max_refs`: maximum number of reference frames (clients that shrink the
     /// decoder's picture buffer for latency require 1).
     pub fn with_refs(codec: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32, max_refs: u32) -> Result<Self> {
+        Self::with_options(codec, width, height, fps, bitrate_kbps, &EncoderOptions { max_refs, ..Default::default() })
+    }
+
+    pub fn with_options(codec: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32, o: &EncoderOptions) -> Result<Self> {
+        let max_refs = o.max_refs;
         let a = api()?;
         let layout = probe_frame_layout(a)?;
         unsafe {
@@ -226,12 +231,24 @@ impl FfmpegEncoder {
                 }
             }
             // Codec-specific low-latency tuning (ignored when not applicable).
-            let tuning: &[(&str, &str)] = if codec.contains("nvenc") {
-                &[("preset", "p1"), ("tune", "ull"), ("zerolatency", "1"), ("rc", "cbr"), ("delay", "0"), ("forced-idr", "1"), ("aud", "0")]
+            // Colour signalling (VUI) so decoders use the same matrix/range we convert with.
+            let (cs, prim, trc) = match o.csc.matrix {
+                crate::frame::Matrix::Bt601 => ("smpte170m", "smpte170m", "smpte170m"),
+                crate::frame::Matrix::Bt709 => ("bt709", "bt709", "bt709"),
+                crate::frame::Matrix::Bt2020 => ("bt2020nc", "bt2020", "bt2020-10"),
+            };
+            for (k, v) in [("colorspace", cs), ("color_primaries", prim), ("color_trc", trc), ("color_range", if o.csc.full_range { "pc" } else { "tv" })] {
+                if let Err(e) = set(k, v) {
+                    debug!("{codec}: {e:#}");
+                }
+            }
+            let preset = o.preset.clone();
+            let tuning: Vec<(&str, &str)> = if codec.contains("nvenc") {
+                vec![("preset", preset.as_str()), ("tune", "ull"), ("zerolatency", "1"), ("rc", "cbr"), ("delay", "0"), ("forced-idr", "1"), ("aud", "0")]
             } else if codec.contains("vaapi") {
-                &[("rc_mode", "CBR"), ("async_depth", "1")]
+                vec![("rc_mode", "CBR"), ("async_depth", "1")]
             } else {
-                &[("preset", "ultrafast"), ("tune", "zerolatency")]
+                vec![("preset", "ultrafast"), ("tune", "zerolatency")]
             };
             let fr = format!("{fps}/1");
             let _ = set("framerate", &fr);
@@ -327,6 +344,21 @@ impl Drop for FfmpegEncoder {
                 (a.free_context)(&mut self.ctx);
             }
         }
+    }
+}
+
+/// Quality / colour options for hardware encoders.
+#[derive(Debug, Clone)]
+pub struct EncoderOptions {
+    pub max_refs: u32,
+    pub csc: crate::frame::Csc,
+    /// NVENC preset p1 (fastest) .. p7 (best quality).
+    pub preset: String,
+}
+
+impl Default for EncoderOptions {
+    fn default() -> Self {
+        Self { max_refs: 1, csc: Default::default(), preset: "p4".into() }
     }
 }
 

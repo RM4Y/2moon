@@ -58,6 +58,7 @@ pub struct Config {
     pub video_source: VideoSourceKind,
     pub audio_source: AudioSourceKind,
     pub encoder: String,
+    pub nvenc_preset: String,
     /// Codecs the host can encode (filled at startup by probing).
     pub hevc: bool,
     pub av1: bool,
@@ -103,6 +104,7 @@ impl Config {
             video_source: VideoSourceKind::Test,
             audio_source: AudioSourceKind::Sine,
             encoder: "auto".into(),
+            nvenc_preset: "p4".into(),
             hevc: false,
             av1: false,
         }

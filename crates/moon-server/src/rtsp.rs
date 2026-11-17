@@ -121,6 +121,8 @@ fn handle(host: &Host, req: &Message) -> Message {
                 encryption: num("x-ss-general.encryptionEnabled", 0),
                 encoder: host.cfg.encoder.clone(),
                 max_ref_frames: num("x-nv-video[0].maxNumReferenceFrames", 1),
+                csc_mode: num("x-nv-video[0].encoderCscMode", 0),
+                nvenc_preset: host.cfg.nvenc_preset.clone(),
             };
             if let Some(cb) = a.get("x-ml-video.configuredBitrateKbps").and_then(|v| v.trim().parse::<u32>().ok()) {
                 if cb > 0 {
@@ -130,7 +132,7 @@ fn handle(host: &Host, req: &Message) -> Message {
             // Make sure the dimensions are even (4:2:0 chroma).
             p.width &= !1;
             p.height &= !1;
-            info!("stream requested: {}x{}@{} {} kbps, packet {} B, codec {}, audio {}ch/{}ms, encryption flags {}", p.width, p.height, p.fps, p.bitrate_kbps, p.packet_size, p.video_format, p.audio_channels, p.audio_packet_ms, p.encryption);
+            info!("stream requested: {}x{}@{} {} kbps, packet {} B, codec {}, colour {:?}, audio {}ch/{}ms, encryption flags {}", p.width, p.height, p.fps, p.bitrate_kbps, p.packet_size, p.video_format, moon_media::frame::Csc::from_mode(p.csc_mode), p.audio_channels, p.audio_packet_ms, p.encryption);
             host.set_stream_params(p);
             ok().header("Session", SESSION_ID)
         }

@@ -13,6 +13,7 @@ hex = "0.4.3"
 http-body-util = "0.1.5"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+if-addrs = "0.15.0"
 libc = "0.2.191"
 libloading = "0.9.1"
 mdns-sd = "0.22.0"
