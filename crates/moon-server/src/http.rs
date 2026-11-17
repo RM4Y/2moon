@@ -20,7 +20,6 @@ use moon_proto::xml;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
-use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
 use crate::state::{Host, LaunchSession, PendingPair};
@@ -31,8 +30,8 @@ pub const APP_VERSION: &str = "7.1.431.-1";
 pub const GFE_VERSION: &str = "3.23.0.74";
 
 pub async fn run(host: Arc<Host>) -> Result<()> {
-    let http = TcpListener::bind(("0.0.0.0", host.cfg.http_port)).await.context("bind http")?;
-    let https = TcpListener::bind(("0.0.0.0", host.cfg.https_port)).await.context("bind https")?;
+    let http = crate::state::listen_any(host.cfg.http_port).await.context("bind http")?;
+    let https = crate::state::listen_any(host.cfg.https_port).await.context("bind https")?;
     info!("HTTP on :{}, HTTPS on :{}", host.cfg.http_port, host.cfg.https_port);
     let tls = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config(&host)?));
 

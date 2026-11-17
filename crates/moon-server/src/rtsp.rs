@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use moon_proto::rtsp::{enc, sdp_attributes, Message};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::state::Host;
@@ -14,7 +14,7 @@ use crate::stream::StreamParams;
 const SESSION_ID: &str = "DEADBEEFCAFE";
 
 pub async fn run(host: Arc<Host>) -> Result<()> {
-    let l = TcpListener::bind(("0.0.0.0", host.cfg.rtsp_port)).await?;
+    let l = crate::state::listen_any(host.cfg.rtsp_port).await?;
     info!("RTSP on :{}", host.cfg.rtsp_port);
     loop {
         let (sock, peer) = l.accept().await?;

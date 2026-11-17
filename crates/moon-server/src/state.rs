@@ -323,3 +323,14 @@ fn uuid_v4() -> String {
     let h = hex::encode_upper(b);
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
+
+/// Bind a TCP listener on all IPv4 and IPv6 addresses.
+pub async fn listen_any(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    let sock = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    sock.set_only_v6(false)?;
+    sock.set_reuse_address(true)?;
+    sock.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+    sock.listen(128)?;
+    sock.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(sock.into())
+}

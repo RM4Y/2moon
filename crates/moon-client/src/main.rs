@@ -13,8 +13,9 @@ struct Args {
     /// Directory holding the client identity and known hosts.
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
+    /// Without a command, the graphical interface opens.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -114,7 +115,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let mut store = Store::load(args.state_dir.unwrap_or_else(Store::default_dir))?;
 
-    match args.cmd {
+    let Some(cmd) = args.cmd else {
+        return moon_client::gui::run(store);
+    };
+    match cmd {
         Cmd::Pair { host, pin } => {
             let mut c = client_for(&store, &host);
             c.server_cert = None;

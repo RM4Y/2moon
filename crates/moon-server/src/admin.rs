@@ -28,7 +28,6 @@ use moon_proto::crypto;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::state::Host;
@@ -154,7 +153,7 @@ pub async fn run(host: Arc<Host>, port: u16) -> Result<()> {
         .with_no_client_auth()
         .with_single_cert(vec![CertificateDer::from(host.identity.cert_der.clone())], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(host.identity.key_pkcs8_der())))?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-    let l = TcpListener::bind(("0.0.0.0", port)).await.context("bind admin port")?;
+    let l = crate::state::listen_any(port).await.context("bind admin port")?;
     info!("admin panel on https://<this-host>:{port}/");
     loop {
         let (sock, peer) = l.accept().await?;

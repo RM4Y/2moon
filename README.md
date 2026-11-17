@@ -61,6 +61,19 @@ de texte Unicode selon la disposition clavier de l'hôte, ex. AZERTY).
 
 ## Client (`moon-client`)
 
+**Interface graphique** : lancez simplement `moon-client` (sans argument).
+
+- Accueil : hôtes trouvés sur le réseau (mDNS) et hôtes enregistrés, avec leur état
+  (en ligne, en jeu, hors ligne) ; ajout manuel par adresse.
+- Appairage en un clic : le PIN s'affiche en grand, à saisir sur l'hôte (panneau
+  d'administration 2moon ou interface Sunshine).
+- Applications de l'hôte : Lancer, Reprendre, Quitter.
+- Réglages mémorisés : résolution, fps, débit (avec valeur conseillée), codec, audio
+  2/6/8 canaux, décodage GPU, plein écran, statistiques.
+- Le stream s'affiche dans la même fenêtre (texture GPU) ; Ctrl+Alt+Shift+Q revient à l'accueil.
+
+En ligne de commande :
+
 ```sh
 moon-client discover                       # trouve les hôtes du réseau (mDNS)
 moon-client pair 192.168.1.10              # affiche un PIN à saisir sur l'hôte
