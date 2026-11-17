@@ -84,6 +84,9 @@ pub struct SessionOptions {
     pub mic: bool,
     /// Ask for 4:4:4 chroma when the host and this machine can do it.
     pub yuv444: bool,
+    /// Accept HDR (10-bit) when the host and this machine can do it; shown
+    /// tone-mapped to SDR.
+    pub hdr: bool,
     /// Zero-copy: let GPU-decoded pictures stay on the GPU while this is true
     /// (the sink must handle [`Decoded::Vaapi`] and clear it if it cannot).
     pub zero_copy: Option<Arc<AtomicBool>>,
@@ -143,11 +146,21 @@ impl Session {
             Codec::Hevc => info.codec_support & 0x80000 != 0,
             Codec::Av1 => info.codec_support & 0x200000 != 0,
         };
-        opts.stream.yuv444 = opts.yuv444 && host_444 && moon_media::decoder::supports_444(codec, opts.hw_decode);
+        // HDR (10-bit): HEVC Main10 / AV1 Main10 bits.
+        let host_10bit = match codec {
+            Codec::H264 => false,
+            Codec::Hevc => info.codec_support & 0x200 != 0,
+            Codec::Av1 => info.codec_support & 0x20000 != 0,
+        };
+        opts.stream.hdr = opts.hdr && host_10bit && moon_media::decoder::supports_10bit(codec, opts.hw_decode);
+        if opts.hdr && !opts.stream.hdr {
+            info!("HDR not available ({}); using SDR", if host_10bit { "this computer cannot decode 10-bit" } else { "not offered by the host for this codec" });
+        }
+        opts.stream.yuv444 = !opts.stream.hdr && opts.yuv444 && host_444 && moon_media::decoder::supports_444(codec, opts.hw_decode);
         if opts.yuv444 && !opts.stream.yuv444 {
             info!("4:4:4 not available ({}); using 4:2:0", if host_444 { "this computer cannot decode it" } else { "not offered by the host for this codec" });
         }
-        info!("video codec: {codec:?}{}", if opts.stream.yuv444 { " 4:4:4" } else { "" });
+        info!("video codec: {codec:?}{}", if opts.stream.hdr { " 10-bit HDR" } else if opts.stream.yuv444 { " 4:4:4" } else { "" });
         let s = &opts.stream;
         let lp = LaunchParams { app_id, width: s.width, height: s.height, fps: s.fps, rikey, rikeyid, audio_channels: s.audio_channels };
         let resume = info.current_game != 0 && info.current_game == app_id;
@@ -188,7 +201,7 @@ impl Session {
         if opts.decode {
             let hw = opts.hw_decode;
             // No zero-copy for 4:4:4 (three full-size planes go through the CPU path).
-            let zero_copy = if opts.stream.yuv444 { None } else { opts.zero_copy.clone() };
+            let zero_copy = if opts.stream.yuv444 || opts.stream.hdr { None } else { opts.zero_copy.clone() };
             let yuv444 = opts.stream.yuv444;
             let stats = stats.clone();
             let ctl = ctrl.sender.clone();

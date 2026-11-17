@@ -46,8 +46,20 @@ pub struct FrameSlot {
 impl FrameSlot {
     pub fn put(&self, d: Decoded<'_>) {
         // This window converts on the CPU: zero-copy is never enabled for it.
-        let Decoded::Cpu(f) = d else { return };
-        self.put_cpu(f)
+        match d {
+            Decoded::Cpu(f) => self.put_cpu(f),
+            Decoded::Cpu16(f) => {
+                // HDR10 -> SDR on the CPU (peak: a typical 1000-nit master).
+                let mut p = self.spare.lock().unwrap().take().unwrap_or(Picture { width: 0, height: 0, pixels: Vec::new() });
+                p.width = f.width;
+                p.height = f.height;
+                p.pixels.resize(f.width * f.height, 0);
+                f.to_xrgb_hdr(&mut p.pixels, 1000.0 / moon_media::hdr::SDR_WHITE_NITS);
+                *self.latest.lock().unwrap() = Some(p);
+                let _ = self.proxy.send_event(UserEvent::NewFrame);
+            }
+            _ => {}
+        }
     }
 
     fn put_cpu(&self, f: &I420Frame) {

@@ -20,11 +20,13 @@ use eframe::glow::{self, HasContext};
 use moon_media::decoder::Decoded;
 use moon_media::ffenc::VaapiFrame;
 use moon_media::frame::{Csc, I420Frame};
+use moon_media::hdr::{HdrMetadata, Yuv16Frame};
 use moon_media::nvdec::{CudaFrame, CudaGlTarget};
 use tracing::{info, warn};
 
 enum Pending {
     Cpu(I420Frame),
+    Cpu16(Yuv16Frame),
     Vaapi(VaapiFrame),
     Cuda(CudaFrame),
 }
@@ -38,6 +40,9 @@ struct Exchange {
     pending: Option<Pending>,
     /// A CPU buffer to recycle for the next copy.
     spare: Option<I420Frame>,
+    spare16: Option<Yuv16Frame>,
+    /// HDR content peak relative to SDR white (from the host's HDR metadata).
+    hdr_peak: f32,
     /// Size of the latest frame (0 before the first one).
     size: [usize; 2],
     /// Frames uploaded to the GPU (= frames presented).
@@ -73,8 +78,16 @@ impl VideoView {
         ex.pending = None;
         ex.size = [0, 0];
         ex.presented = 0;
+        ex.hdr_peak = 1000.0 / moon_media::hdr::SDR_WHITE_NITS;
         self.zero_copy.store(zero_copy_allowed(), Ordering::Relaxed);
         ex.generation
+    }
+
+    /// The host's HDR mode message: use its metadata for tone mapping.
+    pub fn set_hdr(&self, metadata: Option<HdrMetadata>) {
+        if let Some(m) = metadata {
+            self.ex.lock().unwrap().hdr_peak = m.peak();
+        }
     }
 
     /// The flag to give the decoder (see `SessionOptions::zero_copy`).
@@ -96,6 +109,17 @@ impl VideoView {
                 buf.copy_from(f);
                 (Pending::Cpu(buf), [f.width, f.height])
             }
+            Decoded::Cpu16(f) => {
+                let mut buf = {
+                    let mut ex = self.ex.lock().unwrap();
+                    if ex.generation != generation {
+                        return;
+                    }
+                    ex.spare16.take().unwrap_or_else(|| Yuv16Frame::new(2, 2))
+                };
+                buf.copy_from(f);
+                (Pending::Cpu16(buf), [f.width, f.height])
+            }
             Decoded::Vaapi(v) => {
                 let size = [v.width, v.height];
                 (Pending::Vaapi(v), size)
@@ -111,8 +135,10 @@ impl VideoView {
         }
         ex.size = size;
         // A frame never shown is skipped: the display is behind.
-        if let Some(Pending::Cpu(old)) = ex.pending.replace(pending) {
-            ex.spare = Some(old);
+        match ex.pending.replace(pending) {
+            Some(Pending::Cpu(old)) => ex.spare = Some(old),
+            Some(Pending::Cpu16(old)) => ex.spare16 = Some(old),
+            _ => {}
         }
     }
 
@@ -151,6 +177,13 @@ impl VideoView {
                 let mut ex = self.ex.lock().unwrap();
                 ex.presented += 1;
                 ex.spare = Some(f);
+            }
+            Some(Pending::Cpu16(f)) => {
+                let peak = self.ex.lock().unwrap().hdr_peak;
+                unsafe { r.upload16(gl, &f, peak) };
+                let mut ex = self.ex.lock().unwrap();
+                ex.presented += 1;
+                ex.spare16 = Some(f);
             }
             Some(Pending::Vaapi(v)) => match unsafe { r.import_vaapi(gl, v) } {
                 Ok(()) => self.ex.lock().unwrap().presented += 1,
@@ -258,11 +291,22 @@ enum Source {
     Nv12 { scale: [f32; 2] },
     /// NV12 copied by CUDA into `tex_cuda`.
     Cuda,
+    /// 10-bit HDR10 planes in `tex16`, tone-mapped to SDR.
+    Hdr { peak: f32 },
 }
 
 struct Renderer {
     i420: Program,
     nv12: Option<Program>,
+    /// HDR10 -> SDR (GL3 / GLES3).
+    hdr: Option<Program>,
+    u_peak: Option<glow::UniformLocation>,
+    u_scale10: Option<glow::UniformLocation>,
+    /// 16-bit planes (or 8-bit on GLES without 16-bit textures).
+    tex16: [glow::Texture; 3],
+    size16: [usize; 2],
+    /// R16 textures are usable (desktop OpenGL).
+    norm16: bool,
     vbo: glow::Buffer,
     vao: Option<glow::VertexArray>,
     a_pos: u32,
@@ -347,7 +391,28 @@ impl Renderer {
         let fs_nv12 = format!(
             "{common}uniform sampler2D u_y;\nuniform sampler2D u_uv;\nvoid main() {{\n  vec2 t = v_uv * u_scale;\n  vec3 yuv = vec3({tex}(u_y, t).r, {tex}(u_uv, t).rg) - u_off;\n  {out_var} = vec4(clamp(u_csc * yuv, 0.0, 1.0), 1.0);\n}}\n"
         );
+        // HDR10 (BT.2020, PQ) -> SDR: same maths as moon_media::hdr::hdr10_to_sdr.
+        let fs_hdr = format!(
+            "{common}uniform sampler2D u_y;\nuniform sampler2D u_u;\nuniform sampler2D u_v;\nuniform float u_peak;\nuniform float u_scale10;\n\
+             float pq(float e) {{ float p = pow(clamp(e, 0.0, 1.0), 1.0 / 78.84375); return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125); }}\n\
+             float tone(float x) {{ if (u_peak <= 1.0 || x <= 0.75) return min(x, 1.0); return 1.0 - 0.25 * exp(-(x - 0.75) / 0.25); }}\n\
+             float srgb(float c) {{ return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }}\n\
+             void main() {{\n  vec2 t = v_uv * u_scale;\n\
+               float y = ({tex}(u_y, t).r * u_scale10 - 64.0) / 876.0;\n\
+               float cb = ({tex}(u_u, t).r * u_scale10 - 512.0) / 896.0;\n\
+               float cr = ({tex}(u_v, t).r * u_scale10 - 512.0) / 896.0;\n\
+               float r = y + 1.4746 * cr; float b = y + 1.8814 * cb; float g = (y - 0.2627 * r - 0.0593 * b) / 0.6780;\n\
+               vec3 l = vec3(pq(r), pq(g), pq(b)) * (10000.0 / 203.0);\n\
+               vec3 s = vec3(dot(vec3(1.660491, -0.587641, -0.072850), l), dot(vec3(-0.124550, 1.132900, -0.008349), l), dot(vec3(-0.018151, -0.100579, 1.118730), l));\n\
+               {out_var} = vec4(srgb(tone(max(s.r, 0.0))), srgb(tone(max(s.g, 0.0))), srgb(tone(max(s.b, 0.0))), 1.0);\n}}\n"
+        );
         let i420 = compile(gl, &vs, &fs_i420, &["u_y", "u_u", "u_v"])?;
+        let hdr = if modern { compile(gl, &vs, &fs_hdr, &["u_y", "u_u", "u_v"]).map_err(|e| warn!("HDR shader: {e}")).ok() } else { None };
+        let (u_peak, u_scale10) = match &hdr {
+            Some(p) => (gl.get_uniform_location(p.program, "u_peak"), gl.get_uniform_location(p.program, "u_scale10")),
+            None => (None, None),
+        };
+        let norm16 = !gl.version().is_embedded;
         // NV12 needs two-channel textures (GL3 / GLES3).
         let nv12 = if modern { compile(gl, &vs, &fs_nv12, &["u_y", "u_uv"]).ok() } else { None };
 
@@ -368,8 +433,9 @@ impl Renderer {
         let tex = [new_texture(gl)?, new_texture(gl)?, new_texture(gl)?];
         let tex_nv12 = [new_texture(gl)?, new_texture(gl)?];
         let tex_cuda = [new_texture(gl)?, new_texture(gl)?];
+        let tex16 = [new_texture(gl)?, new_texture(gl)?, new_texture(gl)?];
         gl.bind_texture(glow::TEXTURE_2D, None);
-        Ok(Self { i420, nv12, vbo, vao, a_pos: 0, tex, tex_nv12, tex_cuda, cuda: None, size: [0, 0], yuv444: false, csc: Csc::default(), source: Source::None, imported: None, modern })
+        Ok(Self { i420, nv12, hdr, u_peak, u_scale10, tex16, size16: [0, 0], norm16, vbo, vao, a_pos: 0, tex, tex_nv12, tex_cuda, cuda: None, size: [0, 0], yuv444: false, csc: Csc::default(), source: Source::None, imported: None, modern })
     }
 
     unsafe fn upload(&mut self, gl: &glow::Context, f: &I420Frame) {
@@ -393,6 +459,44 @@ impl Renderer {
         self.size = [w, h];
         self.csc = f.csc;
         self.source = Source::I420;
+        self.release_imported();
+    }
+
+    /// Upload a 10-bit HDR10 picture (16-bit textures; 8-bit on GLES).
+    unsafe fn upload16(&mut self, gl: &glow::Context, f: &Yuv16Frame, peak: f32) {
+        if self.hdr.is_none() {
+            return;
+        }
+        let (w, h) = (f.width, f.height);
+        let (cw, ch) = (f.chroma_width(), f.chroma_height());
+        let realloc = self.size16 != [w, h];
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, if self.norm16 { 2 } else { 1 });
+        for (t, (data, pw, ph)) in self.tex16.iter().zip([(&f.y, w, h), (&f.u, cw, ch), (&f.v, cw, ch)]) {
+            gl.bind_texture(glow::TEXTURE_2D, Some(*t));
+            let plane = &data[..pw * ph];
+            if self.norm16 {
+                let bytes = std::slice::from_raw_parts(plane.as_ptr() as *const u8, plane.len() * 2);
+                let px = glow::PixelUnpackData::Slice(Some(bytes));
+                if realloc {
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16 as i32, pw as i32, ph as i32, 0, glow::RED, glow::UNSIGNED_SHORT, px);
+                } else {
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, pw as i32, ph as i32, glow::RED, glow::UNSIGNED_SHORT, px);
+                }
+            } else {
+                let bytes: Vec<u8> = plane.iter().map(|v| (v >> 8) as u8).collect();
+                let px = glow::PixelUnpackData::Slice(Some(&bytes));
+                if realloc {
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, pw as i32, ph as i32, 0, glow::RED, glow::UNSIGNED_BYTE, px);
+                } else {
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, pw as i32, ph as i32, glow::RED, glow::UNSIGNED_BYTE, px);
+                }
+            }
+        }
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        self.size16 = [w, h];
+        self.size = [w, h];
+        self.source = Source::Hdr { peak };
         self.release_imported();
     }
 
@@ -505,6 +609,16 @@ impl Renderer {
                 Some(p) => (p, self.tex_cuda.to_vec(), [1.0, 1.0]),
                 None => return,
             },
+            Source::Hdr { peak } => match self.hdr.as_mut() {
+                Some(p) => {
+                    gl.use_program(Some(p.program));
+                    gl.uniform_1_f32(self.u_peak.as_ref(), peak);
+                    // texel -> 10-bit code value: 16-bit MSB-aligned, or 8-bit on GLES
+                    gl.uniform_1_f32(self.u_scale10.as_ref(), if self.norm16 { 65535.0 / 64.0 } else { 255.0 * 4.0 });
+                    (p, self.tex16.to_vec(), [1.0, 1.0])
+                }
+                None => return,
+            },
         };
         gl.disable(glow::BLEND);
         gl.use_program(Some(prog.program));
@@ -545,15 +659,153 @@ impl Renderer {
         self.release_imported();
         self.cuda = None;
         gl.delete_program(self.i420.program);
-        if let Some(p) = &self.nv12 {
+        for p in self.nv12.iter().chain(self.hdr.iter()) {
             gl.delete_program(p.program);
         }
         gl.delete_buffer(self.vbo);
         if let Some(v) = self.vao {
             gl.delete_vertex_array(v);
         }
-        for t in self.tex.into_iter().chain(self.tex_nv12).chain(self.tex_cuda) {
+        for t in self.tex.into_iter().chain(self.tex_nv12).chain(self.tex_cuda).chain(self.tex16) {
             gl.delete_texture(t);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{c_int, c_uint};
+
+    /// Headless OpenGL context on a GPU (EGL device platform); None if unavailable.
+    fn headless_gl() -> Option<(libloading::Library, glow::Context)> {
+        unsafe {
+            let lib = libloading::Library::new("libEGL.so.1").ok()?;
+            let gp: unsafe extern "C" fn(*const c_char) -> *mut c_void = *lib.get(b"eglGetProcAddress\0").ok()?;
+            let f = |n: &[u8]| gp(n.as_ptr() as *const c_char);
+            let query_devices: unsafe extern "C" fn(c_int, *mut *mut c_void, *mut c_int) -> c_uint = std::mem::transmute(f(b"eglQueryDevicesEXT\0").as_ref()?);
+            let platform_display: unsafe extern "C" fn(c_uint, *mut c_void, *const c_int) -> *mut c_void = std::mem::transmute(f(b"eglGetPlatformDisplayEXT\0").as_ref()?);
+            let initialize: unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_uint = *lib.get(b"eglInitialize\0").ok()?;
+            let bind_api: unsafe extern "C" fn(c_uint) -> c_uint = *lib.get(b"eglBindAPI\0").ok()?;
+            let choose: unsafe extern "C" fn(*mut c_void, *const c_int, *mut *mut c_void, c_int, *mut c_int) -> c_uint = *lib.get(b"eglChooseConfig\0").ok()?;
+            let create_ctx: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *const c_int) -> *mut c_void = *lib.get(b"eglCreateContext\0").ok()?;
+            let make_current: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> c_uint = *lib.get(b"eglMakeCurrent\0").ok()?;
+            let mut devs = [std::ptr::null_mut(); 8];
+            let mut n = 0;
+            if query_devices(8, devs.as_mut_ptr(), &mut n) == 0 {
+                return None;
+            }
+            for dev in &devs[..n as usize] {
+                let dpy = platform_display(0x313F, *dev, [0x3038].as_ptr());
+                let (mut ma, mut mi) = (0, 0);
+                if dpy.is_null() || initialize(dpy, &mut ma, &mut mi) == 0 || bind_api(0x30A2) == 0 {
+                    continue;
+                }
+                let attrs = [0x3033, 0x0001, 0x3040, 0x0008, 0x3038];
+                let (mut cfg, mut num) = (std::ptr::null_mut(), 0);
+                if choose(dpy, attrs.as_ptr(), &mut cfg, 1, &mut num) == 0 || num == 0 {
+                    continue;
+                }
+                let ctx = create_ctx(dpy, cfg, std::ptr::null_mut(), [0x3038].as_ptr());
+                if !ctx.is_null() && make_current(dpy, std::ptr::null_mut(), std::ptr::null_mut(), ctx) != 0 {
+                    let gl = glow::Context::from_loader_function_cstr(|s| gp(s.as_ptr()) as *const c_void);
+                    return Some((lib, gl));
+                }
+            }
+            None
+        }
+    }
+
+    /// Draw with `draw` into a w x h RGBA framebuffer and read it back.
+    unsafe fn render(gl: &glow::Context, w: usize, h: usize, draw: impl FnOnce()) -> Vec<[u8; 3]> {
+        let tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+        let fb = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fb));
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
+        gl.viewport(0, 0, w as i32, h as i32);
+        draw();
+        let mut px = vec![0u8; w * h * 4];
+        gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut px)));
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        // GL rows start at the bottom; the shader flips v so row 0 is the top of the picture.
+        let mut rows: Vec<[u8; 3]> = Vec::with_capacity(w * h);
+        for y in (0..h).rev() {
+            for x in 0..w {
+                let o = (y * w + x) * 4;
+                rows.push([px[o], px[o + 1], px[o + 2]]);
+            }
+        }
+        rows
+    }
+
+    /// The real shaders, run on the GPU, agree with the CPU reference conversions.
+    #[test]
+    fn shaders_match_cpu_conversion() {
+        let Some((_egl, gl)) = headless_gl() else {
+            eprintln!("no headless OpenGL context, skipping");
+            return;
+        };
+        let (w, h) = (64usize, 16usize);
+        unsafe {
+            let mut r = Renderer::new(&gl).expect("shaders must compile");
+            // SDR I420: horizontal gradient + colour bands.
+            let mut f = I420Frame::new(w, h);
+            for (i, p) in f.y.iter_mut().enumerate() {
+                *p = (16 + (i % w) * 219 / (w - 1)) as u8;
+            }
+            for (i, (u, v)) in f.u.iter_mut().zip(f.v.iter_mut()).enumerate() {
+                (*u, *v) = ((40 + (i % (w / 2)) * 5) as u8, (200 - (i % (w / 2)) * 4) as u8);
+            }
+            r.upload(&gl, &f);
+            let got = render(&gl, w, h, || r.draw(&gl));
+            let mut cpu = vec![0u32; w * h];
+            f.to_xrgb(&mut cpu);
+            let mut max_err = 0;
+            for (g, c) in got.iter().zip(&cpu) {
+                let c = [(c >> 16) as u8, (c >> 8) as u8, *c as u8];
+                for k in 0..3 {
+                    max_err = max_err.max((g[k] as i32 - c[k] as i32).abs());
+                }
+            }
+            eprintln!("I420 shader vs CPU: max error {max_err}");
+            assert!(max_err <= 3, "I420 shader differs from the CPU conversion ({max_err})");
+
+            // HDR10 -> SDR.
+            if r.hdr.is_some() {
+                let bars: [[u8; 3]; 8] = [[255, 255, 255], [20, 20, 20], [230, 40, 40], [40, 200, 60], [50, 60, 220], [128, 128, 128], [240, 200, 40], [40, 200, 220]];
+                let mut src = vec![0u8; w * h * 4];
+                for (i, px) in src.chunks_exact_mut(4).enumerate() {
+                    let c = bars[(i % w) * 8 / w];
+                    px.copy_from_slice(&[c[2], c[1], c[0], 255]);
+                }
+                let mut p = moon_media::hdr::P010Frame::new(w, h);
+                p.from_rgb32_scaled(&src, w, h, w * 4, false, w, h);
+                let mut f16 = Yuv16Frame::new(1, 1);
+                f16.copy_from_p010(w, h, &p.y, w, &p.uv, w);
+                r.upload16(&gl, &f16, 1.0);
+                let got = render(&gl, w, h, || r.draw(&gl));
+                let mut cpu = vec![0u32; w * h];
+                f16.to_xrgb_hdr(&mut cpu, 1.0);
+                // Away from the bar edges: there the GPU interpolates chroma between two
+                // saturated colours (bilinear filtering) while the CPU reference takes the
+                // nearest sample.
+                let mut max_err = 0;
+                for (i, (g, c)) in got.iter().zip(&cpu).enumerate() {
+                    let x = i % w;
+                    let edge = (x * 8) % w;
+                    if edge < 3 * 8 || edge > w - 3 * 8 {
+                        continue;
+                    }
+                    let c = [(c >> 16) as u8, (c >> 8) as u8, *c as u8];
+                    for k in 0..3 {
+                        max_err = max_err.max((g[k] as i32 - c[k] as i32).abs());
+                    }
+                }
+                eprintln!("HDR shader vs CPU: max error {max_err}");
+                assert!(max_err <= 4, "HDR shader differs from the CPU conversion ({max_err})");
+            }
         }
     }
 }

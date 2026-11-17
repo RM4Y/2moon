@@ -206,7 +206,8 @@ fn server_info(host: &Host, ctx: &Ctx, paired: bool) -> xml::Response {
         .field(
             "ServerCodecModeSupport",
             // H.264, HEVC, AV1 main 8-bit, then the Sunshine 4:4:4 extension bits.
-            0x0001 | if host.cfg.hevc { 0x100 } else { 0 } | if host.cfg.av1 { 0x10000 } else { 0 } | if host.cfg.yuv444_h264 { 0x40000 } else { 0 } | if host.cfg.yuv444_hevc { 0x80000 } else { 0 },
+            0x0001 | if host.cfg.hevc { 0x100 } else { 0 } | if host.cfg.av1 { 0x10000 } else { 0 } | if host.cfg.yuv444_h264 { 0x40000 } else { 0 } | if host.cfg.yuv444_hevc { 0x80000 } else { 0 }
+                | if host.cfg.hdr10_hevc { 0x200 } else { 0 } | if host.cfg.hdr10_av1 { 0x20000 } else { 0 },
         )
         .raw(
             "<SupportedDisplayMode><DisplayMode><Width>1920</Width><Height>1080</Height><RefreshRate>60</RefreshRate></DisplayMode>\

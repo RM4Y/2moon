@@ -2,6 +2,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod ffenc;
 pub mod frame;
+pub mod hdr;
 pub mod nvdec;
 #[cfg(target_os = "linux")]
 pub mod nvenc;

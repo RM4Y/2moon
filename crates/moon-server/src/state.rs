@@ -69,6 +69,9 @@ pub struct Config {
     /// 4:4:4 encoding available for H.264 / HEVC (direct NVENC).
     pub yuv444_h264: bool,
     pub yuv444_hevc: bool,
+    /// 10-bit HDR10 encoding available (direct NVENC).
+    pub hdr10_hevc: bool,
+    pub hdr10_av1: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -118,6 +121,8 @@ impl Config {
             rfi: false,
             yuv444_h264: false,
             yuv444_hevc: false,
+            hdr10_hevc: false,
+            hdr10_av1: false,
         }
     }
 }
@@ -319,6 +324,17 @@ impl Host {
             }
         }
         Ok(())
+    }
+
+    /// The current stream is HDR10 (client asked, and the host can encode it).
+    pub fn hdr_active(&self) -> bool {
+        let p = self.stream_params();
+        p.hdr
+            && match moon_media::encoder::Codec::from_format(p.video_format) {
+                moon_media::encoder::Codec::Hevc => self.cfg.hdr10_hevc,
+                moon_media::encoder::Codec::Av1 => self.cfg.hdr10_av1,
+                moon_media::encoder::Codec::H264 => false,
+            }
     }
 
     /// Whether the client microphone extension is offered (its port).

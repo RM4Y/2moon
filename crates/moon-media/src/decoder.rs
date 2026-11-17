@@ -15,6 +15,8 @@ use crate::nvdec::NvDecoder;
 /// A decoded picture: in system memory, or still on the GPU (zero-copy).
 pub enum Decoded<'a> {
     Cpu(&'a I420Frame),
+    /// 10-bit picture (HDR10 streams).
+    Cpu16(&'a crate::hdr::Yuv16Frame),
     Vaapi(crate::ffenc::VaapiFrame),
     /// NVDEC picture kept in video memory (copy it into GL textures with `CudaGlTarget`).
     Cuda(crate::nvdec::CudaFrame),
@@ -79,6 +81,15 @@ pub fn supported(hardware: bool) -> Vec<Codec> {
         }
     }
     v
+}
+
+/// Can this machine decode `codec` in 10-bit 4:2:0 (HDR10)? NVDEC, VAAPI or the CPU.
+pub fn supports_10bit(codec: Codec, hardware: bool) -> bool {
+    match codec {
+        Codec::H264 => false,
+        Codec::Hevc => (hardware && (NvDecoder::supports_10bit(codec) || crate::vaapi::supports(codec))) || FfmpegDecoder::new(&["hevc"]).is_ok(),
+        Codec::Av1 => (hardware && (NvDecoder::supports_10bit(codec) || crate::vaapi::supports(codec))) || FfmpegDecoder::new(&["libdav1d"]).is_ok(),
+    }
 }
 
 /// Can this machine decode `codec` in 4:4:4? NVDEC (HEVC, recent GPUs) or the
@@ -175,8 +186,11 @@ impl VideoDecoder {
                 }
             }
             let Self::Vaapi(d, _) = self else { unreachable!() };
-            return Ok(Some(match d.take_gpu_picture() {
-                Some(g) => Decoded::Vaapi(g),
+            if let Some(g) = d.take_gpu_picture() {
+                return Ok(Some(Decoded::Vaapi(g)));
+            }
+            return Ok(Some(match d.picture16() {
+                Some(p) => Decoded::Cpu16(p),
                 None => Decoded::Cpu(d.picture()),
             }));
         }
@@ -184,13 +198,23 @@ impl VideoDecoder {
             if d.decode(data)?.is_some() {
                 return Ok(Some(Decoded::Cpu(d.decode_last())));
             }
-            return Ok(d.take_gpu_picture().map(Decoded::Cuda));
+            if let Some(g) = d.take_gpu_picture() {
+                return Ok(Some(Decoded::Cuda(g)));
+            }
+            return Ok(d.take_picture16().map(Decoded::Cpu16));
+        }
+        if let Self::Ffmpeg(d, _) = self {
+            if !d.decode_ready(data)? {
+                return Ok(None);
+            }
+            return Ok(Some(match d.picture16() {
+                Some(p) => Decoded::Cpu16(p),
+                None => Decoded::Cpu(d.picture()),
+            }));
         }
         Ok(match self {
-            Self::Nvdec(_) => unreachable!(),
             Self::OpenH264(d) => d.decode(data)?,
-            Self::Ffmpeg(d, _) => d.decode(data)?,
-            Self::Vaapi(..) => unreachable!(),
+            _ => unreachable!(),
         }
         .map(Decoded::Cpu))
     }

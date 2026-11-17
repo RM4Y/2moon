@@ -28,6 +28,8 @@ pub struct StreamConfig {
     pub rfi: bool,
     /// Ask for 4:4:4 chroma (only when the host advertises it for the codec).
     pub yuv444: bool,
+    /// Ask for HDR (10-bit HDR10; HEVC / AV1 only).
+    pub hdr: bool,
 }
 
 impl Default for StreamConfig {
@@ -46,6 +48,7 @@ impl Default for StreamConfig {
             encryption_requested: 1 | 4,
             rfi: true,
             yuv444: false,
+            hdr: false,
         }
     }
 }
@@ -268,11 +271,12 @@ pub fn announce_sdp(c: &StreamConfig, host: &str, encryption: u32) -> String {
     push("x-nv-video[0].videoEncoderSlicesPerFrame", "1".into());
     push("x-nv-clientSupportHevc", ((c.video_format == 1) as u32).to_string());
     push("x-nv-vqos[0].bitStreamFormat", c.video_format.to_string());
-    push("x-nv-video[0].dynamicRangeMode", "0".into());
+    push("x-nv-video[0].dynamicRangeMode", if c.hdr { "1" } else { "0" }.into());
     // With RFI the encoder may keep several references (0 = its default), so it can
     // recover from a loss with a P-frame; without it, one reference keeps decoders happy.
     push("x-nv-video[0].maxNumReferenceFrames", if c.rfi { "0" } else { "1" }.into());
-    push("x-nv-video[0].encoderCscMode", "0".into());
+    // (colour space << 1) | full range: BT.2020 limited for HDR, BT.601 limited otherwise.
+    push("x-nv-video[0].encoderCscMode", if c.hdr { "4" } else { "0" }.into());
     push("x-ss-video[0].chromaSamplingType", if c.yuv444 { "1" } else { "0" }.into());
     push("x-ss-video[0].intraRefresh", "0".into());
     push("x-nv-audio.surround.numChannels", c.audio_channels.to_string());

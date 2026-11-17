@@ -28,6 +28,7 @@ typedef struct MoonNvencConfig {
     int yuv444;         /* 1: 4:4:4 input and output (H.264 / HEVC) */
     int matrix;         /* 0 BT.601, 1 BT.709, 2 BT.2020 */
     int full_range;
+    int hdr10;          /* 1: 10-bit P010 input, BT.2020 + PQ (HEVC Main10 / AV1 10-bit) */
 } MoonNvencConfig;
 
 typedef struct MoonNvenc {
@@ -39,10 +40,12 @@ typedef struct MoonNvenc {
     NV_ENC_INPUT_PTR input;
     NV_ENC_OUTPUT_PTR output;
     NV_ENC_BUFFER_FORMAT fmt;
-    int width, height, yuv444;
+    int width, height, yuv444, hdr10;
     unsigned char *out;
     size_t out_cap;
 } MoonNvenc;
+
+static int submit(MoonNvenc *e, int pitch, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen);
 
 static void set_err(char *err, int len, const char *fmt, ...) {
     if (!err || len <= 0)
@@ -100,6 +103,12 @@ static void set_vui(NV_ENC_CONFIG_H264_VUI_PARAMETERS *v, const MoonNvencConfig 
     v->videoFullRangeFlag = c->full_range ? 1 : 0;
     v->colourDescriptionPresentFlag = 1;
     colour(c->matrix, &v->colourPrimaries, &v->transferCharacteristics, &v->colourMatrix);
+    if (c->hdr10) {
+        v->videoFullRangeFlag = 0;
+        v->colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT2020;
+        v->transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084;
+        v->colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL;
+    }
 }
 
 MoonNvenc *moon_nvenc_open(const MoonNvencConfig *c, char *err, int errlen) {
@@ -111,6 +120,11 @@ MoonNvenc *moon_nvenc_open(const MoonNvencConfig *c, char *err, int errlen) {
     e->width = c->width;
     e->height = c->height;
     e->yuv444 = c->yuv444;
+    e->hdr10 = c->hdr10;
+    if (c->hdr10 && (c->codec == 0 || c->yuv444)) {
+        set_err(err, errlen, "10-bit HDR needs HEVC or AV1 in 4:2:0");
+        goto fail;
+    }
 
     /* CUDA context */
     e->cuda_lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
@@ -195,14 +209,14 @@ MoonNvenc *moon_nvenc_open(const MoonNvencConfig *c, char *err, int errlen) {
     int chroma = c->yuv444 ? 3 : 1;
     if (c->codec == 1) {
         NV_ENC_CONFIG_HEVC *h = &cfg.encodeCodecConfig.hevcConfig;
-        cfg.profileGUID = c->yuv444 ? NV_ENC_HEVC_PROFILE_FREXT_GUID : NV_ENC_HEVC_PROFILE_MAIN_GUID;
+        cfg.profileGUID = c->yuv444 ? NV_ENC_HEVC_PROFILE_FREXT_GUID : c->hdr10 ? NV_ENC_HEVC_PROFILE_MAIN10_GUID : NV_ENC_HEVC_PROFILE_MAIN_GUID;
         h->idrPeriod = NVENC_INFINITE_GOPLENGTH;
         h->repeatSPSPPS = 1;
         h->chromaFormatIDC = chroma;
         h->maxNumRefFramesInDPB = dpb;
         h->numRefL0 = NV_ENC_NUM_REF_FRAMES_1;
-        h->outputBitDepth = NV_ENC_BIT_DEPTH_8;
-        h->inputBitDepth = NV_ENC_BIT_DEPTH_8;
+        h->outputBitDepth = c->hdr10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+        h->inputBitDepth = c->hdr10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
         set_vui(&h->hevcVUIParameters, c);
     } else if (c->codec == 2) {
         NV_ENC_CONFIG_AV1 *a = &cfg.encodeCodecConfig.av1Config;
@@ -216,10 +230,16 @@ MoonNvenc *moon_nvenc_open(const MoonNvencConfig *c, char *err, int errlen) {
         a->chromaFormatIDC = 1;
         a->maxNumRefFramesInDPB = dpb > 7 ? 7 : dpb; /* 8 slots, one kept for the frame being coded */
         a->numFwdRefs = NV_ENC_NUM_REF_FRAMES_1;
-        a->outputBitDepth = NV_ENC_BIT_DEPTH_8;
-        a->inputBitDepth = NV_ENC_BIT_DEPTH_8;
+        a->outputBitDepth = c->hdr10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+        a->inputBitDepth = c->hdr10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
         colour(c->matrix, &a->colorPrimaries, &a->transferCharacteristics, &a->matrixCoefficients);
         a->colorRange = c->full_range ? 1 : 0;
+        if (c->hdr10) {
+            a->colorPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT2020;
+            a->transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084;
+            a->matrixCoefficients = NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL;
+            a->colorRange = 0;
+        }
     } else {
         NV_ENC_CONFIG_H264 *h = &cfg.encodeCodecConfig.h264Config;
         cfg.profileGUID = c->yuv444 ? NV_ENC_H264_PROFILE_HIGH_444_GUID : NV_ENC_H264_PROFILE_HIGH_GUID;
@@ -250,7 +270,7 @@ MoonNvenc *moon_nvenc_open(const MoonNvencConfig *c, char *err, int errlen) {
         goto fail;
     }
 
-    e->fmt = c->yuv444 ? NV_ENC_BUFFER_FORMAT_YUV444 : NV_ENC_BUFFER_FORMAT_IYUV;
+    e->fmt = c->hdr10 ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT : c->yuv444 ? NV_ENC_BUFFER_FORMAT_YUV444 : NV_ENC_BUFFER_FORMAT_IYUV;
     NV_ENC_CREATE_INPUT_BUFFER ib = {0};
     ib.version = NV_ENC_CREATE_INPUT_BUFFER_VER;
     ib.width = (uint32_t)c->width;
@@ -309,7 +329,38 @@ int moon_nvenc_encode(MoonNvenc *e, const unsigned char *y, const unsigned char 
         }
     }
     e->fn.nvEncUnlockInputBuffer(e->enc, e->input);
+    return submit(e, pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
+}
 
+/* Encode one 10-bit P010 picture (16-bit samples, value in the high bits;
+ * luma then interleaved chroma), strides in samples. */
+int moon_nvenc_encode_p010(MoonNvenc *e, const uint16_t *y, const uint16_t *uv, int ys, int uvs,
+                           uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen) {
+    if (!e->hdr10) {
+        set_err(err, errlen, "encoder not opened for 10-bit input");
+        return -1;
+    }
+    NV_ENC_LOCK_INPUT_BUFFER li = {0};
+    li.version = NV_ENC_LOCK_INPUT_BUFFER_VER;
+    li.inputBuffer = e->input;
+    NVENCSTATUS st = e->fn.nvEncLockInputBuffer(e->enc, &li);
+    if (st != NV_ENC_SUCCESS) {
+        set_err(err, errlen, "nvEncLockInputBuffer failed (%d)", st);
+        return -1;
+    }
+    unsigned char *dst = li.bufferDataPtr;
+    int pitch = (int)li.pitch, w = e->width, h = e->height, ch = (h + 1) / 2, row = ((w + 1) / 2) * 2 * 2;
+    for (int r = 0; r < h; r++)
+        memcpy(dst + (size_t)r * pitch, y + (size_t)r * ys, (size_t)w * 2);
+    for (int r = 0; r < ch; r++)
+        memcpy(dst + (size_t)pitch * h + (size_t)r * pitch, uv + (size_t)r * uvs, (size_t)row);
+    e->fn.nvEncUnlockInputBuffer(e->enc, e->input);
+    return submit(e, pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
+}
+
+static int submit(MoonNvenc *e, int pitch, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen) {
+    int w = e->width, h = e->height;
+    NVENCSTATUS st;
     NV_ENC_PIC_PARAMS pp = {0};
     pp.version = NV_ENC_PIC_PARAMS_VER;
     pp.inputWidth = (uint32_t)w;
@@ -348,7 +399,6 @@ int moon_nvenc_encode(MoonNvenc *e, const unsigned char *y, const unsigned char 
     *out = e->out;
     *out_len = lb.bitstreamSizeInBytes;
     *is_idr = lb.pictureType == NV_ENC_PIC_TYPE_IDR;
-    if (getenv("MOON_NVENC_DEBUG")) fprintf(stderr, "nvenc ts %llu type %d size %u\n", (unsigned long long)ts, (int)lb.pictureType, lb.bitstreamSizeInBytes);
     e->fn.nvEncUnlockBitstream(e->enc, e->output);
     return 0;
 }

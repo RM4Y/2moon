@@ -22,6 +22,7 @@ struct Config {
     yuv444: c_int,
     matrix: c_int,
     full_range: c_int,
+    hdr10: c_int,
 }
 
 extern "C" {
@@ -35,6 +36,21 @@ extern "C" {
         ys: c_int,
         us: c_int,
         vs: c_int,
+        ts: u64,
+        force_idr: c_int,
+        out: *mut *const u8,
+        out_len: *mut u32,
+        is_idr: *mut c_int,
+        err: *mut c_char,
+        errlen: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn moon_nvenc_encode_p010(
+        e: *mut c_void,
+        y: *const u16,
+        uv: *const u16,
+        ys: c_int,
+        uvs: c_int,
         ts: u64,
         force_idr: c_int,
         out: *mut *const u8,
@@ -60,6 +76,8 @@ pub struct NvencEncoder {
     force_idr: bool,
     pub codec_name: String,
     pub yuv444: bool,
+    /// Takes P010 pictures ([`Self::encode_p010`]) and outputs HDR10.
+    pub hdr10: bool,
 }
 
 unsafe impl Send for NvencEncoder {}
@@ -87,6 +105,7 @@ impl NvencEncoder {
                 Matrix::Bt2020 => 2,
             },
             full_range: opts.csc.full_range as c_int,
+            hdr10: opts.hdr10 as c_int,
         };
         let mut err = [0 as c_char; 256];
         let e = unsafe { moon_nvenc_open(&cfg, err.as_mut_ptr(), err.len() as c_int) };
@@ -98,7 +117,7 @@ impl NvencEncoder {
             Codec::Hevc => "hevc",
             Codec::Av1 => "av1",
         });
-        Ok(Self { e, codec, width, height, dpb: dpb.max(1), force_idr: true, codec_name, yuv444: opts.yuv444 })
+        Ok(Self { e, codec, width, height, dpb: dpb.max(1), force_idr: true, codec_name, yuv444: opts.yuv444, hdr10: opts.hdr10 })
     }
 
     pub fn codec(&self) -> Codec {
@@ -123,6 +142,23 @@ impl NvencEncoder {
         let r = unsafe {
             moon_nvenc_encode(self.e, f.y.as_ptr(), f.u.as_ptr(), f.v.as_ptr(), f.width as c_int, cw, cw, ts, self.force_idr as c_int, &mut out, &mut len, &mut idr, err.as_mut_ptr(), err.len() as c_int)
         };
+        if r != 0 {
+            bail!("{}", err_msg(&err));
+        }
+        self.force_idr = false;
+        let data = if out.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(out, len as usize) } };
+        Ok(EncodedFrame { data, idr: idr != 0 })
+    }
+
+    /// Encode a 10-bit HDR10 picture (encoder opened with `hdr10`).
+    pub fn encode_p010(&mut self, f: &crate::hdr::P010Frame, ts: u64) -> Result<EncodedFrame<'_>> {
+        if f.width != self.width || f.height != self.height {
+            bail!("NVENC: frame is {}x{}, encoder is {}x{}", f.width, f.height, self.width, self.height);
+        }
+        let (mut out, mut len, mut idr) = (std::ptr::null(), 0u32, 0);
+        let mut err = [0 as c_char; 256];
+        let uvs = (f.width.div_ceil(2) * 2) as c_int;
+        let r = unsafe { moon_nvenc_encode_p010(self.e, f.y.as_ptr(), f.uv.as_ptr(), f.width as c_int, uvs, ts, self.force_idr as c_int, &mut out, &mut len, &mut idr, err.as_mut_ptr(), err.len() as c_int) };
         if r != 0 {
             bail!("{}", err_msg(&err));
         }
@@ -161,6 +197,11 @@ pub fn available(codec: Codec) -> bool {
     NvencEncoder::new(codec, 640, 360, 30, 2000, &Default::default(), RFI_DPB).is_ok()
 }
 
+/// True if NVENC can encode `codec` (HEVC / AV1) in 10-bit HDR10 here.
+pub fn available_hdr10(codec: Codec) -> bool {
+    codec != Codec::H264 && NvencEncoder::new(codec, 640, 360, 30, 2000, &crate::ffenc::EncoderOptions { hdr10: true, ..Default::default() }, 1).is_ok()
+}
+
 /// True if NVENC can encode `codec` in 4:4:4 here.
 pub fn available_444(codec: Codec) -> bool {
     codec != Codec::Av1 && NvencEncoder::new(codec, 640, 360, 30, 2000, &crate::ffenc::EncoderOptions { yuv444: true, ..Default::default() }, 1).is_ok()
@@ -169,6 +210,55 @@ pub fn available_444(codec: Codec) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HDR10: sRGB -> P010 (BT.2020 PQ) -> NVENC 10-bit -> NVDEC P016 -> back to
+    /// SDR gives the original colours (HEVC and AV1).
+    #[test]
+    fn nvenc_nvdec_hdr10_roundtrip() {
+        if !crate::nvdec::available() {
+            eprintln!("no NVDEC, skipping");
+            return;
+        }
+        let (w, h) = (1280, 720);
+        // Eight vertical colour bars, sRGB (B, G, R, X).
+        let bars: [[u8; 3]; 8] = [[255, 255, 255], [20, 20, 20], [230, 40, 40], [40, 200, 60], [50, 60, 220], [128, 128, 128], [240, 200, 40], [40, 200, 220]];
+        let mut src = vec![0u8; w * h * 4];
+        for (i, px) in src.chunks_exact_mut(4).enumerate() {
+            let c = bars[(i % w) * 8 / w];
+            px.copy_from_slice(&[c[2], c[1], c[0], 255]);
+        }
+        let mut p = crate::hdr::P010Frame::new(w, h);
+        p.from_rgb32_scaled(&src, w, h, w * 4, false, w, h);
+        for codec in [Codec::Hevc, Codec::Av1] {
+            if !available_hdr10(codec) || !crate::nvdec::NvDecoder::supports_10bit(codec) {
+                eprintln!("{codec:?}: no 10-bit here, skipping");
+                continue;
+            }
+            let opts = crate::ffenc::EncoderOptions { hdr10: true, ..Default::default() };
+            let mut enc = NvencEncoder::new(codec, w, h, 60, 20000, &opts, 1).unwrap();
+            let mut dec = crate::nvdec::NvDecoder::new(codec).unwrap();
+            let mut checked = 0;
+            for i in 1..=6u64 {
+                let data = enc.encode_p010(&p, i).unwrap().data.to_vec();
+                assert!(dec.decode(&data).unwrap().is_none(), "{codec:?}: expected a 10-bit picture");
+                if let Some(out) = dec.take_picture16() {
+                    let mut rgb = vec![0u32; w * h];
+                    out.to_xrgb_hdr(&mut rgb, 1.0);
+                    for (b, c) in bars.iter().enumerate() {
+                        let o = rgb[h / 2 * w + b * w / 8 + w / 16];
+                        let got = [(o >> 16) as u8, (o >> 8) as u8, o as u8];
+                        for k in 0..3 {
+                            let (g, e) = (crate::hdr::srgb_to_linear(got[k] as f32 / 255.0), crate::hdr::srgb_to_linear(c[k] as f32 / 255.0));
+                            assert!((g - e).abs() <= 0.02, "{codec:?}: bar {c:?} came back as {got:?}");
+                        }
+                    }
+                    checked += 1;
+                }
+            }
+            eprintln!("{codec:?} HDR10: {checked} pictures back to the original colours");
+            assert!(checked >= 5);
+        }
+    }
 
     /// 4:4:4 HEVC: NVENC -> NVDEC keeps full-resolution chroma (one-pixel colour stripes).
     #[test]

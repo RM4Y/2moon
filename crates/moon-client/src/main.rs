@@ -86,6 +86,9 @@ enum Cmd {
         /// Ask for 4:4:4 chroma (sharper text) if the host and this computer support it.
         #[arg(long)]
         yuv444: bool,
+        /// Accept HDR (10-bit HEVC / AV1), shown tone-mapped to SDR.
+        #[arg(long)]
+        hdr: bool,
     },
 }
 
@@ -172,7 +175,7 @@ async fn main() -> Result<()> {
             }
             let _ = mdns.shutdown();
         }
-        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input, codec, software_decode, mic, yuv444 } => {
+        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input, codec, software_decode, mic, yuv444, hdr } => {
             use moon_media::encoder::Codec;
             let codec = match codec.to_lowercase().as_str() {
                 "auto" => None,
@@ -196,13 +199,19 @@ async fn main() -> Result<()> {
                 },
                 ..StreamConfig::default()
             };
-            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, yuv444, zero_copy: None };
+            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, yuv444, hdr, zero_copy: None };
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();
                 let session = Session::start(&c, opts, Box::new(move |d: moon_client::session::Decoded<'_>, _| {
-                    if let moon_client::session::Decoded::Cpu(p) = d {
-                        f2.lock().unwrap().get_or_insert((p.width, p.height, p.y[p.y.len() / 2] as u32));
+                    match d {
+                        moon_client::session::Decoded::Cpu(p) => {
+                            f2.lock().unwrap().get_or_insert((p.width, p.height, p.y[p.y.len() / 2] as u32));
+                        }
+                        moon_client::session::Decoded::Cpu16(p) => {
+                            f2.lock().unwrap().get_or_insert((p.width, p.height, (p.y[p.y.len() / 2] >> 6) as u32));
+                        }
+                        _ => {}
                     }
                 }))
                 .await?;

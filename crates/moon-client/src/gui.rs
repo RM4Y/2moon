@@ -43,11 +43,13 @@ pub struct Settings {
     pub mic: bool,
     /// 4:4:4 chroma when available (sharper text, more bandwidth).
     pub yuv444: bool,
+    /// Accept HDR (10-bit) streams, tone-mapped to this SDR window.
+    pub hdr: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, yuv444: false }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, yuv444: false, hdr: false }
     }
 }
 
@@ -331,7 +333,7 @@ impl GuiApp {
             },
             ..StreamConfig::default()
         };
-        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, yuv444: s.yuv444, zero_copy: Some(self.video.zero_copy_flag()) };
+        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, yuv444: s.yuv444, hdr: s.hdr, zero_copy: Some(self.video.zero_copy_flag()) };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
         let generation = self.video.reset();
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
@@ -709,6 +711,9 @@ impl GuiApp {
             ui.label("Couleurs");
             ui.checkbox(&mut s.yuv444, "4:4:4 (texte plus net ; plus de débit ; H.264 / HEVC si l'hôte le propose)");
             ui.end_row();
+            ui.label("HDR");
+            ui.checkbox(&mut s.hdr, "Accepter la HDR / 10 bits (HEVC ou AV1 ; moins d'effets d'escalier ; affichée en SDR)");
+            ui.end_row();
             ui.label("Audio");
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut s.audio_channels, 2, "Stéréo");
@@ -754,6 +759,14 @@ impl GuiApp {
         while let Ok(ev) = st.session.control_events.try_recv() {
             match ev {
                 ControlEvent::Terminated(code) => ended = Some(format!("L'hôte a terminé la session (0x{code:08x})")),
+                ControlEvent::Message(0x010e, payload) => {
+                    if let Some((enabled, m)) = moon_media::hdr::HdrMetadata::parse(&payload) {
+                        tracing::info!("host HDR mode: {}", if enabled { "on" } else { "off" });
+                        if enabled {
+                            self.video.set_hdr(m);
+                        }
+                    }
+                }
                 ControlEvent::Disconnected => ended = Some("Connexion à l'hôte perdue".into()),
                 _ => {}
             }

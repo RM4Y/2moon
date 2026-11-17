@@ -4,10 +4,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use moon_media::frame::I420Frame;
+use moon_media::hdr::P010Frame;
 
 pub trait VideoSource: Send {
     /// Fill `out` with the current picture at the requested size.
     fn grab(&mut self, out: &mut I420Frame, width: usize, height: usize) -> Result<()>;
+    /// Same, as 10-bit HDR10 (SDR content with white at 203 nits).
+    fn grab_hdr10(&mut self, out: &mut P010Frame, width: usize, height: usize) -> Result<()>;
     fn name(&self) -> &'static str;
 }
 
@@ -25,6 +28,17 @@ impl TestPattern {
 impl VideoSource for TestPattern {
     fn name(&self) -> &'static str {
         "test-pattern"
+    }
+
+    fn grab_hdr10(&mut self, out: &mut P010Frame, w: usize, h: usize) -> Result<()> {
+        // Same picture as `grab`, rendered to RGB first.
+        let mut f = I420Frame::new(w, h);
+        self.grab(&mut f, w, h)?;
+        let mut rgb = vec![0u32; w * h];
+        f.to_xrgb(&mut rgb);
+        let bytes: Vec<u8> = rgb.iter().flat_map(|p| p.to_le_bytes()).collect();
+        out.from_rgb32_scaled(&bytes, w, h, w * 4, false, w, h);
+        Ok(())
     }
 
     fn grab(&mut self, out: &mut I420Frame, w: usize, h: usize) -> Result<()> {

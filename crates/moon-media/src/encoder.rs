@@ -62,6 +62,11 @@ impl VideoEncoder {
                     info!("{codec:?} encoding with NVENC (direct{}) {width}x{height}@{fps} {bitrate_kbps} kbps", if e.supports_rfi() { ", RFI" } else { "" });
                     return Ok(Self::Nvenc(e));
                 }
+                Err(e) if opts.hdr10 => {
+                    // Only direct NVENC does 10-bit: retry in 8-bit SDR rather than fail.
+                    warn!("10-bit HDR encoding unavailable ({e:#}); using 8-bit SDR");
+                    return Self::open(choice, codec, width, height, fps, bitrate_kbps, &crate::ffenc::EncoderOptions { hdr10: false, ..opts.clone() });
+                }
                 Err(e) if opts.yuv444 => {
                     // Only direct NVENC does 4:4:4: retry in 4:2:0 rather than fail.
                     warn!("4:4:4 encoding unavailable ({e:#}); using 4:2:0");
@@ -70,8 +75,8 @@ impl VideoEncoder {
                 Err(e) => warn!("direct NVENC unavailable ({e:#}); trying FFmpeg"),
             }
         }
-        if opts.yuv444 {
-            return Self::open(choice, codec, width, height, fps, bitrate_kbps, &crate::ffenc::EncoderOptions { yuv444: false, ..opts.clone() });
+        if opts.yuv444 || opts.hdr10 {
+            return Self::open(choice, codec, width, height, fps, bitrate_kbps, &crate::ffenc::EncoderOptions { yuv444: false, hdr10: false, ..opts.clone() });
         }
         if let Some(name) = ff_name {
             match FfmpegEncoder::with_options(name, width, height, fps, bitrate_kbps, opts) {
@@ -99,6 +104,27 @@ impl VideoEncoder {
             #[cfg(target_os = "linux")]
             Self::Nvenc(e) => e.invalidate(first, last),
             _ => false,
+        }
+    }
+
+    /// Whether this encoder takes 10-bit P010 pictures and outputs HDR10.
+    pub fn hdr10(&self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => e.hdr10,
+            _ => false,
+        }
+    }
+
+    /// Encode a 10-bit picture (only when [`Self::hdr10`]).
+    pub fn encode_p010(&mut self, f: &crate::hdr::P010Frame, index: u32) -> Result<EncodedFrame<'_>> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => e.encode_p010(f, index as u64),
+            _ => {
+                let _ = (f, index);
+                anyhow::bail!("this encoder does not take 10-bit pictures")
+            }
         }
     }
 

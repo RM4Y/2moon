@@ -112,9 +112,14 @@ async fn main() -> Result<()> {
         if matches!(cfg.encoder.as_str(), "auto" | "nvenc") {
             cfg.yuv444_h264 = moon_media::nvenc::available_444(moon_media::encoder::Codec::H264);
             cfg.yuv444_hevc = cfg.hevc && moon_media::nvenc::available_444(moon_media::encoder::Codec::Hevc);
+            cfg.hdr10_hevc = cfg.hevc && moon_media::nvenc::available_hdr10(moon_media::encoder::Codec::Hevc);
+            cfg.hdr10_av1 = cfg.av1 && moon_media::nvenc::available_hdr10(moon_media::encoder::Codec::Av1);
         }
     }
     info!("codecs: H.264{}{}{}", if cfg.hevc { ", HEVC" } else { "" }, if cfg.av1 { ", AV1" } else { "" }, if cfg.rfi { " (direct NVENC, reference frame invalidation)" } else { "" });
+    if cfg.hdr10_hevc || cfg.hdr10_av1 {
+        info!("10-bit HDR10: {}{}", if cfg.hdr10_hevc { "HEVC " } else { "" }, if cfg.hdr10_av1 { "AV1" } else { "" });
+    }
     if cfg.yuv444_h264 || cfg.yuv444_hevc {
         info!("4:4:4: {}{}", if cfg.yuv444_h264 { "H.264 " } else { "" }, if cfg.yuv444_hevc { "HEVC" } else { "" });
     }

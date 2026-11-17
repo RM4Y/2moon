@@ -133,6 +133,18 @@ H.264 et HEVC. Client : NVDEC pour le HEVC (GPU Turing ou plus récent), sinon l
 Plus de débit pour la même qualité ; repli automatique en 4:2:0 si l'un des deux côtés
 ne sait pas faire.
 
+## HDR et 10 bits
+
+Option « Accepter la HDR / 10 bits » du client (`moon-client stream --hdr`), en HEVC
+ou AV1. Dans GameStream le 10 bits n'existe qu'en HDR : l'hôte place alors le bureau
+SDR dans un signal HDR10 (primaires BT.2020, courbe PQ, blanc SDR à 203 nits selon
+BT.2408), encodé en 10 bits par NVENC (moins d'effets d'escalier dans les dégradés), et
+envoie les métadonnées HDR au client comme Sunshine. Compatible Moonlight. Le client
+décode le 10 bits (NVDEC, VAAPI ou processeur) et, sa fenêtre étant SDR, reconvertit
+la HDR en SDR dans son shader (hautes lumières compressées au-delà de 75 % du blanc), ce
+qui lui permet aussi de recevoir la HDR d'un hôte Sunshine. Pas de HDR « réelle » tant
+que l'écran capturé par l'hôte n'est pas lui-même en HDR.
+
 ## Affichage sans copie (copie zéro)
 
 Dans l'interface graphique, les images décodées par le GPU ne repassent pas par la
@@ -171,5 +183,6 @@ scripts/e2e.sh                     # 25 vérifications bout en bout client ↔ h
 - HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC). Côté client : NVDEC (NVIDIA),
   VAAPI (Intel/AMD) ou le processeur.
 - Le micro n'existe qu'entre un client et un hôte 2moon.
-- Pas de HDR / 10 bits. Pas de 4:4:4 en AV1 (NVENC ne le propose pas).
+- Pas de 4:4:4 en AV1 (NVENC ne le propose pas) ; pas de HDR combinée au 4:4:4.
+- Le client affiche toujours en SDR (conversion HDR → SDR) : egui/OpenGL ne présente pas de surface HDR.
 - Les caractères absents de la disposition clavier de l'hôte (touches mortes) ne sont pas saisis.

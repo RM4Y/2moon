@@ -132,6 +132,7 @@ fn handle(host: &Host, req: &Message) -> Message {
                 csc_mode: num("x-nv-video[0].encoderCscMode", 0),
                 nvenc_preset: host.cfg.nvenc_preset.clone(),
                 yuv444: num("x-ss-video[0].chromaSamplingType", 0) == 1,
+                hdr: num("x-nv-video[0].dynamicRangeMode", 0) == 1,
             };
             if let Some(cb) = a.get("x-ml-video.configuredBitrateKbps").and_then(|v| v.trim().parse::<u32>().ok()) {
                 if cb > 0 {

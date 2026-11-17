@@ -68,8 +68,14 @@ fn run(host: Arc<Host>, sock: std::net::UdpSocket, make_injector: Box<dyn Fn() -
                     info!("control client connected from {:?} (encryption v{})", enet_host.peer_mut(pid).address(), if v2 { 2 } else { 1 });
                     let id = pid;
                     let mut c = Client { peer: id, cipher: ControlCipher::new(session.rikey, v2, Origin::Host), last_rx: Instant::now(), session_gen: *gen_rx.borrow() };
-                    // Tell the client we stream SDR.
-                    let hdr = c.cipher.seal(msg::HDR_MODE, &[0u8; 27]);
+                    // Tell the client whether the stream is HDR10 (with its metadata).
+                    let hdr_msg = if host.hdr_active() {
+                        info!("stream is HDR10 (SDR desktop with white at 203 nits)");
+                        moon_media::hdr::HdrMetadata::message(true, Some(&moon_media::hdr::HdrMetadata::sdr_in_hdr10()))
+                    } else {
+                        moon_media::hdr::HdrMetadata::message(false, None)
+                    };
+                    let hdr = c.cipher.seal(msg::HDR_MODE, &hdr_msg);
                     let _ = enet_host.peer_mut(id).send(0, &enet::Packet::reliable(hdr.as_slice()));
                     client = Some(c);
                     if injector.is_none() {

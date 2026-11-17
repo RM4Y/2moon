@@ -416,11 +416,13 @@ pub struct EncoderOptions {
     pub rfi: bool,
     /// Encode 4:4:4 (direct NVENC, H.264 / HEVC only).
     pub yuv444: bool,
+    /// Encode 10-bit HDR10 from P010 input (direct NVENC, HEVC / AV1 only).
+    pub hdr10: bool,
 }
 
 impl Default for EncoderOptions {
     fn default() -> Self {
-        Self { max_refs: 1, csc: Default::default(), preset: "p4".into(), rfi: false, yuv444: false }
+        Self { max_refs: 1, csc: Default::default(), preset: "p4".into(), rfi: false, yuv444: false, hdr10: false }
     }
 }
 
@@ -438,6 +440,11 @@ pub struct FfmpegDecoder {
     yuv444p: c_int,
     yuvj444p: c_int,
     nv12: c_int,
+    yuv420p10: c_int,
+    p010: c_int,
+    out16: crate::hdr::Yuv16Frame,
+    /// The last picture is 10-bit (in `out16`).
+    last16: bool,
     /// Hardware device reference (null for software decoding).
     hw_device: *mut c_void,
     /// Pixel format of hardware frames (-1 for software decoding).
@@ -600,6 +607,10 @@ impl FfmpegDecoder {
                 yuvj420p: fmt("yuvj420p"),
                 yuv444p: fmt("yuv444p"),
                 yuvj444p: fmt("yuvj444p"),
+                yuv420p10: fmt("yuv420p10le"),
+                p010: fmt("p010le"),
+                out16: crate::hdr::Yuv16Frame::new(2, 2),
+                last16: false,
                 nv12: fmt("nv12"),
                 va_display: if hw.is_some_and(|(k, _)| k == "vaapi") { vaapi_display(a, hw_device) } else { std::ptr::null_mut() },
                 hw_device,
@@ -618,6 +629,11 @@ impl FfmpegDecoder {
     /// The last decoded picture.
     pub fn picture(&self) -> &I420Frame {
         &self.out
+    }
+
+    /// The last picture if it is 10-bit.
+    pub fn picture16(&self) -> Option<&crate::hdr::Yuv16Frame> {
+        self.last16.then_some(&self.out16)
     }
 
     /// The last picture if it was kept on the GPU (zero-copy), else `None`.
@@ -675,7 +691,22 @@ impl FfmpegDecoder {
                     (std::slice::from_raw_parts(p, ls * rows), ls)
                 };
                 let ch = h.div_ceil(2);
-                if fmt == self.yuv420p || fmt == self.yuvj420p {
+                self.last16 = fmt == self.yuv420p10 || fmt == self.p010;
+                let plane16 = |i: usize, rows: usize| -> (&[u16], usize) {
+                    let p = *((src as *const u8).add(FRAME_DATA + i * 8) as *const *const u16);
+                    let ls = rd_i32(src, FRAME_LINESIZE + i * 4) as usize / 2;
+                    (std::slice::from_raw_parts(p, ls * rows), ls)
+                };
+                if fmt == self.yuv420p10 {
+                    let (y, sy) = plane16(0, h);
+                    let (u, su) = plane16(1, ch);
+                    let (v, sv) = plane16(2, ch);
+                    self.out16.copy_from_planar10(w, h, [y, u, v], [sy, su, sv]);
+                } else if fmt == self.p010 {
+                    let (y, sy) = plane16(0, h);
+                    let (uv, suv) = plane16(1, ch);
+                    self.out16.copy_from_p010(w, h, y, sy, uv, suv);
+                } else if fmt == self.yuv420p || fmt == self.yuvj420p {
                     let (y, sy) = plane(0, h);
                     let (u, su) = plane(1, ch);
                     let (v, sv) = plane(2, ch);

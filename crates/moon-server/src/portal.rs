@@ -116,6 +116,22 @@ impl VideoSource for PipeWireSource {
         "pipewire-portal"
     }
 
+    fn grab_hdr10(&mut self, out: &mut moon_media::hdr::P010Frame, w: usize, h: usize) -> Result<()> {
+        let have_previous = out.width == w && out.height == h && self.filled;
+        let wait = if have_previous { Duration::ZERO } else { Duration::from_millis(100) };
+        let mut pw = self.cap.pw.lock().unwrap();
+        let got = pw.with_frame(wait, |c| {
+            let rgb = matches!(c.format.format, SPA_VIDEO_FORMAT_RGBX | SPA_VIDEO_FORMAT_RGBA);
+            out.from_rgb32_scaled(&c.data, c.format.width as usize, c.format.height as usize, c.stride, rgb, w, h);
+        });
+        if got.is_some() {
+            self.filled = true;
+        } else if out.width != w || out.height != h {
+            *out = moon_media::hdr::P010Frame::new(w, h);
+        }
+        Ok(())
+    }
+
     fn grab(&mut self, out: &mut I420Frame, w: usize, h: usize) -> Result<()> {
         let have_previous = out.width == w && out.height == h && self.filled;
         // The compositor only sends frames when the screen changes: never stall the

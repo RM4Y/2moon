@@ -263,6 +263,12 @@ struct Inner {
     surface_height: usize,
     /// Stream is 4:4:4 (three full-size planes) rather than NV12.
     yuv444: bool,
+    /// 10-bit stream (P016 output, 4:2:0 only).
+    bit10: bool,
+    out16: crate::hdr::Yuv16Frame,
+    /// The last picture is in `out16`.
+    ready16: bool,
+    p016: Vec<u16>,
     surfaces: u32,
     out: I420Frame,
     ready: bool,
@@ -317,13 +323,13 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     let depth: u8 = get(fmt, 13);
     let min_surfaces: u8 = get(fmt, 15);
     let (w, h) = ((r - l).max(2) as usize, (b - t).max(2) as usize);
-    if depth != 0 || (chroma != 1 && chroma != 3) {
+    if !(depth == 0 && (chroma == 1 || chroma == 3)) && !(depth == 2 && chroma == 1) {
         s.error = Some(format!("unsupported stream (bit depth {}, chroma format {chroma})", depth + 8));
         return 0;
     }
     let surfaces = (min_surfaces as u32).max(4) + 2;
     if !s.decoder.is_null() {
-        if s.width == w && s.height == h && s.yuv444 == (chroma == 3) {
+        if s.width == w && s.height == h && s.yuv444 == (chroma == 3) && s.bit10 == (depth == 2) {
             return surfaces as c_int;
         }
         (a.destroy_decoder)(s.decoder);
@@ -337,14 +343,14 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     put::<c_int>(&mut ci, 24, cuvid_codec(s.codec)); // CodecType
     put::<c_int>(&mut ci, 28, chroma); // ChromaFormat 4:2:0 / 4:4:4
     put::<u64>(&mut ci, 32, 4); // ulCreationFlags = PreferCUVID
-    put::<u64>(&mut ci, 40, 0); // bitDepthMinus8
+    put::<u64>(&mut ci, 40, depth as u64); // bitDepthMinus8
     put::<u64>(&mut ci, 56, coded_w as u64); // ulMaxWidth
     put::<u64>(&mut ci, 64, coded_h as u64); // ulMaxHeight
     put::<i16>(&mut ci, 80, l as i16); // display_area
     put::<i16>(&mut ci, 82, t as i16);
     put::<i16>(&mut ci, 84, r as i16);
     put::<i16>(&mut ci, 86, b as i16);
-    put::<c_int>(&mut ci, 88, if chroma == 3 { 2 } else { 0 }); // OutputFormat NV12 / YUV444
+    put::<c_int>(&mut ci, 88, if chroma == 3 { 2 } else if depth == 2 { 1 } else { 0 }); // OutputFormat NV12 / P016 / YUV444
     put::<c_int>(&mut ci, 92, 0); // DeinterlaceMode weave
     put::<u64>(&mut ci, 96, w as u64); // ulTargetWidth
     put::<u64>(&mut ci, 104, h as u64); // ulTargetHeight
@@ -359,6 +365,7 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     s.height = h;
     s.surface_height = h;
     s.yuv444 = chroma == 3;
+    s.bit10 = depth == 2;
     s.surfaces = surfaces;
     info!("NVDEC {:?} decoder {w}x{h} ({surfaces} surfaces)", s.codec);
     surfaces as c_int
@@ -398,6 +405,27 @@ unsafe extern "C" fn on_display(user: *mut c_void, info: *mut c_void) -> c_int {
     let (w, h) = (s.width, s.height);
     let chroma_src = dptr + pitch as u64 * ((s.surface_height as u64 + 1) & !1);
     s.gpu_out = None;
+    s.ready16 = false;
+    if s.bit10 {
+        // P016: 16-bit luma rows, then 16-bit interleaved chroma rows (no zero-copy).
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let (ys, uvs) = (w, cw * 2);
+        let mut buf = std::mem::take(&mut s.p016);
+        buf.resize(ys * h + uvs * ch, 0);
+        let ok = memcpy2d(a, dptr, pitch as usize, 1, buf.as_mut_ptr() as u64, ys * 2, w * 2, h) == 0
+            && memcpy2d(a, chroma_src, pitch as usize, 1, buf.as_mut_ptr().add(ys * h) as u64, uvs * 2, uvs * 2, ch) == 0;
+        (a.unmap_frame)(s.decoder, dptr);
+        if !ok {
+            s.p016 = buf;
+            s.error = Some("cuMemcpy2D failed".into());
+            return 0;
+        }
+        s.out16.copy_from_p010(w, h, &buf[..ys * h], ys, &buf[ys * h..], uvs);
+        s.p016 = buf;
+        s.ready = true;
+        s.ready16 = true;
+        return 1;
+    }
     if s.yuv444 {
         // Three full-size planes, one after the other (no zero-copy for 4:4:4).
         if s.out.width != w || s.out.height != h || !s.out.yuv444 {
@@ -495,6 +523,10 @@ impl NvDecoder {
                 height: 0,
                 surface_height: 0,
                 yuv444: false,
+                bit10: false,
+                out16: crate::hdr::Yuv16Frame::new(2, 2),
+                ready16: false,
+                p016: Vec::new(),
                 surfaces: 0,
                 out: I420Frame::new(2, 2),
                 ready: false,
@@ -549,7 +581,7 @@ impl NvDecoder {
         if let Some(e) = self.inner.error.take() {
             bail!("{e}");
         }
-        Ok(if self.inner.ready && self.inner.gpu_out.is_none() { Some(&self.inner.out) } else { None })
+        Ok(if self.inner.ready && self.inner.gpu_out.is_none() && !self.inner.ready16 { Some(&self.inner.out) } else { None })
     }
 
     /// Keep decoded pictures on the GPU ([`Self::take_gpu_picture`]) while `flag` is true.
@@ -560,6 +592,21 @@ impl NvDecoder {
     /// The picture from the last [`Self::decode`] if it stayed on the GPU.
     pub fn take_gpu_picture(&mut self) -> Option<CudaFrame> {
         self.inner.gpu_out.take()
+    }
+
+    /// The 10-bit picture of the last decode, if the stream is 10-bit.
+    pub fn take_picture16(&mut self) -> Option<&crate::hdr::Yuv16Frame> {
+        if self.inner.ready && self.inner.ready16 {
+            self.inner.ready16 = false;
+            Some(&self.inner.out16)
+        } else {
+            None
+        }
+    }
+
+    /// True if this GPU decodes `codec` in 10-bit 4:2:0.
+    pub fn supports_10bit(codec: Codec) -> bool {
+        supports_caps(codec, 1, 2)
     }
 
     /// The CPU picture of the last decode (after [`Self::decode`] returned one).
@@ -602,13 +649,28 @@ pub fn supports_444(codec: Codec) -> bool {
 }
 
 fn probe_444(codec: Codec) -> bool {
+    probe_caps(codec, 3, 0)
+}
+
+/// Cached decoder capability query: `chroma` (1 = 4:2:0, 3 = 4:4:4), `depth_minus8`.
+fn supports_caps(codec: Codec, chroma: c_int, depth_minus8: c_uint) -> bool {
+    static CACHE: std::sync::Mutex<Vec<(Codec, c_int, c_uint, bool)>> = std::sync::Mutex::new(Vec::new());
+    if let Some(&(.., r)) = CACHE.lock().unwrap().iter().find(|(c, ch, d, _)| *c == codec && *ch == chroma && *d == depth_minus8) {
+        return r;
+    }
+    let r = probe_caps(codec, chroma, depth_minus8);
+    CACHE.lock().unwrap().push((codec, chroma, depth_minus8, r));
+    r
+}
+
+fn probe_caps(codec: Codec, chroma: c_int, depth_minus8: c_uint) -> bool {
     let Ok(d) = NvDecoder::new(codec) else { return false };
     with_ctx(&d.ctx, |a| unsafe {
         // CUVIDDECODECAPS (88 bytes): codec, chroma format, bit depth - 8, ..., bIsSupported at 24.
         let mut caps = [0u8; 128];
         put::<c_int>(&mut caps, 0, cuvid_codec(codec));
-        put::<c_int>(&mut caps, 4, 3);
-        put::<c_uint>(&mut caps, 8, 0);
+        put::<c_int>(&mut caps, 4, chroma);
+        put::<c_uint>(&mut caps, 8, depth_minus8);
         (a.get_decoder_caps)(caps.as_mut_ptr()) == 0 && caps[24] != 0
     })
     .unwrap_or(false)
