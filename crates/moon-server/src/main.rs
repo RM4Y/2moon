@@ -9,6 +9,7 @@ mod portal;
 mod rtsp;
 mod state;
 mod stream;
+mod text;
 
 use std::path::PathBuf;
 

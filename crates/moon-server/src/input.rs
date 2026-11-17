@@ -47,6 +47,7 @@ pub struct UinputInjector {
     pads: HashMap<u16, (VirtualDevice, Gamepad)>,
     held_keys: Vec<u16>,
     held_buttons: Vec<u16>,
+    typer: Option<crate::text::TextTyper>,
 }
 
 fn ev(t: u16, c: u16, v: i32) -> InputEvent {
@@ -96,7 +97,15 @@ impl UinputInjector {
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs))?
             .build()?;
         info!("uinput devices created (keyboard, mouse, absolute pointer)");
-        Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), held_keys: vec![], held_buttons: vec![] })
+        let (layout, variant) = crate::text::detect_layout();
+        let typer = match crate::text::TextTyper::new(&layout, &variant) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                warn!("text input disabled: {e:#}");
+                None
+            }
+        };
+        Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), held_keys: vec![], held_buttons: vec![], typer })
     }
 
     fn gamepad(index: u16) -> Result<VirtualDevice> {
@@ -251,7 +260,21 @@ impl Injector for UinputInjector {
                 }
                 emit(&mut self.mouse, &evs);
             }
-            Event::Text(t) => debug!("unicode text input not supported by uinput backend: {t:?}"),
+            Event::Text(t) => {
+                let Some(typer) = &self.typer else { return };
+                for c in t.chars() {
+                    let Some(st) = typer.stroke(c) else {
+                        debug!("character {c:?} not reachable on layout {}", typer.layout);
+                        continue;
+                    };
+                    let mut evs: Vec<InputEvent> = st.mods.iter().map(|m| ev(EV_KEY, *m, 1)).collect();
+                    evs.push(ev(EV_KEY, st.key, 1));
+                    emit(&mut self.keyboard, &evs);
+                    let mut evs = vec![ev(EV_KEY, st.key, 0)];
+                    evs.extend(st.mods.iter().rev().map(|m| ev(EV_KEY, *m, 0)));
+                    emit(&mut self.keyboard, &evs);
+                }
+            }
             Event::Gamepad(g) => self.pad_event(g),
         }
     }
