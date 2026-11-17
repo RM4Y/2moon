@@ -170,6 +170,7 @@ pub struct FfmpegEncoder {
     height: usize,
     force_idr: bool,
     pts: i64,
+    fps: u32,
     out: Vec<u8>,
     pub codec_name: String,
 }
@@ -214,7 +215,9 @@ impl FfmpegEncoder {
             let common: Vec<(&str, String)> = vec![
                 ("video_size", format!("{width}x{height}")),
                 ("pixel_format", "yuv420p".into()),
-                ("time_base", "1/90000".into()),
+                // NVENC derives its per-frame bit budget from the time base:
+                // it must be 1/fps (pts counted in frames), not a 90 kHz clock.
+                ("time_base", format!("1/{}", fps.max(1))),
                 ("b", bps.to_string()),
                 ("maxrate", bps.to_string()),
                 // A VBV of about one frame keeps every frame close to the average size.
@@ -276,7 +279,7 @@ impl FfmpegEncoder {
                 bail!("av_frame_get_buffer: {}", err_str(r));
             }
             info!("hardware encoder {codec} ready ({width}x{height}@{fps}, {bitrate_kbps} kbps)");
-            Ok(Self { ctx, frame, pkt, layout, width, height, force_idr: true, pts: 0, out: Vec::with_capacity(1 << 20), codec_name: codec.to_string() })
+            Ok(Self { ctx, frame, pkt, layout, width, height, force_idr: true, pts: -1, fps: fps.max(1), out: Vec::with_capacity(1 << 20), codec_name: codec.to_string() })
         }
     }
 
@@ -304,7 +307,8 @@ impl FfmpegEncoder {
                     std::ptr::copy_nonoverlapping(src.as_ptr().add(row * w), dst.add(row * ls), w);
                 }
             }
-            self.pts = self.pts.max(pts90k).max(self.pts + 1);
+            let frames = pts90k * self.fps as i64 / 90_000;
+            self.pts = frames.max(self.pts + 1);
             wr_i64(self.frame, self.layout.pts, self.pts);
             wr_i32(self.frame, self.layout.pict_type, if self.force_idr { AV_PICTURE_TYPE_I } else { AV_PICTURE_TYPE_NONE });
             self.force_idr = false;
@@ -481,6 +485,25 @@ mod tests {
             }
         }
         assert!(n >= 25, "dav1d decoded {n}/30");
+    }
+
+    /// NVENC must spend roughly the requested bitrate on detailed content.
+    #[test]
+    fn nvenc_honours_bitrate_if_available() {
+        let Ok(mut enc) = FfmpegEncoder::new("hevc_nvenc", 1280, 720, 60, 10_000) else { return };
+        let mut f = I420Frame::new(1280, 720);
+        let mut seed = 1u32;
+        let mut total = 0usize;
+        for i in 0..120i64 {
+            for p in f.y.iter_mut() {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *p = 16 + (seed >> 24) as u8 % 200;
+            }
+            total += enc.encode(&f, i * 1500).unwrap().data.len();
+        }
+        let mbps = total as f64 * 8.0 / 2.0 / 1e6;
+        eprintln!("hevc_nvenc produced {mbps:.1} Mbit/s for 10 requested");
+        assert!(mbps > 6.0 && mbps < 14.0, "bitrate not honoured: {mbps:.1} Mbit/s");
     }
 
     /// Runs only where NVENC is present.
