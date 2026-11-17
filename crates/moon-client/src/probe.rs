@@ -26,6 +26,8 @@ pub async fn run(c: &GsClient, out: &Path, seconds: u64) -> Result<()> {
     std::fs::write(out.join("keys.txt"), format!("rikey={}\nrikeyid={rikeyid}\n{neg:#?}\n", hex::encode(rikey)))?;
     println!("{neg:#?}");
 
+    let ctrl_addr: std::net::SocketAddr = tokio::net::lookup_host((c.host.as_str(), neg.control_port)).await?.next().unwrap();
+    let ctrl = crate::control::connect(ctrl_addr, neg.control_connect_data.unwrap_or(0), rikey, neg.encryption_requested & 1 != 0 || cfg.encryption_requested & 1 != 0 || true)?;
     let v = UdpSocket::bind("0.0.0.0:0").await?;
     let a = UdpSocket::bind("0.0.0.0:0").await?;
     v.connect((c.host.as_str(), neg.video_port)).await?;
@@ -38,7 +40,13 @@ pub async fn run(c: &GsClient, out: &Path, seconds: u64) -> Result<()> {
     let (mut nv, mut na) = (0usize, 0usize);
     let mut vb = vec![0u8; 65536];
     let mut ab = vec![0u8; 65536];
+    let mut idr_sent = false;
     while start.elapsed() < Duration::from_secs(seconds) {
+        if !idr_sent && start.elapsed() > Duration::from_secs(2) {
+            ctrl.sender.request_idr();
+            idr_sent = true;
+            println!("IDR requested after {} video packets", nv);
+        }
         if last_ping.elapsed() > Duration::from_millis(200) {
             seq += 1;
             for (sock, payload) in [(&v, &neg.ping_payload_video), (&a, &neg.ping_payload_audio)] {
@@ -60,6 +68,17 @@ pub async fn run(c: &GsClient, out: &Path, seconds: u64) -> Result<()> {
         }
     }
     println!("captured {nv} video and {na} audio packets");
+    while let Ok(e) = ctrl.events.try_recv() {
+        println!("control event before cancel: {e:?}");
+    }
     let _ = c.cancel().await;
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(2) {
+        match ctrl.events.try_recv() {
+            Ok(e) => println!("control event after cancel: {e:?}"),
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    ctrl.sender.disconnect();
     Ok(())
 }

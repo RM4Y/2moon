@@ -181,7 +181,7 @@ impl RtspClient {
         n.session = self.session.clone().unwrap_or_default();
 
         let sdp = announce_sdp(cfg, &self.host, n.encryption_supported & cfg.encryption_requested.max(n.encryption_requested));
-        self.ok(Message::request("ANNOUNCE", "streamid=control/13/0").header("Content-type", "application/sdp").with_body(sdp.into_bytes())).await?;
+        self.ok(Message::request("ANNOUNCE", "streamid=control/13/0").header("Content-type", "application/sdp").header("Content-length", sdp.len()).with_body(sdp.into_bytes())).await?;
         self.ok(Message::request("PLAY", "/")).await?;
         Ok(n)
     }

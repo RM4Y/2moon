@@ -192,6 +192,19 @@ impl ReedSolomon {
         Ok(Self { data, parity, matrix })
     }
 
+    /// Build a systematic code from explicit parity rows (`parity` rows of `data` coefficients).
+    pub fn from_parity_rows(data: usize, parity: usize, rows: &[u8]) -> Result<Self, FecError> {
+        if data == 0 || data + parity > 255 || rows.len() != data * parity {
+            return Err(FecError::InvalidCounts);
+        }
+        let mut matrix = vec![0u8; (data + parity) * data];
+        for r in 0..data {
+            matrix[r * data + r] = 1;
+        }
+        matrix[data * data..].copy_from_slice(rows);
+        Ok(Self { data, parity, matrix })
+    }
+
     pub fn data_shards(&self) -> usize {
         self.data
     }
