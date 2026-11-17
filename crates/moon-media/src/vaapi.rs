@@ -159,7 +159,10 @@ fn export_api() -> Option<&'static ExportApi> {
 }
 
 /// Export a decoded surface for import into EGL (one layer per plane).
-pub fn export_surface(display: *mut c_void, surface: u32) -> anyhow::Result<DmaBufSurface> {
+///
+/// # Safety
+/// `display` must be a live, initialised VADisplay and `surface` one of its surfaces.
+pub unsafe fn export_surface(display: *mut c_void, surface: u32) -> anyhow::Result<DmaBufSurface> {
     const MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
     const EXPORT_READ_ONLY: u32 = 0x1;
     const EXPORT_SEPARATE_LAYERS: u32 = 0x4;

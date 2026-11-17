@@ -20,11 +20,13 @@ use eframe::glow::{self, HasContext};
 use moon_media::decoder::Decoded;
 use moon_media::ffenc::VaapiFrame;
 use moon_media::frame::{Csc, I420Frame};
+use moon_media::nvdec::{CudaFrame, CudaGlTarget};
 use tracing::{info, warn};
 
 enum Pending {
     Cpu(I420Frame),
     Vaapi(VaapiFrame),
+    Cuda(CudaFrame),
 }
 
 /// Frames exchanged between the decode thread and the paint callback.
@@ -98,6 +100,10 @@ impl VideoView {
                 let size = [v.width, v.height];
                 (Pending::Vaapi(v), size)
             }
+            Decoded::Cuda(c) => {
+                let size = [c.width, c.height];
+                (Pending::Cuda(c), size)
+            }
         };
         let mut ex = self.ex.lock().unwrap();
         if ex.generation != generation {
@@ -148,15 +154,21 @@ impl VideoView {
             }
             Some(Pending::Vaapi(v)) => match unsafe { r.import_vaapi(gl, v) } {
                 Ok(()) => self.ex.lock().unwrap().presented += 1,
-                Err(e) => {
-                    warn!("zero-copy display unavailable ({e}); copying pictures instead");
-                    ZERO_COPY_BROKEN.store(true, Ordering::Relaxed);
-                    self.zero_copy.store(false, Ordering::Relaxed);
-                }
+                Err(e) => self.zero_copy_failed(&e),
+            },
+            Some(Pending::Cuda(c)) => match unsafe { r.import_cuda(gl, &c) } {
+                Ok(()) => self.ex.lock().unwrap().presented += 1,
+                Err(e) => self.zero_copy_failed(&e),
             },
             None => {}
         }
         unsafe { r.draw(gl) };
+    }
+
+    fn zero_copy_failed(&self, e: &str) {
+        warn!("zero-copy display unavailable ({e}); copying pictures instead");
+        ZERO_COPY_BROKEN.store(true, Ordering::Relaxed);
+        self.zero_copy.store(false, Ordering::Relaxed);
     }
 
     /// Free GL resources (call with the context current, e.g. from `on_exit`).
@@ -182,13 +194,17 @@ const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: i32 = 0x3443;
 const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: i32 = 0x3444;
 const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 
+type CreateImage = unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void, *const i32) -> *mut c_void;
+type DestroyImage = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
+type ImageTargetTexture = unsafe extern "C" fn(u32, *mut c_void);
+
 struct Egl {
     _lib: libloading::Library,
     get_current_display: unsafe extern "C" fn() -> *mut c_void,
     query_string: unsafe extern "C" fn(*mut c_void, i32) -> *const c_char,
-    create_image: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void, *const i32) -> *mut c_void,
-    destroy_image: unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32,
-    image_target_texture: unsafe extern "C" fn(u32, *mut c_void),
+    create_image: CreateImage,
+    destroy_image: DestroyImage,
+    image_target_texture: ImageTargetTexture,
 }
 
 fn egl() -> Result<&'static Egl, String> {
@@ -207,9 +223,9 @@ fn egl() -> Result<&'static Egl, String> {
         Ok(Egl {
             get_current_display: *lib.get(b"eglGetCurrentDisplay\0").map_err(|e| e.to_string())?,
             query_string: *lib.get(b"eglQueryString\0").map_err(|e| e.to_string())?,
-            create_image: std::mem::transmute::<*mut c_void, _>(proc(b"eglCreateImageKHR\0")?),
-            destroy_image: std::mem::transmute::<*mut c_void, _>(proc(b"eglDestroyImageKHR\0")?),
-            image_target_texture: std::mem::transmute::<*mut c_void, _>(proc(b"glEGLImageTargetTexture2DOES\0")?),
+            create_image: std::mem::transmute::<*mut c_void, CreateImage>(proc(b"eglCreateImageKHR\0")?),
+            destroy_image: std::mem::transmute::<*mut c_void, DestroyImage>(proc(b"eglDestroyImageKHR\0")?),
+            image_target_texture: std::mem::transmute::<*mut c_void, ImageTargetTexture>(proc(b"glEGLImageTargetTexture2DOES\0")?),
             _lib: lib,
         })
     })
@@ -240,6 +256,8 @@ enum Source {
     I420,
     /// NV12 EGL images (luma + interleaved chroma); `scale` crops the surface padding.
     Nv12 { scale: [f32; 2] },
+    /// NV12 copied by CUDA into `tex_cuda`.
+    Cuda,
 }
 
 struct Renderer {
@@ -251,6 +269,9 @@ struct Renderer {
     tex: [glow::Texture; 3],
     /// Textures bound to EGL images (Y, UV).
     tex_nv12: [glow::Texture; 2],
+    /// Textures written by CUDA (Y R8, UV RG8) and their CUDA registration.
+    tex_cuda: [glow::Texture; 2],
+    cuda: Option<CudaGlTarget>,
     size: [usize; 2],
     csc: Csc,
     source: Source,
@@ -344,8 +365,9 @@ impl Renderer {
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
         let tex = [new_texture(gl)?, new_texture(gl)?, new_texture(gl)?];
         let tex_nv12 = [new_texture(gl)?, new_texture(gl)?];
+        let tex_cuda = [new_texture(gl)?, new_texture(gl)?];
         gl.bind_texture(glow::TEXTURE_2D, None);
-        Ok(Self { i420, nv12, vbo, vao, a_pos: 0, tex, tex_nv12, size: [0, 0], csc: Csc::default(), source: Source::None, imported: None, modern })
+        Ok(Self { i420, nv12, vbo, vao, a_pos: 0, tex, tex_nv12, tex_cuda, cuda: None, size: [0, 0], csc: Csc::default(), source: Source::None, imported: None, modern })
     }
 
     unsafe fn upload(&mut self, gl: &glow::Context, f: &I420Frame) {
@@ -433,6 +455,31 @@ impl Renderer {
         Ok(())
     }
 
+    /// Copy an NVDEC picture straight from video memory into the CUDA textures.
+    unsafe fn import_cuda(&mut self, gl: &glow::Context, c: &CudaFrame) -> Result<(), String> {
+        if self.nv12.is_none() {
+            return Err("OpenGL 3 / GLES 3 is needed".into());
+        }
+        if !self.cuda.as_ref().is_some_and(|t| t.fits(c)) {
+            self.cuda = None;
+            let (w, h) = (c.width as i32, c.height as i32);
+            for (t, (ifmt, fmt, tw, th)) in self.tex_cuda.iter().zip([(glow::R8, glow::RED, w, h), (glow::RG8, glow::RG, (w + 1) / 2, (h + 1) / 2)]) {
+                gl.bind_texture(glow::TEXTURE_2D, Some(*t));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, ifmt as i32, tw, th, 0, fmt, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            let target = CudaGlTarget::register(c, self.tex_cuda[0].0.get(), self.tex_cuda[1].0.get()).map_err(|e| format!("{e:#}"))?;
+            info!("zero-copy display: NVDEC pictures copied by CUDA into OpenGL textures");
+            self.cuda = Some(target);
+        }
+        self.cuda.as_mut().unwrap().copy(c).map_err(|e| format!("{e:#}"))?;
+        self.release_imported();
+        self.size = [c.width, c.height];
+        self.csc = c.csc;
+        self.source = Source::Cuda;
+        Ok(())
+    }
+
     fn release_imported(&mut self) {
         if let Some(im) = self.imported.take() {
             if let Ok(egl) = egl() {
@@ -449,6 +496,10 @@ impl Renderer {
             Source::I420 => (&mut self.i420, self.tex.to_vec(), [1.0, 1.0]),
             Source::Nv12 { scale } => match self.nv12.as_mut() {
                 Some(p) => (p, self.tex_nv12.to_vec(), scale),
+                None => return,
+            },
+            Source::Cuda => match self.nv12.as_mut() {
+                Some(p) => (p, self.tex_cuda.to_vec(), [1.0, 1.0]),
                 None => return,
             },
         };
@@ -489,6 +540,7 @@ impl Renderer {
 
     unsafe fn destroy(mut self, gl: &glow::Context) {
         self.release_imported();
+        self.cuda = None;
         gl.delete_program(self.i420.program);
         if let Some(p) = &self.nv12 {
             gl.delete_program(p.program);
@@ -497,7 +549,7 @@ impl Renderer {
         if let Some(v) = self.vao {
             gl.delete_vertex_array(v);
         }
-        for t in self.tex.into_iter().chain(self.tex_nv12) {
+        for t in self.tex.into_iter().chain(self.tex_nv12).chain(self.tex_cuda) {
             gl.delete_texture(t);
         }
     }

@@ -123,6 +123,18 @@ contre de vraies captures Sunshine/Moonlight : matrice FEC vidéo de Cauchy (coe
 résolus sur trafic réel), IV GCM du contrôle et du RTSP chiffré (validés par le tag
 d'authentification), schéma d'IV de l'audio chiffré, en-tête de trame (latence hôte).
 
+## Affichage sans copie (copie zéro)
+
+Dans l'interface graphique, les images décodées par le GPU ne repassent pas par la
+mémoire centrale :
+- **NVDEC** (NVIDIA) : copie GPU → GPU dans des textures OpenGL enregistrées auprès de
+  CUDA (partage CUDA/OpenGL) ;
+- **VAAPI** (Intel/AMD) : la surface décodée est exportée en DMA-BUF et importée comme
+  texture via EGL, comme dans Moonlight (FFmpeg fourni uniquement).
+
+Au moindre échec (pas d'EGL, GPU d'affichage différent du GPU de décodage...), le client
+revient automatiquement à la copie. `MOON_ZERO_COPY=0` désactive la copie zéro.
+
 ## FFmpeg fourni avec le client
 
 L'archive du client contient son propre FFmpeg (`lib/`), réduit au décodage :

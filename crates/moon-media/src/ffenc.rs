@@ -497,7 +497,7 @@ unsafe fn hw_device_ctx_offset(a: &Api, ctx: *mut c_void) -> Result<usize> {
         bail!("AVCodecContext has no hwaccel_flags option");
     }
     let off = rd_i32(opt, 16) as usize; // AVOption.offset
-    if off < 8 || off % 8 != 0 {
+    if off < 8 || !off.is_multiple_of(8) {
         bail!("unexpected hwaccel_flags offset {off}");
     }
     let slot = off - 8;

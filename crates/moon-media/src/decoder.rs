@@ -16,6 +16,8 @@ use crate::nvdec::NvDecoder;
 pub enum Decoded<'a> {
     Cpu(&'a I420Frame),
     Vaapi(crate::ffenc::VaapiFrame),
+    /// NVDEC picture kept in video memory (copy it into GL textures with `CudaGlTarget`).
+    Cuda(crate::nvdec::CudaFrame),
 }
 
 pub enum VideoDecoder {
@@ -85,7 +87,8 @@ impl VideoDecoder {
     pub fn open(codec: Codec, hardware: bool, zero_copy: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Self> {
         if hardware {
             match NvDecoder::new(codec) {
-                Ok(d) => {
+                Ok(mut d) => {
+                    d.set_zero_copy(zero_copy.clone());
                     info!("{codec:?} decoding with NVDEC");
                     return Ok(Self::Nvdec(d));
                 }
@@ -127,6 +130,7 @@ impl VideoDecoder {
     /// Short description for statistics.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Nvdec(d) if d.zero_copy_active() => "NVDEC (GPU, copie zéro)",
             Self::Nvdec(_) => "NVDEC (GPU)",
             Self::Vaapi(d, _) if !d.hw_active => "VAAPI → CPU (repli FFmpeg)",
             Self::Vaapi(d, _) if d.zero_copy.as_ref().is_some_and(|z| z.load(std::sync::atomic::Ordering::Relaxed)) => "VAAPI (GPU, copie zéro)",
@@ -156,8 +160,14 @@ impl VideoDecoder {
                 None => Decoded::Cpu(d.picture()),
             }));
         }
+        if let Self::Nvdec(d) = self {
+            if d.decode(data)?.is_some() {
+                return Ok(Some(Decoded::Cpu(d.decode_last())));
+            }
+            return Ok(d.take_gpu_picture().map(Decoded::Cuda));
+        }
         Ok(match self {
-            Self::Nvdec(d) => d.decode(data)?,
+            Self::Nvdec(_) => unreachable!(),
             Self::OpenH264(d) => d.decode(data)?,
             Self::Ffmpeg(d, _) => d.decode(data)?,
             Self::Vaapi(..) => unreachable!(),
