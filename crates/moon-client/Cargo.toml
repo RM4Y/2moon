@@ -9,6 +9,7 @@ bytes = "1.12.1"
 clap = { version = "4.6.8", features = ["derive"] }
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
 hex = "0.4.3"
+libloading = "0.9.1"
 http-body-util = "0.1.5"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }

@@ -1989,6 +1989,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libloading 0.9.1",
  "mdns-sd",
  "moon-media",
  "moon-proto",

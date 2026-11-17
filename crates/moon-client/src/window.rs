@@ -21,7 +21,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::control::ControlSender;
-use crate::session::{I420Frame, Stats};
+use crate::session::{Decoded, I420Frame, Stats};
 
 /// A decoded picture converted for display (packed 0x00RRGGBB).
 pub struct Picture {
@@ -44,7 +44,13 @@ pub struct FrameSlot {
 }
 
 impl FrameSlot {
-    pub fn put(&self, f: &I420Frame) {
+    pub fn put(&self, d: Decoded<'_>) {
+        // This window converts on the CPU: zero-copy is never enabled for it.
+        let Decoded::Cpu(f) = d else { return };
+        self.put_cpu(f)
+    }
+
+    fn put_cpu(&self, f: &I420Frame) {
         let mut p = self.spare.lock().unwrap().take().or_else(|| self.latest.lock().unwrap().take()).unwrap_or(Picture { width: 0, height: 0, pixels: Vec::new() });
         p.width = f.width;
         p.height = f.height;

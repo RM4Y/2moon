@@ -193,12 +193,14 @@ async fn main() -> Result<()> {
                 },
                 ..StreamConfig::default()
             };
-            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic };
+            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, zero_copy: None };
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();
-                let session = Session::start(&c, opts, Box::new(move |p: &moon_client::session::I420Frame, _| {
-                    f2.lock().unwrap().get_or_insert((p.width, p.height, p.y[p.y.len() / 2] as u32));
+                let session = Session::start(&c, opts, Box::new(move |d: moon_client::session::Decoded<'_>, _| {
+                    if let moon_client::session::Decoded::Cpu(p) = d {
+                        f2.lock().unwrap().get_or_insert((p.width, p.height, p.y[p.y.len() / 2] as u32));
+                    }
                 }))
                 .await?;
                 if test_input {
@@ -240,7 +242,7 @@ async fn main() -> Result<()> {
             } else {
                 let (el, slot) = moon_client::window::make_event_loop()?;
                 let s2 = slot.clone();
-                let mut session = Session::start(&c, opts, Box::new(move |p: &moon_client::session::I420Frame, _| s2.put(p))).await?;
+                let mut session = Session::start(&c, opts, Box::new(move |d: moon_client::session::Decoded<'_>, _| s2.put(d))).await?;
                 let proxy = moon_client::window::proxy(&slot);
                 let events = std::mem::replace(&mut session.control_events, std::sync::mpsc::channel().1);
                 std::thread::spawn(move || {

@@ -21,6 +21,7 @@ use crate::control::{self, ControlEvent, ControlSender};
 use crate::http::{GsClient, LaunchParams};
 use crate::rtsp::{Negotiated, RtspClient, StreamConfig};
 
+pub use moon_media::decoder::Decoded;
 pub use moon_media::frame::I420Frame;
 
 #[derive(Default)]
@@ -81,11 +82,15 @@ pub struct SessionOptions {
     pub hw_decode: bool,
     /// Send the default microphone to the host (if the host supports it).
     pub mic: bool,
+    /// Zero-copy: let GPU-decoded pictures stay on the GPU while this is true
+    /// (the sink must handle [`Decoded::Vaapi`] and clear it if it cannot).
+    pub zero_copy: Option<Arc<AtomicBool>>,
 }
 
-/// Receives every decoded picture (YUV 4:2:0) on the decode thread, with its
-/// frame index. The frame is only borrowed: copy what you need, quickly.
-pub type FrameSink = Box<dyn FnMut(&I420Frame, u32) + Send>;
+/// Receives every decoded picture on the decode thread, with its frame index.
+/// A CPU picture is only borrowed: copy what you need, quickly. GPU pictures
+/// ([`Decoded::Vaapi`]) only come when [`SessionOptions::zero_copy`] is set.
+pub type FrameSink = Box<dyn FnMut(Decoded<'_>, u32) + Send>;
 
 pub struct Session {
     pub control: ControlSender,
@@ -170,11 +175,12 @@ impl Session {
         }
         if opts.decode {
             let hw = opts.hw_decode;
+            let zero_copy = opts.zero_copy.clone();
             let stats = stats.clone();
             let ctl = ctrl.sender.clone();
             let stop = stop.clone();
             threads.push(std::thread::Builder::new().name("video-dec".into()).spawn(move || {
-                if let Err(e) = video_decode(frx, sink, stats, ctl, stop, codec, hw) {
+                if let Err(e) = video_decode(frx, sink, stats, ctl, stop, codec, hw, zero_copy) {
                     warn!("video decoder: {e:#}");
                 }
             })?);
@@ -389,8 +395,9 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
 /// Frames allowed to wait for the decoder before we skip ahead (latency bound).
 const MAX_DECODE_BACKLOG: usize = 2;
 
-fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool) -> Result<()> {
-    let mut dec = VideoDecoder::open(codec, hw)?;
+#[allow(clippy::too_many_arguments)]
+fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool, zero_copy: Option<Arc<AtomicBool>>) -> Result<()> {
+    let mut dec = VideoDecoder::open(codec, hw, zero_copy)?;
     let mut decoder_name = dec.name();
     *stats.decoder.lock().unwrap() = decoder_name.to_string();
     let mut need_idr = false;

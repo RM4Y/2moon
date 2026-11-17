@@ -12,6 +12,12 @@ use crate::frame::I420Frame;
 use crate::h264::H264Decoder;
 use crate::nvdec::NvDecoder;
 
+/// A decoded picture: in system memory, or still on the GPU (zero-copy).
+pub enum Decoded<'a> {
+    Cpu(&'a I420Frame),
+    Vaapi(crate::ffenc::VaapiFrame),
+}
+
 pub enum VideoDecoder {
     Nvdec(NvDecoder),
     /// FFmpeg with VAAPI. Falls back to the CPU by itself for H.264/HEVC if
@@ -74,8 +80,9 @@ pub fn supported(hardware: bool) -> Vec<Codec> {
 }
 
 impl VideoDecoder {
-    /// `hardware`: try NVDEC, then VAAPI, before the CPU.
-    pub fn open(codec: Codec, hardware: bool) -> Result<Self> {
+    /// `hardware`: try NVDEC, then VAAPI, before the CPU. `zero_copy`: let VAAPI
+    /// pictures stay on the GPU (the caller must handle [`Decoded::Vaapi`]) while true.
+    pub fn open(codec: Codec, hardware: bool, zero_copy: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Self> {
         if hardware {
             match NvDecoder::new(codec) {
                 Ok(d) => {
@@ -86,7 +93,8 @@ impl VideoDecoder {
             }
             if let Some(va) = crate::vaapi::probe().filter(|i| i.codecs.contains(&codec)) {
                 match FfmpegDecoder::new_hw(ffmpeg_hw_names(codec), "vaapi", Some(&va.device)) {
-                    Ok(d) => {
+                    Ok(mut d) => {
+                        d.zero_copy = zero_copy;
                         info!("{codec:?} decoding with VAAPI ({}, {})", va.driver, va.device);
                         return Ok(Self::Vaapi(d, codec));
                     }
@@ -121,13 +129,14 @@ impl VideoDecoder {
         match self {
             Self::Nvdec(_) => "NVDEC (GPU)",
             Self::Vaapi(d, _) if !d.hw_active => "VAAPI → CPU (repli FFmpeg)",
+            Self::Vaapi(d, _) if d.zero_copy.as_ref().is_some_and(|z| z.load(std::sync::atomic::Ordering::Relaxed)) => "VAAPI (GPU, copie zéro)",
             Self::Vaapi(..) => "VAAPI (GPU)",
             Self::OpenH264(_) => "H.264 OpenH264 (CPU)",
             Self::Ffmpeg(_, n) => n,
         }
     }
 
-    pub fn decode(&mut self, data: &[u8]) -> Result<Option<&I420Frame>> {
+    pub fn decode(&mut self, data: &[u8]) -> Result<Option<Decoded<'_>>> {
         // The GPU refused the stream (e.g. AV1, which has no CPU path inside
         // FFmpeg's hwaccel decoder): switch to a CPU decoder for good.
         if let Self::Vaapi(d, codec) = self {
@@ -142,13 +151,17 @@ impl VideoDecoder {
                 }
             }
             let Self::Vaapi(d, _) = self else { unreachable!() };
-            return Ok(Some(d.picture()));
+            return Ok(Some(match d.take_gpu_picture() {
+                Some(g) => Decoded::Vaapi(g),
+                None => Decoded::Cpu(d.picture()),
+            }));
         }
-        match self {
-            Self::Nvdec(d) => d.decode(data),
-            Self::OpenH264(d) => d.decode(data),
-            Self::Ffmpeg(d, _) => d.decode(data),
+        Ok(match self {
+            Self::Nvdec(d) => d.decode(data)?,
+            Self::OpenH264(d) => d.decode(data)?,
+            Self::Ffmpeg(d, _) => d.decode(data)?,
             Self::Vaapi(..) => unreachable!(),
         }
+        .map(Decoded::Cpu))
     }
 }

@@ -4,7 +4,8 @@
 //! AVFrame/AVPacket fields whose offsets are discovered at runtime.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
@@ -43,6 +44,8 @@ struct Api {
     get_pix_fmt: unsafe extern "C" fn(*const c_char) -> c_int,
     strerror: unsafe extern "C" fn(c_int, *mut c_char, usize) -> c_int,
     frame_unref: unsafe extern "C" fn(*mut c_void),
+    frame_clone: unsafe extern "C" fn(*const c_void) -> *mut c_void,
+    avutil_version: unsafe extern "C" fn() -> std::ffi::c_uint,
     opt_find: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, c_int) -> *const c_void,
     buffer_ref: unsafe extern "C" fn(*const c_void) -> *mut c_void,
     buffer_unref: unsafe extern "C" fn(*mut *mut c_void),
@@ -123,6 +126,8 @@ fn load() -> std::result::Result<Api, String> {
             get_pix_fmt: sym!(avutil, b"av_get_pix_fmt\0"),
             strerror: sym!(avutil, b"av_strerror\0"),
             frame_unref: sym!(avutil, b"av_frame_unref\0"),
+            frame_clone: sym!(avutil, b"av_frame_clone\0"),
+            avutil_version: sym!(avutil, b"avutil_version\0"),
             opt_find: sym!(avutil, b"av_opt_find\0"),
             buffer_ref: sym!(avutil, b"av_buffer_ref\0"),
             buffer_unref: sym!(avutil, b"av_buffer_unref\0"),
@@ -432,9 +437,55 @@ pub struct FfmpegDecoder {
     hw_fmt: c_int,
     /// Whether the last picture really came from the hardware decoder.
     pub hw_active: bool,
+    /// Zero-copy output of VAAPI pictures (kept on the GPU) while this is true;
+    /// the renderer clears it if it cannot import them.
+    pub zero_copy: Option<Arc<AtomicBool>>,
+    /// VADisplay of the decoder's device (null unless zero-copy is possible).
+    va_display: *mut c_void,
+    gpu_out: Option<VaapiFrame>,
 }
 
 unsafe impl Send for FfmpegDecoder {}
+
+/// A decoded picture still on the GPU: a VAAPI surface (NV12), referenced
+/// until this is dropped. The renderer imports it as textures (DMA-BUF).
+pub struct VaapiFrame {
+    frame: *mut c_void,
+    pub display: *mut c_void,
+    pub surface: u32,
+    pub width: usize,
+    pub height: usize,
+    pub csc: crate::frame::Csc,
+}
+
+unsafe impl Send for VaapiFrame {}
+
+impl Drop for VaapiFrame {
+    fn drop(&mut self) {
+        if let Ok(a) = api() {
+            unsafe { (a.frame_free)(&mut self.frame) }
+        }
+    }
+}
+
+/// VADisplay behind an FFmpeg VAAPI device reference: AVBufferRef.data ->
+/// AVHWDeviceContext.hwctx -> AVVAAPIDeviceContext.display. These offsets were
+/// checked against FFmpeg 8's headers (libavutil 60), the version shipped with
+/// the client; with any other version zero-copy is not used.
+unsafe fn vaapi_display(a: &Api, device: *mut c_void) -> *mut c_void {
+    if device.is_null() || (a.avutil_version)() >> 16 != 60 {
+        return std::ptr::null_mut();
+    }
+    let ctx = *((device as *const u8).add(8) as *const *const u8);
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
+    let hwctx = *(ctx.add(16) as *const *const *mut c_void);
+    if hwctx.is_null() {
+        return std::ptr::null_mut();
+    }
+    *hwctx
+}
 
 /// Offset of `AVCodecContext.hw_device_ctx`. Not exposed through AVOptions,
 /// but in every FFmpeg version it is the pointer right before `hwaccel_flags`,
@@ -541,9 +592,12 @@ impl FfmpegDecoder {
                 yuv420p: fmt("yuv420p"),
                 yuvj420p: fmt("yuvj420p"),
                 nv12: fmt("nv12"),
+                va_display: if hw.is_some_and(|(k, _)| k == "vaapi") { vaapi_display(a, hw_device) } else { std::ptr::null_mut() },
                 hw_device,
                 hw_fmt,
                 hw_active: false,
+                zero_copy: None,
+                gpu_out: None,
             })
         }
     }
@@ -555,6 +609,11 @@ impl FfmpegDecoder {
     /// The last decoded picture.
     pub fn picture(&self) -> &I420Frame {
         &self.out
+    }
+
+    /// The last picture if it was kept on the GPU (zero-copy), else `None`.
+    pub fn take_gpu_picture(&mut self) -> Option<VaapiFrame> {
+        self.gpu_out.take()
     }
 
     /// Decode one access unit; true if a new picture is available in [`Self::picture`].
@@ -580,6 +639,17 @@ impl FfmpegDecoder {
                 }
                 let mut src = self.frame;
                 self.hw_active = self.hw_fmt >= 0 && rd_i32(self.frame, 116) == self.hw_fmt;
+                // Zero-copy: hand the VAAPI surface itself to the renderer.
+                if self.hw_active && !self.va_display.is_null() && self.zero_copy.as_ref().is_some_and(|z| z.load(Ordering::Relaxed)) {
+                    let f = (a.frame_clone)(self.frame);
+                    if !f.is_null() {
+                        let surface = *((f as *const u8).add(FRAME_DATA + 3 * 8) as *const usize) as u32;
+                        self.gpu_out = Some(VaapiFrame { frame: f, display: self.va_display, surface, width: rd_i32(f, 104) as usize, height: rd_i32(f, 108) as usize, csc: self.out.csc });
+                        got = true;
+                        continue;
+                    }
+                }
+                self.gpu_out = None;
                 if self.hw_active {
                     // GPU surface -> system memory (NV12 for 8-bit 4:2:0).
                     (a.frame_unref)(self.sw_frame);

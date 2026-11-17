@@ -107,3 +107,91 @@ unsafe fn probe_inner() -> Option<VaapiInfo> {
     }
     None
 }
+
+/// One plane of an exported surface (DRM PRIME, separate layers).
+#[derive(Debug, Clone, Copy)]
+pub struct DmaBufPlane {
+    /// DRM fourcc of this layer (`R8  ` for luma, `GR88` for NV12 chroma...).
+    pub drm_format: u32,
+    pub fd: i32,
+    pub offset: u32,
+    pub pitch: u32,
+    pub modifier: u64,
+}
+
+/// A VAAPI surface exported as DMA-BUF file descriptors (closed on drop).
+#[derive(Debug)]
+pub struct DmaBufSurface {
+    pub width: u32,
+    pub height: u32,
+    pub planes: Vec<DmaBufPlane>,
+    fds: Vec<i32>,
+}
+
+impl Drop for DmaBufSurface {
+    fn drop(&mut self) {
+        for fd in &self.fds {
+            unsafe { libc_close(*fd) };
+        }
+    }
+}
+
+extern "C" {
+    #[link_name = "close"]
+    fn libc_close(fd: c_int) -> c_int;
+}
+
+struct ExportApi {
+    _va: Library,
+    sync: unsafe extern "C" fn(*mut c_void, u32) -> c_int,
+    export: unsafe extern "C" fn(*mut c_void, u32, u32, u32, *mut c_void) -> c_int,
+}
+
+fn export_api() -> Option<&'static ExportApi> {
+    static API: OnceLock<Option<ExportApi>> = OnceLock::new();
+    API.get_or_init(|| unsafe {
+        let va = Library::new("libva.so.2").ok()?;
+        let sync = *va.get(b"vaSyncSurface\0").ok()?;
+        let export = *va.get(b"vaExportSurfaceHandle\0").ok()?;
+        Some(ExportApi { _va: va, sync, export })
+    })
+    .as_ref()
+}
+
+/// Export a decoded surface for import into EGL (one layer per plane).
+pub fn export_surface(display: *mut c_void, surface: u32) -> anyhow::Result<DmaBufSurface> {
+    const MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
+    const EXPORT_READ_ONLY: u32 = 0x1;
+    const EXPORT_SEPARATE_LAYERS: u32 = 0x4;
+    let a = export_api().ok_or_else(|| anyhow::anyhow!("libva has no vaExportSurfaceHandle"))?;
+    // VADRMPRIMESurfaceDescriptor (312 bytes; offsets checked against va_drmcommon.h).
+    let mut d = [0u8; 312];
+    unsafe {
+        let r = (a.sync)(display, surface);
+        if r != 0 {
+            anyhow::bail!("vaSyncSurface failed ({r})");
+        }
+        let r = (a.export)(display, surface, MEM_TYPE_DRM_PRIME_2, EXPORT_READ_ONLY | EXPORT_SEPARATE_LAYERS, d.as_mut_ptr() as *mut c_void);
+        if r != 0 {
+            anyhow::bail!("vaExportSurfaceHandle failed ({r})");
+        }
+    }
+    let u32_at = |o: usize| u32::from_ne_bytes(d[o..o + 4].try_into().unwrap());
+    let num_objects = (u32_at(12) as usize).min(4);
+    let objects: Vec<(i32, u64)> = (0..num_objects).map(|i| {
+        let o = 16 + i * 16;
+        (u32_at(o) as i32, u64::from_ne_bytes(d[o + 8..o + 16].try_into().unwrap()))
+    }).collect();
+    let mut s = DmaBufSurface { width: u32_at(4), height: u32_at(8), planes: Vec::new(), fds: objects.iter().map(|o| o.0).collect() };
+    let num_layers = (u32_at(80) as usize).min(4);
+    for l in 0..num_layers {
+        let o = 84 + l * 56;
+        if u32_at(o + 4) != 1 {
+            anyhow::bail!("unexpected multi-plane layer");
+        }
+        let obj = u32_at(o + 8) as usize;
+        let (fd, modifier) = *objects.get(obj).ok_or_else(|| anyhow::anyhow!("bad object index"))?;
+        s.planes.push(DmaBufPlane { drm_format: u32_at(o), fd, offset: u32_at(o + 24), pitch: u32_at(o + 40), modifier });
+    }
+    Ok(s)
+}

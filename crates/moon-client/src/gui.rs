@@ -329,11 +329,11 @@ impl GuiApp {
             },
             ..StreamConfig::default()
         };
-        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic };
+        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, zero_copy: Some(self.video.zero_copy_flag()) };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
         let generation = self.video.reset();
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
-        let sink = Box::new(move |f: &crate::session::I420Frame, _index: u32| {
+        let sink = Box::new(move |f: crate::session::Decoded<'_>, _index: u32| {
             view.put(generation, f);
             sink_ctx.request_repaint();
         });
