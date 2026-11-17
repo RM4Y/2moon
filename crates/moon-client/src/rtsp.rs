@@ -39,7 +39,7 @@ impl Default for StreamConfig {
             audio_mask: 0x3,
             audio_packet_ms: 5,
             min_fec_packets: 2,
-            encryption_requested: 0,
+            encryption_requested: 1 | 4,
         }
     }
 }
@@ -58,6 +58,16 @@ pub struct Negotiated {
     pub feature_flags: u32,
     pub encryption_supported: u32,
     pub encryption_requested: u32,
+    /// Flags we told the host to use.
+    pub encryption_enabled: u32,
+}
+
+impl Negotiated {
+    /// Audio is encrypted when negotiated, and always on hosts that predate the
+    /// negotiable audio encryption flag.
+    pub fn audio_encrypted(&self) -> bool {
+        self.encryption_enabled & 4 != 0 || self.encryption_supported & 4 == 0
+    }
 }
 
 pub struct RtspClient {
@@ -180,7 +190,8 @@ impl RtspClient {
         }
         n.session = self.session.clone().unwrap_or_default();
 
-        let sdp = announce_sdp(cfg, &self.host, n.encryption_supported & cfg.encryption_requested.max(n.encryption_requested));
+        n.encryption_enabled = n.encryption_supported & (cfg.encryption_requested | n.encryption_requested);
+        let sdp = announce_sdp(cfg, &self.host, n.encryption_enabled);
         self.ok(Message::request("ANNOUNCE", "streamid=control/13/0").header("Content-type", "application/sdp").header("Content-length", sdp.len()).with_body(sdp.into_bytes())).await?;
         self.ok(Message::request("PLAY", "/")).await?;
         Ok(n)

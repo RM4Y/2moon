@@ -27,6 +27,30 @@ pub const FEC_SHARDS: usize = 2;
 /// Fixed parity rows used by GameStream hosts for audio FEC.
 pub const PARITY_ROWS: [u8; 8] = [0x77, 0x40, 0x38, 0x0e, 0xc7, 0xa7, 0x0d, 0x6c];
 
+/// Audio payload encryption: AES-128-CBC (PKCS#7) with the session key; the
+/// IV's first 4 bytes are `key_id + rtp_seq` (big endian), the rest zero.
+#[derive(Clone)]
+pub struct AudioCipher {
+    pub key: [u8; 16],
+    pub key_id: u32,
+}
+
+impl AudioCipher {
+    fn iv(&self, seq: u16) -> [u8; 16] {
+        let mut iv = [0u8; 16];
+        iv[..4].copy_from_slice(&self.key_id.wrapping_add(seq as u32).to_be_bytes());
+        iv
+    }
+
+    pub fn encrypt(&self, seq: u16, payload: &[u8]) -> Vec<u8> {
+        crate::crypto::cbc_encrypt(&self.key, &self.iv(seq), payload)
+    }
+
+    pub fn decrypt(&self, seq: u16, payload: &[u8]) -> Option<Vec<u8>> {
+        crate::crypto::cbc_decrypt(&self.key, &self.iv(seq), payload).ok()
+    }
+}
+
 fn rs() -> ReedSolomon {
     ReedSolomon::from_parity_rows(DATA_SHARDS, FEC_SHARDS, &PARITY_ROWS).expect("static matrix")
 }
@@ -72,15 +96,25 @@ pub struct AudioPacketizer {
     block_base_seq: u16,
     block_base_ts: u32,
     pub fec: bool,
+    pub cipher: Option<AudioCipher>,
 }
 
 impl AudioPacketizer {
     pub fn new(packet_duration_ms: u32) -> Self {
-        Self { seq: 0, timestamp_ms: 0, packet_duration_ms, block: Vec::new(), block_base_seq: 0, block_base_ts: 0, fec: true }
+        Self { seq: 0, timestamp_ms: 0, packet_duration_ms, block: Vec::new(), block_base_seq: 0, block_base_ts: 0, fec: true, cipher: None }
     }
 
     /// Returns the RTP data packet followed by any FEC packets completed by it.
     pub fn packetize(&mut self, opus: &[u8]) -> Vec<Vec<u8>> {
+        // FEC protects the payload as sent (i.e. after encryption).
+        let encrypted;
+        let opus = match &self.cipher {
+            Some(c) => {
+                encrypted = c.encrypt(self.seq, opus);
+                encrypted.as_slice()
+            }
+            None => opus,
+        };
         if self.block.is_empty() {
             self.block_base_seq = self.seq;
             self.block_base_ts = self.timestamp_ms;
@@ -320,6 +354,29 @@ mod tests {
             assert_eq!(p.as_ref().unwrap().opus, opus(i), "packet {i}");
         }
         assert_eq!(st.recovered, 20);
+    }
+
+    #[test]
+    fn encrypted_roundtrip_with_fec() {
+        let c = AudioCipher { key: [9; 16], key_id: 0xfffffff0 };
+        let mut tx = AudioPacketizer::new(5);
+        tx.cipher = Some(c.clone());
+        let mut rx = AudioReassembler::new();
+        let mut out = Vec::new();
+        for i in 0..16 {
+            for p in tx.packetize(&opus(i)) {
+                // lose every second data packet of each block
+                if p[1] == PT_AUDIO && u16::from_be_bytes([p[2], p[3]]) % 4 == 1 {
+                    continue;
+                }
+                rx.push(&p, &mut out);
+            }
+        }
+        assert_eq!(out.len(), 16);
+        for (i, p) in out.iter().enumerate() {
+            let p = p.as_ref().unwrap();
+            assert_eq!(c.decrypt(p.seq, &p.opus).unwrap(), opus(i));
+        }
     }
 
     #[test]

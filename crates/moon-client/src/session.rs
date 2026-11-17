@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use moon_media::h264::H264Decoder;
 use moon_media::opus::{OpusDecoder, StreamLayout};
 use moon_media::pulse::PulseStream;
-use moon_proto::audio::AudioReassembler;
+use moon_proto::audio::{AudioCipher, AudioReassembler};
 use moon_proto::video::{Event, Reassembler};
 use tracing::{debug, info, warn};
 
@@ -151,8 +151,9 @@ impl Session {
             let stats = stats.clone();
             let layout = surround_layout(&neg.describe_sdp, s.audio_channels);
             let output = opts.audio_output;
+            let cipher = neg.audio_encrypted().then_some(AudioCipher { key: rikey, key_id: rikeyid });
             threads.push(std::thread::Builder::new().name("audio".into()).spawn(move || {
-                if let Err(e) = audio_rx(addr, ping, layout, output, stop, stats) {
+                if let Err(e) = audio_rx(addr, ping, layout, cipher, output, stop, stats) {
                     warn!("audio pipeline: {e:#}");
                 }
             })?);
@@ -284,7 +285,10 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, sink: FrameSin
     Ok(())
 }
 
-fn audio_rx(addr: SocketAddr, ping: Option<String>, layout: StreamLayout, output: bool, stop: Arc<AtomicBool>, stats: Arc<Stats>) -> Result<()> {
+fn audio_rx(addr: SocketAddr, ping: Option<String>, layout: StreamLayout, cipher: Option<AudioCipher>, output: bool, stop: Arc<AtomicBool>, stats: Arc<Stats>) -> Result<()> {
+    if cipher.is_some() {
+        debug!("audio stream is encrypted");
+    }
     let sock = udp_socket(addr)?;
     let mut dec = OpusDecoder::new(layout.clone(), 48000)?;
     let mut out = if output {
@@ -323,7 +327,21 @@ fn audio_rx(addr: SocketAddr, ping: Option<String>, layout: StreamLayout, output
             let got = match &p {
                 Some(a) => {
                     stats.audio_packets.fetch_add(1, Ordering::Relaxed);
-                    let n = dec.decode(Some(&a.opus), 0, &mut pcm)?;
+                    let plain;
+                    let opus = match &cipher {
+                        Some(c) => match c.decrypt(a.seq, &a.opus) {
+                            Some(p) => {
+                                plain = p;
+                                &plain
+                            }
+                            None => {
+                                stats.audio_lost.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        },
+                        None => &a.opus,
+                    };
+                    let n = dec.decode(Some(opus), 0, &mut pcm)?;
                     samples_per_packet = n;
                     n
                 }

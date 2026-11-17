@@ -119,12 +119,14 @@ pub struct Packetizer {
     seq: u16,
     stream_index: u32,
     pub ssrc: u32,
+    /// Host processing latency of the next frame in 0.1 ms units (frame header bytes 1..3).
+    pub processing_latency: u16,
 }
 
 impl Packetizer {
     /// `packet_size` is the client's `x-nv-video[0].packetSize`.
     pub fn new(packet_size: usize, fec_percent: u32, min_parity: usize) -> Self {
-        Self { shard_payload: packet_size.saturating_sub(NV_HEADER_LEN).max(64), fec_percent, min_parity, seq: 0, stream_index: 0, ssrc: 0 }
+        Self { shard_payload: packet_size.saturating_sub(NV_HEADER_LEN).max(64), fec_percent, min_parity, seq: 0, stream_index: 0, ssrc: 0, processing_latency: 0 }
     }
 
     fn seq_index(&self) -> u32 {
@@ -145,7 +147,8 @@ impl Packetizer {
     pub fn packetize(&mut self, frame_index: u32, timestamp: u32, idr: bool, bitstream: &[u8]) -> Vec<Vec<u8>> {
         // Prefix the frame header; lastPayloadLen is patched below.
         let mut payload = Vec::with_capacity(FRAME_HEADER_LEN + bitstream.len());
-        payload.extend_from_slice(&[0x01, 0, 0, if idr { FRAME_TYPE_IDR } else { FRAME_TYPE_P }, 0, 0, 0, 0]);
+        let lat = self.processing_latency.to_le_bytes();
+        payload.extend_from_slice(&[0x01, lat[0], lat[1], if idr { FRAME_TYPE_IDR } else { FRAME_TYPE_P }, 0, 0, 0, 0]);
         payload.extend_from_slice(bitstream);
         let sp = self.shard_payload;
         let total_data = payload.len().div_ceil(sp);

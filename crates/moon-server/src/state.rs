@@ -10,7 +10,11 @@ use moon_proto::crypto::Identity;
 use moon_proto::pairing::ServerPairing;
 use moon_proto::xml::App;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{oneshot, watch};
+
+use crate::capture::{AudioSource, PulseMonitor, SineSource, TestPattern, VideoSource};
+use crate::stream::{self, StartArgs, StreamHandle, StreamParams, StreamSockets};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairedClient {
@@ -24,13 +28,6 @@ pub struct PairedClient {
 struct Persisted {
     uuid: String,
     clients: Vec<PairedClient>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Codec {
-    H264,
-    Hevc,
-    Av1,
 }
 
 /// Parameters negotiated by `/launch` (and later refined by RTSP ANNOUNCE).
@@ -59,6 +56,24 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub preset_pin: Option<String>,
     pub apps: Vec<App>,
+    pub video_source: VideoSourceKind,
+    pub audio_source: AudioSourceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum VideoSourceKind {
+    /// Animated synthetic test pattern.
+    Test,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AudioSourceKind {
+    /// No audio stream.
+    None,
+    /// 440 Hz test tone.
+    Sine,
+    /// What the computer is playing (default sink monitor).
+    Desktop,
 }
 
 impl Config {
@@ -76,6 +91,8 @@ impl Config {
             state_dir,
             preset_pin: None,
             apps: vec![App { id: 1, title: "Desktop".into(), hdr_supported: false }],
+            video_source: VideoSourceKind::Test,
+            audio_source: AudioSourceKind::Sine,
         }
     }
 }
@@ -97,10 +114,15 @@ pub struct Host {
     /// Bumped whenever the session changes, so streaming tasks can stop.
     pub session_gen: watch::Sender<u64>,
     pub stream_peer: Mutex<Option<SocketAddr>>,
+    params: Mutex<StreamParams>,
+    stream: Mutex<Option<StreamHandle>>,
+    sockets: Arc<StreamSockets>,
+    pub input_events: AtomicU64,
 }
 
 impl Host {
     pub fn load(cfg: Config) -> Result<Arc<Self>> {
+        let (cfg_video_port, cfg_audio_port) = (cfg.video_port, cfg.audio_port);
         let identity = Identity::load_or_generate(&cfg.state_dir, "host", "2moon GameStream Host")?;
         let path = cfg.state_dir.join("state.json");
         let mut persisted: Persisted = match std::fs::read_to_string(&path) {
@@ -123,6 +145,10 @@ impl Host {
             session: Mutex::new(None),
             session_gen: watch::channel(0).0,
             stream_peer: Mutex::new(None),
+            params: Mutex::new(StreamParams::default()),
+            stream: Mutex::new(None),
+            sockets: Arc::new(StreamSockets::bind(cfg_video_port, cfg_audio_port)?),
+            input_events: AtomicU64::new(0),
         });
         host.save()?;
         Ok(host)
@@ -168,6 +194,7 @@ impl Host {
     }
 
     pub fn set_session(&self, s: Option<LaunchSession>) {
+        self.stop_stream();
         *self.session.lock().unwrap() = s;
         *self.stream_peer.lock().unwrap() = None;
         self.session_gen.send_modify(|g| *g += 1);
@@ -175,6 +202,68 @@ impl Host {
 
     pub fn current_session(&self) -> Option<LaunchSession> {
         self.session.lock().unwrap().clone()
+    }
+
+    pub fn set_stream_params(&self, p: StreamParams) {
+        *self.params.lock().unwrap() = p;
+    }
+
+    pub fn stream_params(&self) -> StreamParams {
+        self.params.lock().unwrap().clone()
+    }
+
+    /// Start (or restart) the media pipelines for the current session.
+    pub fn start_stream(&self) -> Result<()> {
+        let session = self.current_session().ok_or_else(|| anyhow::anyhow!("no session"))?;
+        self.stop_stream();
+        let video: Box<dyn VideoSource> = match self.cfg.video_source {
+            VideoSourceKind::Test => Box::new(TestPattern::new()),
+        };
+        let audio: Option<Box<dyn AudioSource>> = match self.cfg.audio_source {
+            AudioSourceKind::None => None,
+            AudioSourceKind::Sine => Some(Box::new(SineSource::new(48000))),
+            AudioSourceKind::Desktop => match PulseMonitor::new(48000) {
+                Ok(m) => Some(Box::new(m)),
+                Err(e) => {
+                    tracing::warn!("desktop audio capture unavailable: {e:#}");
+                    None
+                }
+            },
+        };
+        let h = stream::start(StartArgs {
+            params: self.stream_params(),
+            sockets: self.sockets.clone(),
+            ping_payload: session.ss_ping_payload,
+            client_ip: session.client_ip,
+            rikey: session.rikey,
+            rikeyid: session.rikeyid,
+            video,
+            audio,
+        })?;
+        *self.stream.lock().unwrap() = Some(h);
+        Ok(())
+    }
+
+    pub fn stop_stream(&self) {
+        let h = self.stream.lock().unwrap().take();
+        if let Some(h) = h {
+            let st = h.stats.clone();
+            h.stop();
+            let frames = st.frames.load(Ordering::Relaxed);
+            tracing::info!(
+                "stream stopped: {frames} frames ({} IDR), {:.1} MB, avg encode {:.2} ms, {} audio packets",
+                st.idr_frames.load(Ordering::Relaxed),
+                st.bytes.load(Ordering::Relaxed) as f64 / 1e6,
+                if frames > 0 { st.encode_us.load(Ordering::Relaxed) as f64 / frames as f64 / 1000.0 } else { 0.0 },
+                st.audio_packets.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    pub fn request_idr(&self) {
+        if let Some(h) = self.stream.lock().unwrap().as_ref() {
+            h.idr.store(true, Ordering::Relaxed);
+        }
     }
 }
 
