@@ -904,8 +904,14 @@ fn gamepad_icon(ui: &mut egui::Ui, h: f32) {
 
 fn short_stats(s: &Stats) -> String {
     format!(
-        "décodées {} · perdues {} · FEC {} · IDR {}",
+        "{} · décodage {:.1} ms · décodées {} · jetées (retard) {} · perdues {} · FEC {} · IDR {}",
+        s.decoder.lock().unwrap(),
+        {
+            let n = s.frames_decoded.load(Ordering::Relaxed);
+            if n > 0 { s.decode_us_total.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0 } else { 0.0 }
+        },
         s.frames_decoded.load(Ordering::Relaxed),
+        s.frames_dropped.load(Ordering::Relaxed),
         s.frames_lost.load(Ordering::Relaxed),
         s.shards_recovered.load(Ordering::Relaxed),
         s.idr_requests.load(Ordering::Relaxed)

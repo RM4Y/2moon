@@ -35,15 +35,21 @@ pub struct Stats {
     pub audio_recovered: AtomicU64,
     pub audio_lost: AtomicU64,
     pub decode_us_total: AtomicU64,
+    /// Frames thrown away because the decoder fell behind.
+    pub frames_dropped: AtomicU64,
+    /// Decoder in use (set once the session starts).
+    pub decoder: Mutex<String>,
 }
 
 impl Stats {
     pub fn summary(&self) -> String {
         let dec = self.frames_decoded.load(Ordering::Relaxed);
         format!(
-            "frames: {} received, {} decoded, {} lost, {} FEC shards rebuilt, {} IDR requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | avg decode {:.2} ms",
+            "decoder {} | frames: {} received, {} decoded, {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | avg decode {:.2} ms",
+            self.decoder.lock().unwrap(),
             self.frames_received.load(Ordering::Relaxed),
             dec,
+            self.frames_dropped.load(Ordering::Relaxed),
             self.frames_lost.load(Ordering::Relaxed),
             self.shards_recovered.load(Ordering::Relaxed),
             self.idr_requests.load(Ordering::Relaxed),
@@ -270,14 +276,51 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
     Ok(())
 }
 
+/// Frames allowed to wait for the decoder before we skip ahead (latency bound).
+const MAX_DECODE_BACKLOG: usize = 2;
+
 fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool) -> Result<()> {
     let mut dec = VideoDecoder::open(codec, hw)?;
+    *stats.decoder.lock().unwrap() = dec.name().to_string();
     let mut need_idr = false;
-    while let Ok(f) = frames.recv() {
+    let mut last_idr_req = Instant::now() - Duration::from_secs(1);
+    let mut backlog = std::collections::VecDeque::new();
+    loop {
+        // Gather everything that is already waiting.
+        if backlog.is_empty() {
+            match frames.recv() {
+                Ok(f) => backlog.push_back(f),
+                Err(_) => break,
+            }
+        }
+        while let Ok(f) = frames.try_recv() {
+            backlog.push_back(f);
+        }
         if stop.load(Ordering::Relaxed) {
             break;
         }
+        // Decoder behind the stream: never let latency pile up. Jump to the newest
+        // keyframe if one is queued, otherwise drop everything and ask for one.
+        if backlog.len() > MAX_DECODE_BACKLOG {
+            if let Some(i) = backlog.iter().rposition(|f| f.idr) {
+                stats.frames_dropped.fetch_add(i as u64, Ordering::Relaxed);
+                backlog.drain(..i);
+            } else {
+                stats.frames_dropped.fetch_add(backlog.len() as u64, Ordering::Relaxed);
+                backlog.clear();
+                need_idr = true;
+                if last_idr_req.elapsed() > Duration::from_millis(200) {
+                    debug!("decoder behind, dropping queued frames and requesting IDR");
+                    ctl.request_idr();
+                    stats.idr_requests.fetch_add(1, Ordering::Relaxed);
+                    last_idr_req = Instant::now();
+                }
+                continue;
+            }
+        }
+        let f = backlog.pop_front().unwrap();
         if need_idr && !f.idr {
+            stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         }
         need_idr = false;

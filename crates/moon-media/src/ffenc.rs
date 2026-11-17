@@ -394,9 +394,12 @@ impl FfmpegDecoder {
                 bail!("FFmpeg has none of the decoders {names:?}");
             }
             let mut ctx = (a.alloc_context3)(codec);
-            let k = CString::new("threads")?;
-            let v = CString::new("4")?;
-            (a.opt_set)(ctx, k.as_ptr(), v.as_ptr(), AV_OPT_SEARCH_CHILDREN);
+            // Low latency: frame threading delays output by one frame per thread,
+            // so only slice/tile threads; dav1d must output each frame at once.
+            for (k, v) in [("threads", "4"), ("thread_type", "slice"), ("flags", "+low_delay"), ("max_frame_delay", "1")] {
+                let (k, v) = (CString::new(k)?, CString::new(v)?);
+                (a.opt_set)(ctx, k.as_ptr(), v.as_ptr(), AV_OPT_SEARCH_CHILDREN);
+            }
             let r = (a.open2)(ctx, codec, std::ptr::null_mut());
             if r < 0 {
                 (a.free_context)(&mut ctx);
