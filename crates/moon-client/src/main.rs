@@ -194,8 +194,8 @@ async fn main() -> Result<()> {
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();
-                let session = Session::start(&c, opts, Box::new(move |p| {
-                    f2.lock().unwrap().get_or_insert((p.width, p.height, p.pixels[p.pixels.len() / 2]));
+                let session = Session::start(&c, opts, Box::new(move |p: &moon_client::session::I420Frame, _| {
+                    f2.lock().unwrap().get_or_insert((p.width, p.height, p.y[p.y.len() / 2] as u32));
                 }))
                 .await?;
                 if test_input {
@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
             } else {
                 let (el, slot) = moon_client::window::make_event_loop()?;
                 let s2 = slot.clone();
-                let mut session = Session::start(&c, opts, Box::new(move |p| s2.put(p))).await?;
+                let mut session = Session::start(&c, opts, Box::new(move |p: &moon_client::session::I420Frame, _| s2.put(p))).await?;
                 let proxy = moon_client::window::proxy(&slot);
                 let events = std::mem::replace(&mut session.control_events, std::sync::mpsc::channel().1);
                 std::thread::spawn(move || {

@@ -3,7 +3,7 @@
 //! receiving host events (termination, rumble, HDR...).
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -121,15 +121,28 @@ fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2
         if !connected && started.elapsed() > Duration::from_secs(10) {
             anyhow::bail!("control stream connection timed out");
         }
-        loop {
-            match cmds.try_recv() {
-                Ok(Cmd::Send { channel, msg_type, payload, reliable }) if connected => {
+        if connected && last_ping.elapsed() > Duration::from_millis(100) {
+            let ping = cipher.seal(msg::PERIODIC_PING, &[0x04, 0, 0, 0, 0, 0, 0, 0]);
+            let _ = host.peer_mut(peer_id).send(CHANNEL_GENERIC, &enet::Packet::unreliable(ping.as_slice()));
+            last_ping = Instant::now();
+        }
+        host.flush();
+        // Wait for the next input (sent as soon as it arrives) or ~1 ms to service ENet.
+        let first = match cmds.recv_timeout(Duration::from_millis(1)) {
+            Ok(c) => Some(c),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => Some(Cmd::Disconnect),
+        };
+        let mut next = first;
+        while let Some(cmd) = next.take() {
+            match cmd {
+                Cmd::Send { channel, msg_type, payload, reliable } if connected => {
                     let data = cipher.seal(msg_type, &payload);
                     let pkt = if reliable { enet::Packet::reliable(data.as_slice()) } else { enet::Packet::unreliable(data.as_slice()) };
                     let _ = host.peer_mut(peer_id).send(channel, &pkt);
                 }
-                Ok(Cmd::Send { .. }) => {}
-                Ok(Cmd::Disconnect) | Err(TryRecvError::Disconnected) => {
+                Cmd::Send { .. } => {}
+                Cmd::Disconnect => {
                     host.peer_mut(peer_id).disconnect(0);
                     let deadline = Instant::now() + Duration::from_millis(300);
                     while Instant::now() < deadline {
@@ -138,15 +151,14 @@ fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2
                     }
                     return Ok(());
                 }
-                Err(TryRecvError::Empty) => break,
             }
+            next = match cmds.try_recv() {
+                Ok(c) => Some(c),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Cmd::Disconnect),
+            };
         }
-        if connected && last_ping.elapsed() > Duration::from_millis(100) {
-            let ping = cipher.seal(msg::PERIODIC_PING, &[0x04, 0, 0, 0, 0, 0, 0, 0]);
-            let _ = host.peer_mut(peer_id).send(CHANNEL_GENERIC, &enet::Packet::unreliable(ping.as_slice()));
-            last_ping = Instant::now();
-        }
+        // Push queued inputs onto the wire now rather than at the next service.
         host.flush();
-        std::thread::sleep(Duration::from_millis(1));
     }
 }

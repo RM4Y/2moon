@@ -205,7 +205,7 @@ unsafe extern "C" fn on_display(user: *mut c_void, info: *mut c_void) -> c_int {
     }
     let idx: c_int = get(info as *const u8, 0);
     // CUVIDPROCPARAMS: progressive_frame = 1, the rest zero.
-    let mut pp = vec![0u8; 512];
+    let mut pp = [0u8; 512];
     put::<c_int>(&mut pp, 0, 1);
     let mut dptr: u64 = 0;
     let mut pitch: c_uint = 0;
@@ -215,22 +215,28 @@ unsafe extern "C" fn on_display(user: *mut c_void, info: *mut c_void) -> c_int {
         return 0;
     }
     let (w, h) = (s.width, s.height);
-    let luma_rows = h;
+    if s.out.width != w || s.out.height != h {
+        s.out = I420Frame::new(w, h);
+    }
     let chroma_rows = h.div_ceil(2);
-    let host_pitch = w.div_ceil(2) * 2;
-    s.nv12.resize(host_pitch * (luma_rows + chroma_rows), 0);
+    let cw = s.out.chroma_width();
+    let uv_pitch = cw * 2;
+    s.nv12.resize(uv_pitch * chroma_rows, 0);
     let chroma_src = dptr + pitch as u64 * ((s.surface_height as u64 + 1) & !1);
     let mut ok = true;
-    for (src, rows, dst_off) in [(dptr, luma_rows, 0usize), (chroma_src, chroma_rows, host_pitch * luma_rows)] {
+    // Luma goes straight into the output frame; interleaved chroma into a scratch buffer.
+    let luma_dst = s.out.y.as_mut_ptr();
+    let chroma_dst = s.nv12.as_mut_ptr();
+    for (src, dst, dst_pitch, width, rows) in [(dptr, luma_dst, w, w, h), (chroma_src, chroma_dst, uv_pitch, uv_pitch.min(pitch as usize), chroma_rows)] {
         // CUDA_MEMCPY2D
-        let mut m = vec![0u8; 128];
+        let mut m = [0u8; 128];
         put::<u32>(&mut m, 16, 2); // srcMemoryType = device
         put::<u64>(&mut m, 32, src); // srcDevice
         put::<u64>(&mut m, 48, pitch as u64); // srcPitch
         put::<u32>(&mut m, 72, 1); // dstMemoryType = host
-        put::<u64>(&mut m, 80, s.nv12.as_mut_ptr().add(dst_off) as u64); // dstHost
-        put::<u64>(&mut m, 104, host_pitch as u64); // dstPitch
-        put::<u64>(&mut m, 112, w as u64); // WidthInBytes
+        put::<u64>(&mut m, 80, dst as u64); // dstHost
+        put::<u64>(&mut m, 104, dst_pitch as u64); // dstPitch
+        put::<u64>(&mut m, 112, width as u64); // WidthInBytes
         put::<u64>(&mut m, 120, rows as u64); // Height
         if (a.cu_memcpy2d)(m.as_ptr()) != 0 {
             ok = false;
@@ -241,20 +247,12 @@ unsafe extern "C" fn on_display(user: *mut c_void, info: *mut c_void) -> c_int {
         s.error = Some("cuMemcpy2D failed".into());
         return 0;
     }
-    // NV12 -> I420
-    if s.out.width != w || s.out.height != h {
-        s.out = I420Frame::new(w, h);
-    }
-    for row in 0..h {
-        s.out.y[row * w..row * w + w].copy_from_slice(&s.nv12[row * host_pitch..row * host_pitch + w]);
-    }
-    let cw = s.out.chroma_width();
-    let uv = &s.nv12[host_pitch * luma_rows..];
-    for row in 0..chroma_rows {
-        let src = &uv[row * host_pitch..row * host_pitch + cw * 2];
-        for x in 0..cw {
-            s.out.u[row * cw + x] = src[x * 2];
-            s.out.v[row * cw + x] = src[x * 2 + 1];
+    // Deinterleave NV12 chroma -> I420 U/V planes.
+    let (out_u, out_v) = (&mut s.out.u, &mut s.out.v);
+    for ((src, du), dv) in s.nv12.chunks_exact(uv_pitch).zip(out_u.chunks_exact_mut(cw)).zip(out_v.chunks_exact_mut(cw)) {
+        for ((pair, u), v) in src.chunks_exact(2).zip(du.iter_mut()).zip(dv.iter_mut()) {
+            *u = pair[0];
+            *v = pair[1];
         }
     }
     s.ready = true;

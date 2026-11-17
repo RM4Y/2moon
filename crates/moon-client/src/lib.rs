@@ -5,6 +5,7 @@ pub mod probe;
 pub mod rtsp;
 pub mod session;
 pub mod store;
+pub mod video_gl;
 pub mod window;
 
 /// Split `host[:port]` (IPv6 in brackets) into address + HTTP port (default 47989).

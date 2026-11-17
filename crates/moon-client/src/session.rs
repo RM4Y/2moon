@@ -21,14 +21,7 @@ use crate::control::{self, ControlEvent, ControlSender};
 use crate::http::{GsClient, LaunchParams};
 use crate::rtsp::{Negotiated, RtspClient, StreamConfig};
 
-/// A decoded picture ready for display (packed 0x00RRGGBB).
-pub struct Picture {
-    pub width: usize,
-    pub height: usize,
-    pub pixels: Vec<u32>,
-    pub frame_index: u32,
-    pub received_at: Instant,
-}
+pub use moon_media::frame::I420Frame;
 
 #[derive(Default)]
 pub struct Stats {
@@ -76,7 +69,9 @@ pub struct SessionOptions {
     pub hw_decode: bool,
 }
 
-pub type FrameSink = Box<dyn Fn(Picture) + Send>;
+/// Receives every decoded picture (YUV 4:2:0) on the decode thread, with its
+/// frame index. The frame is only borrowed: copy what you need, quickly.
+pub type FrameSink = Box<dyn FnMut(&I420Frame, u32) + Send>;
 
 pub struct Session {
     pub control: ControlSender,
@@ -275,7 +270,7 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
     Ok(())
 }
 
-fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool) -> Result<()> {
+fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool) -> Result<()> {
     let mut dec = VideoDecoder::open(codec, hw)?;
     let mut need_idr = false;
     while let Ok(f) = frames.recv() {
@@ -289,11 +284,9 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, sink: FrameSin
         let t = Instant::now();
         match dec.decode(&f.data) {
             Ok(Some(pic)) => {
-                let mut px = vec![0u32; pic.width * pic.height];
-                pic.to_xrgb(&mut px);
                 stats.decode_us_total.fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                 stats.frames_decoded.fetch_add(1, Ordering::Relaxed);
-                sink(Picture { width: pic.width, height: pic.height, pixels: px, frame_index: f.index, received_at: t });
+                sink(pic, f.index);
             }
             Ok(None) => {}
             Err(e) => {
@@ -375,7 +368,7 @@ fn audio_rx(addr: SocketAddr, ping: Option<String>, layout: StreamLayout, cipher
             if let (Some(o), true) = (out.as_mut(), got > 0) {
                 let _g = out_lock.lock();
                 // Drop audio instead of building latency if the device stalls.
-                if o.latency_us() > 150_000 {
+                if o.latency_us() > 100_000 {
                     o.flush();
                 }
                 if let Err(e) = o.write(&pcm) {

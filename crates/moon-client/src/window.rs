@@ -21,7 +21,14 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::control::ControlSender;
-use crate::session::{Picture, Stats};
+use crate::session::{I420Frame, Stats};
+
+/// A decoded picture converted for display (packed 0x00RRGGBB).
+pub struct Picture {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u32>,
+}
 
 #[derive(Debug)]
 pub enum UserEvent {
@@ -31,11 +38,18 @@ pub enum UserEvent {
 
 pub struct FrameSlot {
     latest: Mutex<Option<Picture>>,
+    /// Buffer handed back by the window, reused for the next conversion.
+    spare: Mutex<Option<Picture>>,
     proxy: EventLoopProxy<UserEvent>,
 }
 
 impl FrameSlot {
-    pub fn put(&self, p: Picture) {
+    pub fn put(&self, f: &I420Frame) {
+        let mut p = self.spare.lock().unwrap().take().or_else(|| self.latest.lock().unwrap().take()).unwrap_or(Picture { width: 0, height: 0, pixels: Vec::new() });
+        p.width = f.width;
+        p.height = f.height;
+        p.pixels.resize(f.width * f.height, 0);
+        f.to_xrgb(&mut p.pixels);
         *self.latest.lock().unwrap() = Some(p);
         let _ = self.proxy.send_event(UserEvent::NewFrame);
     }
@@ -43,7 +57,7 @@ impl FrameSlot {
 
 pub fn make_event_loop() -> Result<(EventLoop<UserEvent>, Arc<FrameSlot>)> {
     let el = EventLoop::<UserEvent>::with_user_event().build()?;
-    let slot = Arc::new(FrameSlot { latest: Mutex::new(None), proxy: el.create_proxy() });
+    let slot = Arc::new(FrameSlot { latest: Mutex::new(None), spare: Mutex::new(None), proxy: el.create_proxy() });
     Ok((el, slot))
 }
 
@@ -228,7 +242,9 @@ impl ApplicationHandler<UserEvent> for App {
                         self.stream_w = p.width as u32;
                         self.stream_h = p.height as u32;
                     }
-                    self.current = Some(p);
+                    if let Some(old) = self.current.replace(p) {
+                        *self.slot.spare.lock().unwrap() = Some(old);
+                    }
                     self.redraw();
                     self.update_title();
                 }

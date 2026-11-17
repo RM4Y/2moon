@@ -69,6 +69,20 @@ impl Csc {
         let c = 255.0 / cs;
         (y, f(2.0 * (1.0 - kr) * c), f(-2.0 * (1.0 - kb) * kb / kg * c), f(-2.0 * (1.0 - kr) * kr / kg * c), f(2.0 * (1.0 - kb) * c), yo)
     }
+
+    /// YUV -> RGB for normalised (0..1) samples, for GPU shaders:
+    /// `rgb = M * (yuv - offset)`, `M` given column-major (GLSL `mat3` order).
+    pub fn rgb_matrix(&self) -> ([f32; 9], [f32; 3]) {
+        let (kr, kb) = self.kr_kb();
+        let kg = 1.0 - kr - kb;
+        let (ys, cs, yo) = if self.full_range { (255.0, 255.0, 0.0) } else { (219.0, 224.0, 16.0) };
+        let y = 255.0 / ys;
+        let c = 255.0 / cs;
+        let (rv, gu, gv, bu) = (2.0 * (1.0 - kr) * c, -2.0 * (1.0 - kb) * kb / kg * c, -2.0 * (1.0 - kr) * kr / kg * c, 2.0 * (1.0 - kb) * c);
+        // columns: Y, U, V contributions to (R, G, B)
+        let m = [y, y, y, 0.0, gu, bu, rv, gv, 0.0];
+        (m.map(|v: f64| v as f32), [yo / 255.0, 128.0 / 255.0, 128.0 / 255.0])
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +236,16 @@ impl I420Frame {
         });
     }
 
+    /// Copy another frame's content, reusing this frame's allocations.
+    pub fn copy_from(&mut self, o: &I420Frame) {
+        self.width = o.width;
+        self.height = o.height;
+        self.csc = o.csc;
+        self.y.clone_from(&o.y);
+        self.u.clone_from(&o.u);
+        self.v.clone_from(&o.v);
+    }
+
     /// Copy from strided planes (e.g. decoder output).
     pub fn copy_from_planes(&mut self, w: usize, h: usize, planes: [&[u8]; 3], strides: [usize; 3]) {
         if self.width != w || self.height != h {
@@ -257,6 +281,30 @@ mod tests {
         f.csc = Csc::from_mode(3); // BT.709 full
         f.from_bgrx(&[255u8; 16], 2, 2, 8);
         assert_eq!((f.y[0], f.u[0], f.v[0]), (255, 128, 128));
+    }
+
+    /// The GPU shader matrix must agree with the CPU conversion.
+    #[test]
+    fn shader_matrix_matches_cpu() {
+        for mode in 0..6 {
+            let csc = Csc::from_mode(mode);
+            let (m, off) = csc.rgb_matrix();
+            for (y, u, v) in [(16u8, 128u8, 128u8), (235, 128, 128), (81, 90, 240), (145, 54, 34), (41, 240, 110), (128, 60, 200)] {
+                let mut f = I420Frame::new(2, 2);
+                f.csc = csc;
+                f.y.fill(y);
+                f.u.fill(u);
+                f.v.fill(v);
+                let mut out = [0u32; 4];
+                f.to_xrgb(&mut out);
+                let d = [y as f32 / 255.0 - off[0], u as f32 / 255.0 - off[1], v as f32 / 255.0 - off[2]];
+                for (c, shift) in [(0, 16), (1, 8), (2, 0)] {
+                    let gpu = ((m[c] * d[0] + m[3 + c] * d[1] + m[6 + c] * d[2]).clamp(0.0, 1.0) * 255.0).round() as i32;
+                    let cpu = ((out[0] >> shift) & 0xff) as i32;
+                    assert!((gpu - cpu).abs() <= 1, "mode {mode} yuv ({y},{u},{v}) channel {c}: gpu {gpu} cpu {cpu}");
+                }
+            }
+        }
     }
 
     fn roundtrip(csc: Csc) {

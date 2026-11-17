@@ -12,7 +12,6 @@ use eframe::egui::{self, Color32, Key, RichText, Vec2};
 use moon_media::encoder::Codec;
 use moon_proto::control::input::{self as inp, Event as In};
 use moon_proto::xml::App as HostApp;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::control::{ControlEvent, ControlSender};
@@ -20,6 +19,7 @@ use crate::http::{GsClient, ServerInfo};
 use crate::rtsp::StreamConfig;
 use crate::session::{Session, SessionOptions, Stats};
 use crate::store::{KnownHost, Store};
+use crate::video_gl::VideoView;
 
 // ---------------------------------------------------------------- settings
 
@@ -37,11 +37,13 @@ pub struct Settings {
     pub fullscreen: bool,
     pub quit_app_on_exit: bool,
     pub show_stats: bool,
+    /// Wait for the display refresh before presenting (no tearing, +1 frame of latency on X11).
+    pub vsync: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false }
     }
 }
 
@@ -108,14 +110,11 @@ enum Screen {
 struct Stream {
     session: Session,
     host: HostRef,
-    latest: Arc<Mutex<Option<egui::ColorImage>>>,
-    texture: Option<egui::TextureHandle>,
-    size: [usize; 2],
     captured: bool,
     fullscreen: bool,
     pressed: HashSet<u16>,
     mods: egui::Modifiers,
-    frames_shown: u64,
+    /// (window start, frames presented at start, fps over the last window)
     fps_window: (Instant, u64, f64),
 }
 
@@ -132,13 +131,15 @@ pub struct GuiApp {
     toast: Option<(String, Instant)>,
     manual: String,
     stream: Option<Stream>,
-    /// Frame slot of a stream that is still connecting.
-    stream_latest_pending: Option<Arc<Mutex<Option<egui::ColorImage>>>>,
+    /// GPU video output (shared with the decode thread).
+    video: VideoView,
 }
 
 pub fn run(store: Store) -> Result<()> {
+    let vsync = Settings::load(&store).vsync;
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("2moon").with_inner_size([1100.0, 700.0]).with_min_inner_size([640.0, 400.0]).with_app_id("2moon"),
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync, ..Default::default() },
         ..Default::default()
     };
     eframe::run_native("2moon", opts, Box::new(|cc| Ok(Box::new(GuiApp::new(cc, store)))))
@@ -175,7 +176,7 @@ impl GuiApp {
             toast: None,
             manual: String::new(),
             stream: None,
-            stream_latest_pending: None,
+            video: VideoView::default(),
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -325,17 +326,11 @@ impl GuiApp {
             ..StreamConfig::default()
         };
         let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode };
-        let latest: Arc<Mutex<Option<egui::ColorImage>>> = Default::default();
-        let (sink_latest, sink_ctx) = (latest.clone(), ctx.clone());
-        let sink = Box::new(move |p: crate::session::Picture| {
-            let mut rgba = vec![0u8; p.width * p.height * 4];
-            rgba.par_chunks_mut(4).zip(p.pixels.par_iter()).for_each(|(d, &px)| {
-                d[0] = (px >> 16) as u8;
-                d[1] = (px >> 8) as u8;
-                d[2] = px as u8;
-                d[3] = 255;
-            });
-            *sink_latest.lock().unwrap() = Some(egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &rgba));
+        // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
+        let generation = self.video.reset();
+        let (view, sink_ctx) = (self.video.clone(), ctx.clone());
+        let sink = Box::new(move |f: &crate::session::I420Frame, _index: u32| {
+            view.put(generation, f);
             sink_ctx.request_repaint();
         });
         let c = client_for(&self.store, &h);
@@ -344,7 +339,6 @@ impl GuiApp {
             let r = Session::start(&c, opts, sink).await;
             let _ = tx.send(Msg::Started(hr, Box::new(r)));
         });
-        self.stream_latest_pending = Some(latest);
         self.screen = Screen::Connecting { host: h, since: Instant::now() };
     }
 
@@ -366,6 +360,7 @@ impl GuiApp {
             let summary = st.session.stats.summary();
             tracing::info!("stream ended: {summary}");
             std::thread::spawn(move || st.session.stop());
+            self.video.reset();
             if quit {
                 self.rt.spawn(async move {
                     let _ = c.cancel().await;
@@ -407,7 +402,6 @@ impl GuiApp {
                 }
                 Msg::Started(h, r) => match *r {
                     Ok(session) => {
-                        let latest = self.stream_latest_pending.take().unwrap_or_default();
                         let fullscreen = self.settings.fullscreen;
                         if fullscreen {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
@@ -416,14 +410,10 @@ impl GuiApp {
                         self.stream = Some(Stream {
                             session,
                             host: h,
-                            latest,
-                            texture: None,
-                            size: [0, 0],
                             captured: false,
                             fullscreen,
                             pressed: HashSet::new(),
                             mods: egui::Modifiers::NONE,
-                            frames_shown: 0,
                             fps_window: (Instant::now(), 0, 0.0),
                         });
                         self.screen = Screen::Streaming;
@@ -445,11 +435,17 @@ impl GuiApp {
 // ---------------------------------------------------------------- UI
 
 impl eframe::App for GuiApp {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Some(gl) = gl {
+            self.video.destroy(gl);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_messages(&ctx);
-        // Keep the host poller's target list current.
-        {
+        // Keep the host poller's target list current (not while streaming: this runs every frame).
+        if !matches!(self.screen, Screen::Streaming) {
             let list: Vec<(HostRef, Option<Vec<u8>>)> = self
                 .all_hosts()
                 .into_iter()
@@ -719,6 +715,9 @@ impl GuiApp {
             ui.label("");
             ui.checkbox(&mut s.show_stats, "Afficher les statistiques pendant le stream");
             ui.end_row();
+            ui.label("Synchro verticale");
+            ui.checkbox(&mut s.vsync, "V-Sync (pas de déchirement, mais plus de latence ; appliqué au prochain démarrage)");
+            ui.end_row();
             ui.label("Fin de session");
             ui.checkbox(&mut s.quit_app_on_exit, "Quitter l'application sur l'hôte en fermant le stream");
             ui.end_row();
@@ -746,31 +745,26 @@ impl GuiApp {
                 _ => {}
             }
         }
-        // New picture -> texture.
-        if let Some(img) = st.latest.lock().unwrap().take() {
-            st.size = img.size;
-            match &mut st.texture {
-                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                None => st.texture = Some(ctx.load_texture("stream", img, egui::TextureOptions::LINEAR)),
-            }
-            st.frames_shown += 1;
-            st.fps_window.1 += 1;
-            if st.fps_window.0.elapsed() >= Duration::from_secs(1) {
-                st.fps_window = (Instant::now(), 0, st.fps_window.1 as f64 / st.fps_window.0.elapsed().as_secs_f64());
-            }
+        let size = self.video.size();
+        if st.fps_window.0.elapsed() >= Duration::from_secs(1) {
+            let n = self.video.presented();
+            st.fps_window = (Instant::now(), n, n.saturating_sub(st.fps_window.1) as f64 / st.fps_window.0.elapsed().as_secs_f64());
         }
 
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-        let video = if st.size[0] > 0 {
-            let (sw, sh) = (st.size[0] as f32, st.size[1] as f32);
+        let video = if size[0] > 0 {
+            let (sw, sh) = (size[0] as f32, size[1] as f32);
             let scale = (rect.width() / sw).min(rect.height() / sh);
             egui::Rect::from_center_size(rect.center(), Vec2::new(sw * scale, sh * scale))
         } else {
             rect
         };
-        if let Some(t) = &st.texture {
-            ui.painter().image(t.id(), video, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        if size[0] > 0 {
+            // Snap to whole pixels so the video is not resampled more than needed.
+            let ppp = ctx.pixels_per_point();
+            let snap = |p: egui::Pos2| egui::pos2((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
+            self.video.paint(ui.painter(), egui::Rect::from_min_max(snap(video.min), snap(video.max)));
         } else {
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "En attente de la première image…", egui::FontId::proportional(18.0), Color32::GRAY);
         }
@@ -837,11 +831,11 @@ impl GuiApp {
                     }
                 }
                 egui::Event::ModifiersChanged(m) => sync_modifiers(st, &ctl, m),
-                egui::Event::PointerMoved(pos) if !st.captured && st.size[0] > 0 => {
+                egui::Event::PointerMoved(pos) if !st.captured && size[0] > 0 => {
                     if video.contains(pos) {
-                        let x = ((pos.x - video.min.x) / video.width() * st.size[0] as f32) as i16;
-                        let y = ((pos.y - video.min.y) / video.height() * st.size[1] as f32) as i16;
-                        ctl.input(&In::MouseAbs { x, y, width: st.size[0] as i16, height: st.size[1] as i16 });
+                        let x = ((pos.x - video.min.x) / video.width() * size[0] as f32) as i16;
+                        let y = ((pos.y - video.min.y) / video.height() * size[1] as f32) as i16;
+                        ctl.input(&In::MouseAbs { x, y, width: size[0] as i16, height: size[1] as i16 });
                     }
                 }
                 egui::Event::MouseMoved(d) if st.captured => {
