@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Subset (version 1) of KDE's private screencast protocol, as used by KWin. -->
+<protocol name="zkde_screencast_unstable_v1">
+  <interface name="zkde_screencast_unstable_v1" version="1">
+    <request name="stream_output">
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="pointer" type="uint"/>
+    </request>
+    <request name="stream_window">
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="window_uuid" type="string"/>
+      <arg name="pointer" type="uint"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+  </interface>
+  <interface name="zkde_screencast_stream_unstable_v1" version="1">
+    <request name="close" type="destructor"/>
+    <event name="closed"/>
+    <event name="created">
+      <arg name="node" type="uint"/>
+    </event>
+    <event name="failed">
+      <arg name="error" type="string"/>
+    </event>
+  </interface>
+</protocol>

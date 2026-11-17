@@ -29,3 +29,6 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
+wayland-backend = "0.3"
+wayland-client = "0.31"
+wayland-scanner = "0.31"

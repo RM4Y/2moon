@@ -65,8 +65,12 @@ pub struct Config {
 pub enum VideoSourceKind {
     /// Animated synthetic test pattern.
     Test,
-    /// The desktop, through the XDG ScreenCast portal + PipeWire (Wayland).
+    /// The desktop, through the XDG ScreenCast portal + PipeWire (Wayland, asks once).
     Portal,
+    /// An existing PipeWire video node (see --pw-node); no dialog, works headless.
+    Pipewire,
+    /// KDE Plasma: dedicated KWin screencast of an output (see --output); no dialog, headless.
+    Kwin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -224,7 +228,7 @@ impl Host {
         self.stop_stream();
         let video: Box<dyn VideoSource> = match self.cfg.video_source {
             VideoSourceKind::Test => Box::new(TestPattern::new()),
-            VideoSourceKind::Portal => {
+            VideoSourceKind::Portal | VideoSourceKind::Pipewire | VideoSourceKind::Kwin => {
                 let cap = self.portal.get().ok_or_else(|| anyhow::anyhow!("screen capture is not initialised"))?;
                 Box::new(crate::portal::PipeWireSource::new(cap.clone()))
             }

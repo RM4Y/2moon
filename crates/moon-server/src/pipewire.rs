@@ -391,7 +391,12 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
                 std::ptr::null()
             };
             let off = chunk.offset as usize % (d.maxsize.max(1) as usize);
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                info!("pipewire buffers: data type {} ({}), mapped by pipewire: {}, stride {stride}", d.type_, match d.type_ { 1 => "MemPtr", 2 => "MemFd", 3 => "DmaBuf", _ => "?" }, !d.data.is_null());
+            }
             if !base.is_null() && chunk.flags & SPA_CHUNK_FLAG_CORRUPTED == 0 && chunk.size > 0 && off + len <= d.maxsize as usize {
+                let t0 = Instant::now();
                 let src = std::slice::from_raw_parts(base.add(off), len);
                 let mut g = s.latest.lock().unwrap();
                 let seq = s.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -407,6 +412,10 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
                 }
                 drop(g);
                 s.cond.notify_all();
+                let n = s.frames.load(std::sync::atomic::Ordering::Relaxed);
+                if n % 10 == 1 {
+                    info!("pipewire frame {n}: copy took {:?}", t0.elapsed());
+                }
             }
             if !mapped.is_null() {
                 libc::munmap(mapped, d.maxsize as usize + d.mapoffset as usize);
@@ -523,7 +532,7 @@ impl PwCapture {
             }
             g = self.shared.cond.wait_timeout(g, deadline - now).unwrap().0;
         }
-        let c = g.as_ref()?;
+        let c = g.as_ref().filter(|c| c.seq > self.last_seq)?;
         self.last_seq = c.seq;
         Some(f(c))
     }

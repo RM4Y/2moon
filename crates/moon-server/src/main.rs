@@ -2,6 +2,7 @@ mod capture;
 mod control;
 mod http;
 mod input;
+mod kwin;
 mod mdns;
 mod pipewire;
 mod portal;
@@ -39,6 +40,15 @@ struct Args {
     /// Do not inject input into this machine; just log received events.
     #[arg(long)]
     no_input: bool,
+    /// PipeWire node for --video pipewire: numeric id or name substring.
+    #[arg(long, default_value = "kwin-screencast")]
+    pw_node: String,
+    /// Output to capture for --video kwin (substring of the output name; empty = first).
+    #[arg(long, default_value = "")]
+    output: String,
+    /// Authorise this executable to use KWin's screencast protocol, then exit.
+    #[arg(long)]
+    install_kwin_permission: bool,
     /// Video encoder: auto (NVENC if available), software, nvenc, or an FFmpeg encoder name.
     #[arg(long, default_value = "auto")]
     encoder: String,
@@ -53,6 +63,11 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let args = Args::parse();
+    if args.install_kwin_permission {
+        let p = kwin::install_desktop_file()?;
+        println!("Wrote {} — KWin will now allow screen capture without a dialog (restart moon-server).", p.display());
+        return Ok(());
+    }
     let state_dir = args.state_dir.unwrap_or_else(|| {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
         base.join("2moon-server")
@@ -66,6 +81,14 @@ async fn main() -> Result<()> {
     let host = state::Host::load(cfg)?;
     if host.cfg.video_source == state::VideoSourceKind::Portal {
         let cap = portal::PortalCapture::open(&host.cfg.state_dir, 60).await?;
+        let _ = host.portal.set(cap);
+    }
+    if host.cfg.video_source == state::VideoSourceKind::Kwin {
+        let cap = portal::PortalCapture::from_kwin(&args.output, 60)?;
+        let _ = host.portal.set(cap);
+    }
+    if host.cfg.video_source == state::VideoSourceKind::Pipewire {
+        let cap = portal::PortalCapture::from_node(&args.pw_node, 60)?;
         let _ = host.portal.set(cap);
     }
     let no_input = args.no_input;
