@@ -289,7 +289,7 @@ impl GuiApp {
         let mut c = client_for(&self.store, &h);
         c.server_cert = None;
         let (tx, p, hr) = (self.tx.clone(), pin.clone(), h.clone());
-        let device = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into());
+        let device = crate::device_name();
         self.rt.spawn(async move {
             let r = async {
                 c.pair(&p, &device).await?;

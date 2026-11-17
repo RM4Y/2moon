@@ -157,6 +157,20 @@ mémoire centrale :
 Au moindre échec (pas d'EGL, GPU d'affichage différent du GPU de décodage...), le client
 revient automatiquement à la copie. `MOON_ZERO_COPY=0` désactive la copie zéro.
 
+## Client Windows
+
+Archive `2moon-client-<version>-windows-x86_64.zip` : `moon-client.exe` (interface
+graphique ; les commandes `pair`, `stream`... s'utilisent depuis l'invite de commandes)
+et ses DLL (FFmpeg, Opus). Rien à installer : extraire et lancer.
+
+- Décodage : NVDEC (NVIDIA), sinon **D3D11VA** (tous GPU, DXVA2 sur les systèmes plus
+  anciens), sinon le processeur. Copie zéro NVDEC → OpenGL comme sous Linux.
+- Son et micro : WASAPI (via cpal), avec adaptation automatique au format de la carte son.
+- Réglages et identité : `%APPDATA%\2moon-client`.
+
+Compilé depuis Linux : `scripts/build-windows-deps.sh` (DLL FFmpeg / Opus, MinGW-w64)
+puis `scripts/build-windows.sh` ; `scripts/package-release.sh` produit le zip.
+
 ## FFmpeg fourni avec le client
 
 L'archive du client contient son propre FFmpeg (`lib/`), réduit au décodage :
@@ -180,6 +194,7 @@ scripts/e2e.sh                     # 25 vérifications bout en bout client ↔ h
 ## Limites connues
 
 - Capture : KWin, portail XDG ou PipeWire (Wayland). Pas de capture X11/KMS.
+- Hôte Linux uniquement ; client Linux et Windows (pas de macOS).
 - HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC). Côté client : NVDEC (NVIDIA),
   VAAPI (Intel/AMD) ou le processeur.
 - Le micro n'existe qu'entre un client et un hôte 2moon.

@@ -1,3 +1,7 @@
+// Windows: a GUI application (no console window behind the interface); the
+// command-line modes attach to the console they were started from.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -116,8 +120,19 @@ fn client_for(store: &Store, host: &str) -> GsClient {
     c
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn AttachConsole(process_id: u32) -> i32;
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(windows)]
+    if std::env::args().len() > 1 {
+        // ATTACH_PARENT_PROCESS: print to the console that started us.
+        unsafe { AttachConsole(u32::MAX) };
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -133,7 +148,7 @@ async fn main() -> Result<()> {
             c.server_cert = None;
             let pin = pin.unwrap_or_else(|| format!("{:04}", rand::random::<u16>() % 10000));
             println!("Enter PIN {pin} on the host to pair...");
-            let device = std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into());
+            let device = moon_client::device_name();
             c.pair(&pin, &device).await?;
             let info = c.server_info().await?;
             store.upsert(KnownHost {

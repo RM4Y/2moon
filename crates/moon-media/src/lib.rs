@@ -1,3 +1,6 @@
+pub mod audio_io;
+#[cfg(windows)]
+pub mod cpal_io;
 pub mod decoder;
 pub mod encoder;
 pub mod ffenc;
@@ -9,4 +12,9 @@ pub mod nvenc;
 pub mod h264;
 pub mod opus;
 pub mod pulse;
+pub mod resample;
+#[cfg(target_os = "linux")]
+pub mod vaapi;
+#[cfg(not(target_os = "linux"))]
+#[path = "vaapi_stub.rs"]
 pub mod vaapi;

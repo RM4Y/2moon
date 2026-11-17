@@ -45,3 +45,21 @@ package() { # name binary [extra files...]
 
 package server moon-server scripts/install-service.sh
 package client moon-client
+
+# Windows client: moon-client.exe + its DLLs (FFmpeg, Opus, MinGW threads) in a zip.
+if [ "${WINDOWS:-1}" = 1 ]; then
+    "$ROOT/scripts/build-windows-deps.sh" >/dev/null
+    "$ROOT/scripts/build-windows.sh" >/dev/null
+    name="2moon-client-$VERSION-windows-x86_64"
+    dir="$OUT/$name"
+    rm -rf "$dir" "$dir.zip"
+    mkdir -p "$dir"
+    cp "$ROOT/target/windows/x86_64-pc-windows-gnu/release/moon-client.exe" "$dir/"
+    cp "$ROOT"/target/windows-deps/*.dll "$dir/"
+    cp -r "$ROOT/target/windows-deps/LICENSES" "$dir/"
+    cp "$ROOT/README.md" "$ROOT/LICENSE" "$dir/"
+    docker run --rm -v "$OUT":/o -w /o rust:1.97-bookworm bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq binutils-mingw-w64-x86-64 >/dev/null 2>&1; x86_64-w64-mingw32-strip /o/$name/moon-client.exe; chown -R $(id -u):$(id -g) /o/$name"
+    (cd "$OUT" && python3 -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.', sys.argv[1])" "$name" && sha256sum "$name.zip" >"$name.zip.sha256")
+    rm -rf "$dir"
+    echo "$dir.zip"
+fi

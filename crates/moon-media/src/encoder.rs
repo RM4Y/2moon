@@ -100,6 +100,7 @@ impl VideoEncoder {
 
     /// Stop referencing frames `first..=last`; false if only an IDR can recover.
     pub fn invalidate(&mut self, first: u32, last: u32) -> bool {
+        let _ = (first, last);
         match self {
             #[cfg(target_os = "linux")]
             Self::Nvenc(e) => e.invalidate(first, last),

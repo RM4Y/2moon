@@ -4,7 +4,7 @@
 //! Only a handful of plain-data structures are needed; they are written into
 //! zeroed byte buffers at their documented offsets so reserved fields stay 0.
 
-use std::ffi::{c_int, c_uint, c_void};
+use std::ffi::{c_int, c_uint, c_ulong, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -51,8 +51,9 @@ unsafe impl Sync for Api {}
 fn api() -> Result<&'static Api> {
     static API: OnceLock<std::result::Result<Api, String>> = OnceLock::new();
     API.get_or_init(|| unsafe {
-        let cuda = Library::new("libcuda.so.1").map_err(|e| format!("no CUDA driver: {e}"))?;
-        let cuvid = Library::new("libnvcuvid.so.1").map_err(|e| format!("no NVDEC library: {e}"))?;
+        let (cuda_name, cuvid_name) = if cfg!(windows) { ("nvcuda.dll", "nvcuvid.dll") } else { ("libcuda.so.1", "libnvcuvid.so.1") };
+        let cuda = Library::new(cuda_name).map_err(|e| format!("no CUDA driver: {e}"))?;
+        let cuvid = Library::new(cuvid_name).map_err(|e| format!("no NVDEC library: {e}"))?;
         macro_rules! sym {
             ($l:expr, $n:literal) => {
                 *$l.get($n).map_err(|e| format!("symbol {}: {e}", String::from_utf8_lossy($n)))?
@@ -116,6 +117,51 @@ fn cuvid_codec(c: Codec) -> c_int {
         Codec::Hevc => 8,
         Codec::Av1 => 11,
     }
+}
+
+/// CUVIDDECODECREATEINFO. `unsigned long` fields are 8 bytes on Linux and 4 on
+/// Windows: `c_ulong` gives the right layout on each.
+#[repr(C)]
+struct DecodeCreateInfo {
+    ul_width: c_ulong,
+    ul_height: c_ulong,
+    ul_num_decode_surfaces: c_ulong,
+    codec_type: c_int,
+    chroma_format: c_int,
+    ul_creation_flags: c_ulong,
+    bit_depth_minus8: c_ulong,
+    ul_intra_decode_only: c_ulong,
+    ul_max_width: c_ulong,
+    ul_max_height: c_ulong,
+    reserved1: c_ulong,
+    display_area: Rect16,
+    output_format: c_int,
+    deinterlace_mode: c_int,
+    ul_target_width: c_ulong,
+    ul_target_height: c_ulong,
+    ul_num_output_surfaces: c_ulong,
+    vid_lock: *mut c_void,
+    target_rect: Rect16,
+    enable_histogram: c_ulong,
+    reserved2: [c_ulong; 4],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct Rect16 {
+    left: i16,
+    top: i16,
+    right: i16,
+    bottom: i16,
+}
+
+/// CUVIDSOURCEDATAPACKET (same `unsigned long` caveat).
+#[repr(C)]
+struct SourceDataPacket {
+    flags: c_ulong,
+    payload_size: c_ulong,
+    payload: *const u8,
+    timestamp: i64,
 }
 
 /// A CUDA context, destroyed when the decoder and every picture it handed out are gone.
@@ -336,26 +382,31 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
         s.decoder = std::ptr::null_mut();
     }
     // CUVIDDECODECREATEINFO (Linux, unsigned long = 8 bytes)
-    let mut ci = vec![0u8; 512];
-    put::<u64>(&mut ci, 0, coded_w as u64); // ulWidth
-    put::<u64>(&mut ci, 8, coded_h as u64); // ulHeight
-    put::<u64>(&mut ci, 16, surfaces as u64); // ulNumDecodeSurfaces
-    put::<c_int>(&mut ci, 24, cuvid_codec(s.codec)); // CodecType
-    put::<c_int>(&mut ci, 28, chroma); // ChromaFormat 4:2:0 / 4:4:4
-    put::<u64>(&mut ci, 32, 4); // ulCreationFlags = PreferCUVID
-    put::<u64>(&mut ci, 40, depth as u64); // bitDepthMinus8
-    put::<u64>(&mut ci, 56, coded_w as u64); // ulMaxWidth
-    put::<u64>(&mut ci, 64, coded_h as u64); // ulMaxHeight
-    put::<i16>(&mut ci, 80, l as i16); // display_area
-    put::<i16>(&mut ci, 82, t as i16);
-    put::<i16>(&mut ci, 84, r as i16);
-    put::<i16>(&mut ci, 86, b as i16);
-    put::<c_int>(&mut ci, 88, if chroma == 3 { 2 } else if depth == 2 { 1 } else { 0 }); // OutputFormat NV12 / P016 / YUV444
-    put::<c_int>(&mut ci, 92, 0); // DeinterlaceMode weave
-    put::<u64>(&mut ci, 96, w as u64); // ulTargetWidth
-    put::<u64>(&mut ci, 104, h as u64); // ulTargetHeight
-    put::<u64>(&mut ci, 112, 2); // ulNumOutputSurfaces
-    let r = (a.create_decoder)(&mut s.decoder, ci.as_mut_ptr());
+    let rect = Rect16 { left: l as i16, top: t as i16, right: r as i16, bottom: b as i16 };
+    let mut ci = DecodeCreateInfo {
+        ul_width: coded_w as c_ulong,
+        ul_height: coded_h as c_ulong,
+        ul_num_decode_surfaces: surfaces as c_ulong,
+        codec_type: cuvid_codec(s.codec),
+        chroma_format: chroma,
+        ul_creation_flags: 4, // PreferCUVID
+        bit_depth_minus8: depth as c_ulong,
+        ul_intra_decode_only: 0,
+        ul_max_width: coded_w as c_ulong,
+        ul_max_height: coded_h as c_ulong,
+        reserved1: 0,
+        display_area: rect,
+        output_format: if chroma == 3 { 2 } else if depth == 2 { 1 } else { 0 }, // NV12 / P016 / YUV444
+        deinterlace_mode: 0, // weave
+        ul_target_width: w as c_ulong,
+        ul_target_height: h as c_ulong,
+        ul_num_output_surfaces: 2,
+        vid_lock: std::ptr::null_mut(),
+        target_rect: Rect16::default(),
+        enable_histogram: 0,
+        reserved2: [0; 4],
+    };
+    let r = (a.create_decoder)(&mut s.decoder, &mut ci as *mut DecodeCreateInfo as *mut u8);
     if r != 0 {
         s.error = Some(format!("cuvidCreateDecoder failed ({r})"));
         s.decoder = std::ptr::null_mut();
@@ -565,13 +616,10 @@ impl NvDecoder {
         self.inner.ready = false;
         self.inner.error = None;
         // CUVIDSOURCEDATAPACKET: flags (ENDOFPICTURE), payload_size, payload, timestamp
-        let mut pkt = [0u8; 32];
-        put::<u64>(&mut pkt, 0, 8);
-        put::<u64>(&mut pkt, 8, data.len() as u64);
-        put::<u64>(&mut pkt, 16, data.as_ptr() as u64);
+        let mut pkt = SourceDataPacket { flags: 8, payload_size: data.len() as c_ulong, payload: data.as_ptr(), timestamp: 0 }; // CUVID_PKT_ENDOFPICTURE
         unsafe {
             ck((a.cu_ctx_push)(self.ctx.0), "cuCtxPushCurrent")?;
-            let r = (a.parse)(self.parser, pkt.as_mut_ptr());
+            let r = (a.parse)(self.parser, &mut pkt as *mut SourceDataPacket as *mut u8);
             let mut tmp = std::ptr::null_mut();
             (a.cu_ctx_pop)(&mut tmp);
             if r != 0 {
@@ -684,6 +732,24 @@ pub fn available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Linux the structs keep the layout of nvcuvid's headers (8-byte longs).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nvdec_struct_layout_linux() {
+        let ci = std::mem::MaybeUninit::<DecodeCreateInfo>::uninit();
+        let base = ci.as_ptr() as usize;
+        let off = |p: *const u8| p as usize - base;
+        unsafe {
+            let p = ci.as_ptr();
+            assert_eq!(off(std::ptr::addr_of!((*p).codec_type) as *const u8), 24);
+            assert_eq!(off(std::ptr::addr_of!((*p).bit_depth_minus8) as *const u8), 40);
+            assert_eq!(off(std::ptr::addr_of!((*p).display_area) as *const u8), 80);
+            assert_eq!(off(std::ptr::addr_of!((*p).output_format) as *const u8), 88);
+            assert_eq!(off(std::ptr::addr_of!((*p).ul_num_output_surfaces) as *const u8), 112);
+        }
+        assert_eq!(std::mem::size_of::<SourceDataPacket>(), 32);
+    }
 
     /// Headless OpenGL context on the NVIDIA GPU (EGL device platform), for tests.
     struct HeadlessGl {

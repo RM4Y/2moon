@@ -24,9 +24,11 @@ pub enum Decoded<'a> {
 
 pub enum VideoDecoder {
     Nvdec(NvDecoder),
-    /// FFmpeg with VAAPI. Falls back to the CPU by itself for H.264/HEVC if
-    /// the GPU rejects a stream; `Self::decode` switches to a CPU decoder otherwise.
-    Vaapi(FfmpegDecoder, Codec),
+    /// FFmpeg with a hardware accelerator (VAAPI on Linux, D3D11VA / DXVA2 on
+    /// Windows), named by the last field. FFmpeg falls back to the CPU by itself
+    /// for H.264/HEVC if the GPU rejects a stream; `Self::decode` switches to a
+    /// CPU decoder otherwise.
+    FfHw(FfmpegDecoder, Codec, &'static str),
     OpenH264(H264Decoder),
     Ffmpeg(FfmpegDecoder, &'static str),
 }
@@ -53,6 +55,13 @@ fn vaapi_usable(codec: Codec) -> bool {
     crate::vaapi::supports(codec) && FfmpegDecoder::new(ffmpeg_hw_names(codec)).is_ok()
 }
 
+/// Windows: FFmpeg can open a D3D11VA device and has the codec's decoder.
+/// (AV1 is left out of the automatic choice: many GPUs cannot decode it; it
+/// still works when chosen, falling back to the CPU if needed.)
+fn d3d11va_usable(codec: Codec) -> bool {
+    cfg!(windows) && codec != Codec::Av1 && FfmpegDecoder::new_hw(ffmpeg_hw_names(codec), "d3d11va", None).is_ok()
+}
+
 fn cpu_usable(codec: Codec) -> bool {
     match codec {
         Codec::H264 => true, // OpenH264 is built in
@@ -69,7 +78,7 @@ pub fn supported(hardware: bool) -> Vec<Codec> {
         // GPU decoding: the most efficient codecs first.
         let nv = crate::nvdec::available();
         for c in order {
-            if nv || vaapi_usable(c) {
+            if nv || vaapi_usable(c) || d3d11va_usable(c) {
                 v.push(c);
             }
         }
@@ -130,9 +139,20 @@ impl VideoDecoder {
                     Ok(mut d) => {
                         d.zero_copy = zero_copy;
                         info!("{codec:?} decoding with VAAPI ({}, {})", va.driver, va.device);
-                        return Ok(Self::Vaapi(d, codec));
+                        return Ok(Self::FfHw(d, codec, "VAAPI"));
                     }
                     Err(e) => warn!("VAAPI {codec:?} decoder unavailable ({e:#}); using the CPU"),
+                }
+            }
+            // Windows: Direct3D 11 video decoding (any GPU vendor), DXVA2 on older systems.
+            #[cfg(windows)]
+            for (kind, label) in [("d3d11va", "D3D11VA"), ("dxva2", "DXVA2")] {
+                match FfmpegDecoder::new_hw(ffmpeg_hw_names(codec), kind, None) {
+                    Ok(d) => {
+                        info!("{codec:?} decoding with {label}");
+                        return Ok(Self::FfHw(d, codec, label));
+                    }
+                    Err(e) => warn!("{label} {codec:?} decoder unavailable ({e:#})"),
                 }
             }
         }
@@ -163,9 +183,13 @@ impl VideoDecoder {
         match self {
             Self::Nvdec(d) if d.zero_copy_active() => "NVDEC (GPU, copie zéro)",
             Self::Nvdec(_) => "NVDEC (GPU)",
-            Self::Vaapi(d, _) if !d.hw_active => "VAAPI → CPU (repli FFmpeg)",
-            Self::Vaapi(d, _) if d.zero_copy.as_ref().is_some_and(|z| z.load(std::sync::atomic::Ordering::Relaxed)) => "VAAPI (GPU, copie zéro)",
-            Self::Vaapi(..) => "VAAPI (GPU)",
+            Self::FfHw(d, _, "VAAPI") if !d.hw_active => "VAAPI → CPU (repli FFmpeg)",
+            Self::FfHw(d, _, "VAAPI") if d.zero_copy.as_ref().is_some_and(|z| z.load(std::sync::atomic::Ordering::Relaxed)) => "VAAPI (GPU, copie zéro)",
+            Self::FfHw(_, _, "VAAPI") => "VAAPI (GPU)",
+            Self::FfHw(d, _, "D3D11VA") if !d.hw_active => "D3D11VA → CPU (repli FFmpeg)",
+            Self::FfHw(_, _, "D3D11VA") => "D3D11VA (GPU)",
+            Self::FfHw(d, _, _) if !d.hw_active => "DXVA2 → CPU (repli FFmpeg)",
+            Self::FfHw(..) => "DXVA2 (GPU)",
             Self::OpenH264(_) => "H.264 OpenH264 (CPU)",
             Self::Ffmpeg(_, n) => n,
         }
@@ -174,18 +198,18 @@ impl VideoDecoder {
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<Decoded<'_>>> {
         // The GPU refused the stream (e.g. AV1, which has no CPU path inside
         // FFmpeg's hwaccel decoder): switch to a CPU decoder for good.
-        if let Self::Vaapi(d, codec) = self {
+        if let Self::FfHw(d, codec, label) = self {
             match d.decode_ready(data) {
                 Ok(true) => {}
                 Ok(false) => return Ok(None),
                 Err(e) => {
                     let codec = *codec;
-                    warn!("VAAPI decoding failed ({e:#}); switching to the CPU");
+                    warn!("{label} decoding failed ({e:#}); switching to the CPU");
                     *self = Self::open_cpu(codec)?;
                     bail!("decoder switched to the CPU");
                 }
             }
-            let Self::Vaapi(d, _) = self else { unreachable!() };
+            let Self::FfHw(d, ..) = self else { unreachable!() };
             if let Some(g) = d.take_gpu_picture() {
                 return Ok(Some(Decoded::Vaapi(g)));
             }

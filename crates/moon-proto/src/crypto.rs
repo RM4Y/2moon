@@ -110,9 +110,9 @@ impl Identity {
 }
 
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
         f.write_all(data)

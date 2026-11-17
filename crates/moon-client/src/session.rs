@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use moon_media::decoder::VideoDecoder;
 use moon_media::encoder::Codec;
 use moon_media::opus::{OpusDecoder, StreamLayout};
-use moon_media::pulse::PulseStream;
+use moon_media::audio_io::{AudioInput, AudioOutput};
 use moon_proto::audio::{AudioCipher, AudioReassembler};
 use moon_proto::video::{Event, Reassembler};
 use tracing::{debug, info, warn};
@@ -499,7 +499,7 @@ fn mic_tx(addr: SocketAddr, cipher: AudioCipher, stop: Arc<AtomicBool>, stats: A
     let sock = udp_socket(addr)?;
     // MOON_MIC_DEVICE: a PulseAudio/PipeWire source name instead of the default microphone.
     let device = std::env::var("MOON_MIC_DEVICE").ok().filter(|d| !d.is_empty());
-    let mut rec = PulseStream::record(device.as_deref(), mic::SAMPLE_RATE, 1, mic::FRAME_MS)?;
+    let mut rec = AudioInput::open(device.as_deref(), mic::SAMPLE_RATE, 1, mic::FRAME_MS)?;
     // Voice at 48 kbit/s VBR: clear speech, small packets.
     let mut enc = moon_media::opus::OpusEncoder::new(StreamLayout::mono(), mic::SAMPLE_RATE, mic::FRAME_MS, 48_000, false)?;
     let mut pcm = vec![0i16; mic::FRAME_SAMPLES];
@@ -533,7 +533,7 @@ fn audio_rx(addr: SocketAddr, ping: Option<String>, layout: StreamLayout, cipher
     let sock = udp_socket(addr)?;
     let mut dec = OpusDecoder::new(layout.clone(), 48000)?;
     let mut out = if output {
-        match PulseStream::playback(48000, layout.channels, 30) {
+        match AudioOutput::open(48000, layout.channels, 30) {
             Ok(p) => Some(p),
             Err(e) => {
                 warn!("audio output unavailable: {e:#}");

@@ -32,7 +32,9 @@ struct Api {
 fn api() -> Result<&'static Api> {
     static API: OnceLock<std::result::Result<Api, String>> = OnceLock::new();
     API.get_or_init(|| unsafe {
-        let lib = Library::new("libopus.so.0").or_else(|_| Library::new("libopus.so")).map_err(|e| format!("cannot load libopus: {e}"))?;
+        // Windows: opus.dll ships next to moon-client.exe.
+        let names: &[&str] = if cfg!(windows) { &["opus.dll", "libopus-0.dll"] } else { &["libopus.so.0", "libopus.so"] };
+        let lib = names.iter().find_map(|n| Library::new(*n).ok()).ok_or_else(|| format!("cannot load libopus ({})", names.join(", ")))?;
         macro_rules! sym {
             ($n:literal) => {
                 *lib.get($n).map_err(|e| format!("libopus symbol {}: {e}", String::from_utf8_lossy($n)))?

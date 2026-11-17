@@ -13,5 +13,8 @@ tracing = "0.1.44"
 [dev-dependencies]
 moon-proto = { path = "../moon-proto" }
 
+[target.'cfg(windows)'.dependencies]
+cpal = "0.18.2"
+
 [build-dependencies]
 cc = "1"

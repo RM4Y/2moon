@@ -23,6 +23,10 @@ pub struct Store {
 
 impl Store {
     pub fn default_dir() -> PathBuf {
+        // Windows: %APPDATA%\2moon-client
+        if let Some(appdata) = std::env::var_os("APPDATA").filter(|_| cfg!(windows)) {
+            return PathBuf::from(appdata).join("2moon-client");
+        }
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));

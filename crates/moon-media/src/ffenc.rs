@@ -71,9 +71,11 @@ fn load() -> std::result::Result<Api, String> {
         // MOON_FFMPEG=system skips the bundled copy; MOON_FFMPEG_DIR points elsewhere.
         let mut pair = None;
         if std::env::var("MOON_FFMPEG").as_deref() != Ok("system") {
-            let dir = std::env::var_os("MOON_FFMPEG_DIR").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("lib"))));
+            // Linux: lib/ next to the executable; Windows: the DLLs next to it.
+            let sub = if cfg!(windows) { "" } else { "lib" };
+            let dir = std::env::var_os("MOON_FFMPEG_DIR").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join(sub))));
             if let Some(dir) = dir {
-                let (u, c) = (dir.join("libavutil.so.60"), dir.join("libavcodec.so.62"));
+                let (u, c) = if cfg!(windows) { (dir.join("avutil-60.dll"), dir.join("avcodec-62.dll")) } else { (dir.join("libavutil.so.60"), dir.join("libavcodec.so.62")) };
                 if u.exists() && c.exists() {
                     // avutil first: avcodec's dependency then resolves to it.
                     match (Library::new(&u), Library::new(&c)) {
@@ -91,7 +93,8 @@ fn load() -> std::result::Result<Api, String> {
             if pair.is_some() {
                 break;
             }
-            if let (Ok(u), Ok(c)) = (open(&[&format!("libavutil.so.{u}")]), open(&[&format!("libavcodec.so.{c}")])) {
+            let (un, cn) = if cfg!(windows) { (format!("avutil-{u}.dll"), format!("avcodec-{c}.dll")) } else { (format!("libavutil.so.{u}"), format!("libavcodec.so.{c}")) };
+            if let (Ok(u), Ok(c)) = (open(&[&un]), open(&[&cn])) {
                 pair = Some((u, c));
                 break;
             }

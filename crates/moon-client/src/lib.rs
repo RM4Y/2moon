@@ -8,6 +8,17 @@ pub mod store;
 pub mod video_gl;
 pub mod window;
 
+/// This computer's name, shown on the host when pairing.
+pub fn device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "2moon".into())
+}
+
 /// Split `host[:port]` (IPv6 in brackets) into address + HTTP port (default 47989).
 pub fn split_host_port(s: &str) -> (String, u16) {
     if let Some(rest) = s.strip_prefix('[') {
