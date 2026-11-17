@@ -36,7 +36,15 @@ moon-server --video test --audio sine      # mire et tonalité de test
 Options utiles : `--port` (47989 par défaut ; les autres ports en découlent),
 `--encoder auto|nvenc|software|<encodeur ffmpeg>`, `--output <écran>` (pour `kwin`),
 `--nvenc-preset p1..p7` (qualité NVENC, `p4` par défaut), `--no-input` (n'injecte pas
-les entrées), `--no-mdns`, `--list-clients`, `--name`.
+les entrées), `--no-mdns`, `--no-mic`, `--list-clients`, `--name`.
+
+**Micro du client** (extension 2moon, absente de GameStream) : si le client l'active
+(réglage « Micro » ou `moon-client stream --mic`), il envoie son micro par défaut en
+Opus mono 48 kHz, chiffré avec la clé de session, sur le port UDP base + 12 (48001).
+L'hôte crée alors un micro virtuel « 2moon Microphone » (PipeWire/PulseAudio, via
+`pactl`), le met comme entrée par défaut pendant le stream, puis restaure l'ancienne
+entrée et le supprime à la fin. Ctrl+Alt+Maj+M coupe/réactive le micro. Les clients
+Moonlight officiels ignorent l'extension. `--no-mic` la désactive sur l'hôte.
 
 Les paquets vidéo sont envoyés par un thread de *pacing* qui étale chaque image sur
 60 % de l'intervalle entre images (utile à 120 fps / haut débit, surtout en Wi-Fi).
@@ -121,6 +129,8 @@ scripts/e2e.sh                     # 25 vérifications bout en bout client ↔ h
 ## Limites connues
 
 - Capture : KWin, portail XDG ou PipeWire (Wayland). Pas de capture X11/KMS.
-- HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC) ; HEVC exige NVDEC côté client.
+- HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC). Côté client : NVDEC (NVIDIA),
+  VAAPI (Intel/AMD) ou un FFmpeg complet pour le décodage CPU.
+- Le micro n'existe qu'entre un client et un hôte 2moon.
 - Pas de HDR / 10 bits, ni de 4:4:4.
 - Les caractères absents de la disposition clavier de l'hôte (touches mortes) ne sont pas saisis.

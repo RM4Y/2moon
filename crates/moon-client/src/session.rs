@@ -34,6 +34,8 @@ pub struct Stats {
     pub audio_packets: AtomicU64,
     pub audio_recovered: AtomicU64,
     pub audio_lost: AtomicU64,
+    /// Microphone packets sent to the host.
+    pub mic_packets: AtomicU64,
     pub decode_us_total: AtomicU64,
     /// Frames thrown away because the decoder fell behind.
     pub frames_dropped: AtomicU64,
@@ -45,7 +47,7 @@ impl Stats {
     pub fn summary(&self) -> String {
         let dec = self.frames_decoded.load(Ordering::Relaxed);
         format!(
-            "decoder {} | frames: {} received, {} decoded, {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | avg decode {:.2} ms",
+            "decoder {} | frames: {} received, {} decoded, {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | mic: {} packets sent | avg decode {:.2} ms",
             self.decoder.lock().unwrap(),
             self.frames_received.load(Ordering::Relaxed),
             dec,
@@ -57,6 +59,7 @@ impl Stats {
             self.audio_packets.load(Ordering::Relaxed),
             self.audio_recovered.load(Ordering::Relaxed),
             self.audio_lost.load(Ordering::Relaxed),
+            self.mic_packets.load(Ordering::Relaxed),
             if dec > 0 { self.decode_us_total.load(Ordering::Relaxed) as f64 / dec as f64 / 1000.0 } else { 0.0 },
         )
     }
@@ -71,8 +74,10 @@ pub struct SessionOptions {
     pub decode: bool,
     /// Requested codec (None = best supported by both sides).
     pub codec: Option<Codec>,
-    /// Use the GPU decoder (NVDEC) when available.
+    /// Use the GPU decoder (NVDEC / VAAPI) when available.
     pub hw_decode: bool,
+    /// Send the default microphone to the host (if the host supports it).
+    pub mic: bool,
 }
 
 /// Receives every decoded picture (YUV 4:2:0) on the decode thread, with its
@@ -87,6 +92,10 @@ pub struct Session {
     pub width: u32,
     pub height: u32,
     pub codec: Codec,
+    /// Microphone streaming to the host (false if disabled or unsupported by the host).
+    pub mic_active: bool,
+    /// Mute switch for the microphone.
+    pub mic_muted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -185,7 +194,28 @@ impl Session {
             })?);
         }
 
-        Ok(Session { control: ctrl.sender, control_events: ctrl.events, stats, negotiated: neg, width: s.width, height: s.height, codec, stop, threads })
+        // Microphone (2moon extension, only if the host advertises it).
+        let mic_muted = Arc::new(AtomicBool::new(false));
+        let mut mic_active = false;
+        if opts.mic {
+            match moon_proto::audio::mic::port_from_sdp(&neg.describe_sdp) {
+                Some(port) => {
+                    let addr = resolve(port)?;
+                    let (stop, stats, muted) = (stop.clone(), stats.clone(), mic_muted.clone());
+                    let cipher = moon_proto::audio::mic::cipher(rikey, rikeyid);
+                    threads.push(std::thread::Builder::new().name("mic-tx".into()).spawn(move || {
+                        if let Err(e) = mic_tx(addr, cipher, stop, stats, muted) {
+                            warn!("microphone: {e:#}");
+                        }
+                    })?);
+                    mic_active = true;
+                    info!("microphone sent to the host (UDP {port})");
+                }
+                None => info!("the host does not accept a microphone (not a 2moon host, or disabled)"),
+            }
+        }
+
+        Ok(Session { control: ctrl.sender, control_events: ctrl.events, stats, negotiated: neg, width: s.width, height: s.height, codec, mic_active, mic_muted, stop, threads })
     }
 
     pub fn stop(mut self) {
@@ -348,6 +378,39 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: Fram
             decoder_name = dec.name();
             *stats.decoder.lock().unwrap() = decoder_name.to_string();
         }
+    }
+    Ok(())
+}
+
+/// Capture the default microphone, encode 10 ms Opus frames and send them to the host.
+fn mic_tx(addr: SocketAddr, cipher: AudioCipher, stop: Arc<AtomicBool>, stats: Arc<Stats>, muted: Arc<AtomicBool>) -> Result<()> {
+    use moon_proto::audio::mic;
+    let sock = udp_socket(addr)?;
+    // MOON_MIC_DEVICE: a PulseAudio/PipeWire source name instead of the default microphone.
+    let device = std::env::var("MOON_MIC_DEVICE").ok().filter(|d| !d.is_empty());
+    let mut rec = PulseStream::record(device.as_deref(), mic::SAMPLE_RATE, 1, mic::FRAME_MS)?;
+    // Voice at 48 kbit/s VBR: clear speech, small packets.
+    let mut enc = moon_media::opus::OpusEncoder::new(StreamLayout::mono(), mic::SAMPLE_RATE, mic::FRAME_MS, 48_000, false)?;
+    let mut pcm = vec![0i16; mic::FRAME_SAMPLES];
+    let mut opus = Vec::new();
+    let (mut seq, mut ts) = (0u16, 0u32);
+    let mut was_muted = false;
+    while !stop.load(Ordering::Relaxed) {
+        // Blocks for one 10 ms frame; keep reading while muted so no stale audio piles up.
+        rec.read(&mut pcm)?;
+        let m = muted.load(Ordering::Relaxed);
+        if m != was_muted {
+            info!("microphone {}", if m { "muted" } else { "unmuted" });
+            was_muted = m;
+        }
+        if m {
+            continue;
+        }
+        enc.encode(&pcm, &mut opus)?;
+        let _ = sock.send(&mic::seal(&cipher, seq, ts, &opus));
+        seq = seq.wrapping_add(1);
+        ts = ts.wrapping_add(mic::FRAME_SAMPLES as u32);
+        stats.mic_packets.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
 }

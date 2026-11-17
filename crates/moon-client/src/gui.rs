@@ -39,11 +39,13 @@ pub struct Settings {
     pub show_stats: bool,
     /// Wait for the display refresh before presenting (no tearing, +1 frame of latency on X11).
     pub vsync: bool,
+    /// Send the microphone to the host (2moon hosts only).
+    pub mic: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false }
     }
 }
 
@@ -114,6 +116,8 @@ struct Stream {
     fullscreen: bool,
     pressed: HashSet<u16>,
     mods: egui::Modifiers,
+    /// When the microphone was last (un)muted, to show a short notice.
+    mic_toast: Option<Instant>,
     /// (window start, frames presented at start, fps over the last window)
     fps_window: (Instant, u64, f64),
 }
@@ -325,7 +329,7 @@ impl GuiApp {
             },
             ..StreamConfig::default()
         };
-        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode };
+        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
         let generation = self.video.reset();
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
@@ -414,6 +418,7 @@ impl GuiApp {
                             fullscreen,
                             pressed: HashSet::new(),
                             mods: egui::Modifiers::NONE,
+                            mic_toast: None,
                             fps_window: (Instant::now(), 0, 0.0),
                         });
                         self.screen = Screen::Streaming;
@@ -715,6 +720,9 @@ impl GuiApp {
             ui.label("");
             ui.checkbox(&mut s.show_stats, "Afficher les statistiques pendant le stream");
             ui.end_row();
+            ui.label("Micro");
+            ui.checkbox(&mut s.mic, "Envoyer mon micro à l'hôte (hôtes 2moon ; il devient le micro par défaut de l'hôte pendant le stream)");
+            ui.end_row();
             ui.label("Synchro verticale");
             ui.checkbox(&mut s.vsync, "V-Sync (pas de déchirement, mais plus de latence ; appliqué au prochain démarrage)");
             ui.end_row();
@@ -723,7 +731,7 @@ impl GuiApp {
             ui.end_row();
         });
         ui.add_space(20.0);
-        ui.label(RichText::new("Pendant le stream : Ctrl+Alt+Maj+Q revenir à l'accueil · +Z capturer la souris · +F plein écran · +S statistiques").weak());
+        ui.label(RichText::new("Pendant le stream : Ctrl+Alt+Maj+Q revenir à l'accueil · +Z capturer la souris · +F plein écran · +S statistiques · +M couper le micro").weak());
         if format!("{:?}", before) != format!("{:?}", self.settings) {
             self.settings.save(&self.store);
         }
@@ -768,8 +776,19 @@ impl GuiApp {
         } else {
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "En attente de la première image…", egui::FontId::proportional(18.0), Color32::GRAY);
         }
+        if let Some(t) = st.mic_toast.filter(|t| t.elapsed() < Duration::from_secs(2)) {
+            let muted = st.session.mic_muted.load(Ordering::Relaxed);
+            let (txt, col) = if muted { ("Micro coupé", Color32::from_rgb(240, 120, 90)) } else { ("Micro actif", Color32::from_rgb(120, 255, 160)) };
+            ui.painter().text(rect.center_top() + Vec2::new(0.0, 30.0), egui::Align2::CENTER_TOP, txt, egui::FontId::proportional(22.0), col);
+            ctx.request_repaint_after(Duration::from_secs(2).saturating_sub(t.elapsed()));
+        }
         if self.settings.show_stats {
-            let txt = format!("{:.0} fps affichées · {}", st.fps_window.2, short_stats(&st.session.stats));
+            let mic = match (st.session.mic_active, st.session.mic_muted.load(Ordering::Relaxed)) {
+                (false, _) => String::new(),
+                (true, true) => " · micro coupé".into(),
+                (true, false) => format!(" · micro {} paquets", st.session.stats.mic_packets.load(Ordering::Relaxed)),
+            };
+            let txt = format!("{:.0} fps affichées · {}{mic}", st.fps_window.2, short_stats(&st.session.stats));
             ui.painter().text(rect.left_top() + Vec2::new(10.0, 10.0), egui::Align2::LEFT_TOP, txt, egui::FontId::monospace(13.0), Color32::from_rgb(120, 255, 160));
         }
         // Make sure the whole area receives pointer input.
@@ -812,6 +831,12 @@ impl GuiApp {
                             }
                             Key::S => {
                                 self.settings.show_stats = !self.settings.show_stats;
+                                continue;
+                            }
+                            Key::M if st.session.mic_active => {
+                                let m = !st.session.mic_muted.load(Ordering::Relaxed);
+                                st.session.mic_muted.store(m, Ordering::Relaxed);
+                                st.mic_toast = Some(Instant::now());
                                 continue;
                             }
                             _ => {}

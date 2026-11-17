@@ -129,6 +129,11 @@ impl PulseStream {
         Self::open(PA_STREAM_PLAYBACK, None, "2moon stream", rate, channels, rate * channels as u32 * 2 * latency_ms / 1000)
     }
 
+    /// Playback stream into a given sink (by name).
+    pub fn playback_to(sink: &str, name: &str, rate: u32, channels: u8, latency_ms: u32) -> Result<Self> {
+        Self::open(PA_STREAM_PLAYBACK, Some(sink), name, rate, channels, rate * channels as u32 * 2 * latency_ms / 1000)
+    }
+
     /// Record stream. `device` = None records the default source; use
     /// `"@DEFAULT_MONITOR@"` to capture what the computer is playing.
     pub fn record(device: Option<&str>, rate: u32, channels: u8, fragment_ms: u32) -> Result<Self> {

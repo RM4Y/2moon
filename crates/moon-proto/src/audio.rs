@@ -387,3 +387,64 @@ mod tests {
         }
     }
 }
+
+/// 2moon extension: microphone audio from the client to the host.
+///
+/// The host advertises it in its RTSP DESCRIBE answer with
+/// `a=x-2moon.micPort:<udp port>`; clients that do not know it ignore it.
+/// Each packet is a 12-byte RTP header (payload type [`MIC_PAYLOAD_TYPE`],
+/// 48 kHz timestamp) followed by one Opus mono packet (10 ms), encrypted with
+/// [`mic_cipher`].
+pub mod mic {
+    use super::AudioCipher;
+
+    pub const SDP_ATTRIBUTE: &str = "x-2moon.micPort";
+    pub const PAYLOAD_TYPE: u8 = 0x61;
+    pub const SAMPLE_RATE: u32 = 48_000;
+    pub const FRAME_MS: u32 = 10;
+    pub const FRAME_SAMPLES: usize = (SAMPLE_RATE * FRAME_MS / 1000) as usize;
+    /// Mixed into the key id so the microphone never reuses the IVs of the
+    /// host-to-client audio stream (same session key).
+    const KEY_ID_SALT: u32 = 0x4d49_4331; // "MIC1"
+
+    pub fn cipher(key: [u8; 16], key_id: u32) -> AudioCipher {
+        AudioCipher { key, key_id: key_id ^ KEY_ID_SALT }
+    }
+
+    /// Port advertised in a DESCRIBE SDP, if any.
+    pub fn port_from_sdp(sdp: &str) -> Option<u16> {
+        sdp.lines().find_map(|l| l.trim().strip_prefix("a=")?.strip_prefix(SDP_ATTRIBUTE)?.strip_prefix(':')?.trim().parse().ok())
+    }
+
+    pub fn seal(cipher: &AudioCipher, seq: u16, timestamp: u32, opus: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(super::RTP_HEADER_LEN + opus.len() + 16);
+        super::RtpHeader { flags: 0x80, packet_type: PAYLOAD_TYPE, seq, timestamp, ssrc: 0 }.write(&mut out);
+        out.extend_from_slice(&cipher.encrypt(seq, opus));
+        out
+    }
+
+    /// `(seq, timestamp, opus)` of a valid packet.
+    pub fn open(cipher: &AudioCipher, pkt: &[u8]) -> Option<(u16, u32, Vec<u8>)> {
+        let h = super::RtpHeader::parse(pkt)?;
+        if h.packet_type != PAYLOAD_TYPE {
+            return None;
+        }
+        Some((h.seq, h.timestamp, cipher.decrypt(h.seq, &pkt[super::RTP_HEADER_LEN..])?))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn roundtrip_and_sdp() {
+            let c = cipher([7; 16], 42);
+            assert_ne!(c.key_id, 42);
+            let p = seal(&c, 9, 4800, b"opus-bytes");
+            assert_eq!(open(&c, &p), Some((9, 4800, b"opus-bytes".to_vec())));
+            assert_eq!(open(&cipher([8; 16], 42), &p), None);
+            assert_eq!(port_from_sdp("a=fmtp:97 x\r\na=x-2moon.micPort:48001\r\n"), Some(48001));
+            assert_eq!(port_from_sdp("a=fmtp:97 x\r\n"), None);
+        }
+    }
+}

@@ -64,6 +64,10 @@ pub struct StreamLayout {
 }
 
 impl StreamLayout {
+    pub fn mono() -> Self {
+        Self { channels: 1, streams: 1, coupled: 0, mapping: vec![0] }
+    }
+
     pub fn stereo() -> Self {
         Self { channels: 2, streams: 1, coupled: 1, mapping: vec![0, 1] }
     }

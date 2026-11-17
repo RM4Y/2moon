@@ -6,6 +6,7 @@ mod input;
 mod kwin;
 mod logbuf;
 mod mdns;
+mod mic;
 mod pipewire;
 mod portal;
 mod rtsp;
@@ -73,6 +74,9 @@ struct Args {
     /// Do not advertise the host on the local network.
     #[arg(long)]
     no_mdns: bool,
+    /// Do not accept the client's microphone (no virtual microphone on this host).
+    #[arg(long)]
+    no_mic: bool,
 }
 
 #[tokio::main]
@@ -98,6 +102,9 @@ async fn main() -> Result<()> {
     cfg.audio_source = args.audio;
     cfg.encoder = args.encoder.clone();
     cfg.nvenc_preset = args.nvenc_preset.clone();
+    if args.no_mic {
+        cfg.mic_port = None;
+    }
     if cfg.encoder != "software" && cfg.encoder != "openh264" {
         cfg.hevc = moon_media::ffenc::probe("hevc_nvenc").is_ok();
         cfg.av1 = moon_media::ffenc::probe("av1_nvenc").is_ok();
