@@ -21,7 +21,7 @@ cargo build --release --quiet --manifest-path "$ROOT/Cargo.toml" || { echo "buil
 
 echo "== start host on port $PORT"
 RUST_LOG=info "$BIN/moon-server" --port "$PORT" --state-dir "$WORK/host" --pin 2468 --name e2e-host \
-    --video test --audio sine --no-input >"$WORK/server.log" 2>&1 &
+    --video test --audio sine --no-input --mdns-local-only --no-admin >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 50); do grep -q "HTTP on" "$WORK/server.log" && break; sleep 0.1; done
 check "host started" 'kill -0 $SERVER_PID'

@@ -67,6 +67,9 @@ struct Args {
     /// Video encoder: auto (NVENC if available), software, nvenc, or an FFmpeg encoder name.
     #[arg(long, default_value = "auto")]
     encoder: String,
+    /// Advertise via mDNS on the loopback interface only (tests).
+    #[arg(long)]
+    mdns_local_only: bool,
     /// Do not advertise the host on the local network.
     #[arg(long)]
     no_mdns: bool,
@@ -154,7 +157,7 @@ async fn main() -> Result<()> {
     let _mdns = if args.no_mdns {
         None
     } else {
-        match mdns::advertise(&host.cfg.hostname, host.cfg.http_port) {
+        match mdns::advertise(&host.cfg.hostname, host.cfg.http_port, args.mdns_local_only) {
             Ok(d) => Some(d),
             Err(e) => {
                 tracing::warn!("mDNS advertisement failed: {e:#}");
