@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use moon_media::frame::I420Frame;
-use moon_media::h264::H264Encoder;
+use moon_media::encoder::VideoEncoder;
 use moon_media::opus::{OpusEncoder, StreamLayout};
 use moon_proto::audio::{AudioCipher, AudioPacketizer};
 use moon_proto::video::Packetizer;
@@ -31,6 +31,7 @@ pub struct StreamParams {
     pub audio_channels: u32,
     pub audio_packet_ms: u32,
     pub encryption: u32,
+    pub encoder: String,
 }
 
 impl Default for StreamParams {
@@ -47,6 +48,7 @@ impl Default for StreamParams {
             audio_channels: 2,
             audio_packet_ms: 5,
             encryption: 0,
+            encoder: "auto".into(),
         }
     }
 }
@@ -191,14 +193,14 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         warn!("client asked for codec {} but only H.264 is implemented; sending H.264", p.video_format);
     }
     let fps = p.fps.clamp(1, 240);
-    let mut enc = H264Encoder::new(fps, p.bitrate_kbps)?;
+    let mut enc = VideoEncoder::open(&p.encoder, p.width as usize, p.height as usize, fps, p.bitrate_kbps)?;
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
     let mut frame = I420Frame::new(p.width as usize, p.height as usize);
     let period = Duration::from_secs_f64(1.0 / fps as f64);
     let start = Instant::now();
     let mut next = start;
     let mut index: u32 = 0;
-    info!("video: {}x{}@{} {} kbps from {}", p.width, p.height, fps, p.bitrate_kbps, src.name());
+    info!("video: {}x{}@{} {} kbps from {} via {}", p.width, p.height, fps, p.bitrate_kbps, src.name(), enc.name());
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now < next {
@@ -214,14 +216,14 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         if idr.swap(false, Ordering::Relaxed) {
             enc.request_idr();
         }
-        let e = enc.encode(&frame)?;
+        let ts = (start.elapsed().as_micros() * 90 / 1000) as u32;
+        let e = enc.encode(&frame, ts as i64)?;
         if e.data.is_empty() {
             continue;
         }
         index = index.wrapping_add(1);
         let elapsed = t0.elapsed();
         pk.processing_latency = (elapsed.as_micros() / 100).min(u16::MAX as u128) as u16;
-        let ts = (start.elapsed().as_micros() * 90 / 1000) as u32;
         let is_idr = e.idr;
         let pkts = pk.packetize(index, ts, is_idr, e.data);
         stats.encode_us.fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);

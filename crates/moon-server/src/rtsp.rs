@@ -99,6 +99,7 @@ fn handle(host: &Host, req: &Message) -> Message {
                 audio_channels: num("x-nv-audio.surround.numChannels", 2),
                 audio_packet_ms: num("x-nv-aqos.packetDuration", 5),
                 encryption: num("x-ss-general.encryptionEnabled", 0),
+                encoder: host.cfg.encoder.clone(),
             };
             if let Some(cb) = a.get("x-ml-video.configuredBitrateKbps").and_then(|v| v.trim().parse::<u32>().ok()) {
                 if cb > 0 {

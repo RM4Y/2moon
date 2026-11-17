@@ -39,6 +39,9 @@ struct Args {
     /// Do not inject input into this machine; just log received events.
     #[arg(long)]
     no_input: bool,
+    /// Video encoder: auto (NVENC if available), software, nvenc, or an FFmpeg encoder name.
+    #[arg(long, default_value = "auto")]
+    encoder: String,
     /// Do not advertise the host on the local network.
     #[arg(long)]
     no_mdns: bool,
@@ -59,6 +62,7 @@ async fn main() -> Result<()> {
     cfg.preset_pin = args.pin;
     cfg.video_source = args.video;
     cfg.audio_source = args.audio;
+    cfg.encoder = args.encoder.clone();
     let host = state::Host::load(cfg)?;
     if host.cfg.video_source == state::VideoSourceKind::Portal {
         let cap = portal::PortalCapture::open(&host.cfg.state_dir, 60).await?;

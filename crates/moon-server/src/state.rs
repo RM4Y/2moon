@@ -58,6 +58,7 @@ pub struct Config {
     pub apps: Vec<App>,
     pub video_source: VideoSourceKind,
     pub audio_source: AudioSourceKind,
+    pub encoder: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -95,6 +96,7 @@ impl Config {
             apps: vec![App { id: 1, title: "Desktop".into(), hdr_supported: false }],
             video_source: VideoSourceKind::Test,
             audio_source: AudioSourceKind::Sine,
+            encoder: "auto".into(),
         }
     }
 }
