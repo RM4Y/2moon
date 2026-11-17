@@ -15,7 +15,13 @@ pub async fn run(c: &GsClient, out: &Path, seconds: u64) -> Result<()> {
     std::fs::create_dir_all(out)?;
     let rikey: [u8; 16] = moon_proto::crypto::random_bytes();
     let rikeyid: u32 = rand::random::<u32>() & 0x7fff_ffff;
-    let cfg = StreamConfig::default();
+    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let cfg = StreamConfig {
+        width: env("MOON_PROBE_WIDTH", 1280),
+        height: env("MOON_PROBE_HEIGHT", 720),
+        bitrate_kbps: env("MOON_PROBE_BITRATE", 10_000),
+        ..StreamConfig::default()
+    };
     let lp = LaunchParams { app_id: c.app_list().await?.first().map(|a| a.id).unwrap_or(1), width: cfg.width, height: cfg.height, fps: cfg.fps, rikey, rikeyid, audio_channels: 2 };
     let info = c.server_info().await?;
     let url = c.launch(&lp, info.current_game != 0).await?;

@@ -32,6 +32,8 @@ pub struct StreamParams {
     pub audio_packet_ms: u32,
     pub encryption: u32,
     pub encoder: String,
+    /// Client's `maxNumReferenceFrames` (0 = unconstrained).
+    pub max_ref_frames: u32,
 }
 
 impl Default for StreamParams {
@@ -49,6 +51,7 @@ impl Default for StreamParams {
             audio_packet_ms: 5,
             encryption: 0,
             encoder: "auto".into(),
+            max_ref_frames: 1,
         }
     }
 }
@@ -193,7 +196,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         warn!("client asked for codec {} but only H.264 is implemented; sending H.264", p.video_format);
     }
     let fps = p.fps.clamp(1, 240);
-    let mut enc = VideoEncoder::open(&p.encoder, p.width as usize, p.height as usize, fps, p.bitrate_kbps)?;
+    let mut enc = VideoEncoder::open(&p.encoder, p.width as usize, p.height as usize, fps, p.bitrate_kbps, if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames })?;
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
     let mut frame = I420Frame::new(p.width as usize, p.height as usize);
     let period = Duration::from_secs_f64(1.0 / fps as f64);

@@ -14,14 +14,14 @@ pub enum VideoEncoder {
 
 impl VideoEncoder {
     /// `choice`: "auto" (hardware if available), "software", "nvenc", or any FFmpeg encoder name.
-    pub fn open(choice: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32) -> Result<Self> {
+    pub fn open(choice: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32, max_refs: u32) -> Result<Self> {
         let ff_name = match choice {
             "software" | "openh264" => None,
             "auto" | "nvenc" => Some("h264_nvenc"),
             other => Some(other),
         };
         if let Some(name) = ff_name {
-            match FfmpegEncoder::new(name, width, height, fps, bitrate_kbps) {
+            match FfmpegEncoder::with_refs(name, width, height, fps, bitrate_kbps, max_refs) {
                 Ok(e) => return Ok(Self::Ffmpeg(e)),
                 Err(e) if choice == "auto" => warn!("hardware encoder unavailable ({e:#}); using software"),
                 Err(e) => return Err(e),

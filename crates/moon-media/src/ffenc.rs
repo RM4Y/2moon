@@ -173,6 +173,12 @@ unsafe impl Send for FfmpegEncoder {}
 impl FfmpegEncoder {
     /// Low-latency CBR encoder. `codec` is an FFmpeg encoder name such as `h264_nvenc`.
     pub fn new(codec: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32) -> Result<Self> {
+        Self::with_refs(codec, width, height, fps, bitrate_kbps, 1)
+    }
+
+    /// `max_refs`: maximum number of reference frames (clients that shrink the
+    /// decoder's picture buffer for latency require 1).
+    pub fn with_refs(codec: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32, max_refs: u32) -> Result<Self> {
         let a = api()?;
         let layout = probe_frame_layout(a)?;
         unsafe {
@@ -204,6 +210,7 @@ impl FfmpegEncoder {
                 ("bufsize", (bps / fps.max(1) as u64 * 2).to_string()),
                 ("g", "2147483647".into()),
                 ("bf", "0".into()),
+                ("refs", max_refs.max(1).to_string()),
                 ("threads", "1".into()),
             ];
             for (k, v) in &common {
