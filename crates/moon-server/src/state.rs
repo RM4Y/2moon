@@ -64,6 +64,8 @@ pub struct Config {
 pub enum VideoSourceKind {
     /// Animated synthetic test pattern.
     Test,
+    /// The desktop, through the XDG ScreenCast portal + PipeWire (Wayland).
+    Portal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -118,6 +120,7 @@ pub struct Host {
     stream: Mutex<Option<StreamHandle>>,
     sockets: Arc<StreamSockets>,
     pub input_events: AtomicU64,
+    pub portal: std::sync::OnceLock<Arc<crate::portal::PortalCapture>>,
 }
 
 impl Host {
@@ -149,6 +152,7 @@ impl Host {
             stream: Mutex::new(None),
             sockets: Arc::new(StreamSockets::bind(cfg_video_port, cfg_audio_port)?),
             input_events: AtomicU64::new(0),
+            portal: std::sync::OnceLock::new(),
         });
         host.save()?;
         Ok(host)
@@ -218,6 +222,10 @@ impl Host {
         self.stop_stream();
         let video: Box<dyn VideoSource> = match self.cfg.video_source {
             VideoSourceKind::Test => Box::new(TestPattern::new()),
+            VideoSourceKind::Portal => {
+                let cap = self.portal.get().ok_or_else(|| anyhow::anyhow!("screen capture is not initialised"))?;
+                Box::new(crate::portal::PipeWireSource::new(cap.clone()))
+            }
         };
         let audio: Option<Box<dyn AudioSource>> = match self.cfg.audio_source {
             AudioSourceKind::None => None,

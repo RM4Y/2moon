@@ -67,6 +67,63 @@ impl I420Frame {
             });
     }
 
+    /// Convert a packed 32-bit RGB image of any size to this frame's `dw x dh`,
+    /// resampling with a 2x2 box filter at the mapped position (cheap and
+    /// reasonably alias-free for typical downscales). `rgb_order` is true for
+    /// R,G,B,X byte order and false for B,G,R,X.
+    pub fn from_rgb32_scaled(&mut self, src: &[u8], sw: usize, sh: usize, stride: usize, rgb_order: bool, dw: usize, dh: usize) {
+        if sw == dw && sh == dh && !rgb_order {
+            return self.from_bgrx(src, sw, sh, stride);
+        }
+        if self.width != dw || self.height != dh {
+            *self = Self::new(dw, dh);
+        }
+        let (ri, bi) = if rgb_order { (0, 2) } else { (2, 0) };
+        let xmap: Vec<usize> = (0..dw).map(|x| ((x * 2 + 1) * sw / (dw * 2)).min(sw - 1)).collect();
+        let ymap: Vec<usize> = (0..dh).map(|y| ((y * 2 + 1) * sh / (dh * 2)).min(sh - 1)).collect();
+        let px = |x: usize, y: usize| -> (i32, i32, i32) {
+            // average the pixel with its right/bottom neighbours
+            let x1 = (x + 1).min(sw - 1);
+            let y1 = (y + 1).min(sh - 1);
+            let mut acc = (0i32, 0i32, 0i32);
+            for (xx, yy) in [(x, y), (x1, y), (x, y1), (x1, y1)] {
+                let o = yy * stride + xx * 4;
+                acc.0 += src[o + ri] as i32;
+                acc.1 += src[o + 1] as i32;
+                acc.2 += src[o + bi] as i32;
+            }
+            (acc.0 >> 2, acc.1 >> 2, acc.2 >> 2)
+        };
+        let cw = self.chroma_width();
+        self.y
+            .par_chunks_mut(dw * 2)
+            .zip(self.u.par_chunks_mut(cw).zip(self.v.par_chunks_mut(cw)))
+            .enumerate()
+            .for_each(|(cy, (yrows, (urow, vrow)))| {
+                let rows = if cy * 2 + 1 < dh { 2 } else { 1 };
+                let mut csum = vec![(0i32, 0i32, 0i32, 0i32); cw];
+                for dy in 0..rows {
+                    let sy = ymap[cy * 2 + dy];
+                    let yrow = &mut yrows[dy * dw..dy * dw + dw];
+                    for x in 0..dw {
+                        let (r, g, b) = px(xmap[x], sy);
+                        yrow[x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+                        let c = &mut csum[x / 2];
+                        c.0 += r;
+                        c.1 += g;
+                        c.2 += b;
+                        c.3 += 1;
+                    }
+                }
+                for (cx, c) in csum.iter().enumerate() {
+                    let n = c.3.max(1);
+                    let (r, g, b) = (c.0 / n, c.1 / n, c.2 / n);
+                    urow[cx] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                    vrow[cx] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                }
+            });
+    }
+
     /// Convert to packed `0x00RRGGBB` pixels (the format softbuffer expects).
     pub fn to_xrgb(&self, dst: &mut [u32]) {
         let (w, h) = (self.width, self.height);

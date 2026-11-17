@@ -3,6 +3,8 @@ mod control;
 mod http;
 mod input;
 mod mdns;
+mod pipewire;
+mod portal;
 mod rtsp;
 mod state;
 mod stream;
@@ -58,6 +60,10 @@ async fn main() -> Result<()> {
     cfg.video_source = args.video;
     cfg.audio_source = args.audio;
     let host = state::Host::load(cfg)?;
+    if host.cfg.video_source == state::VideoSourceKind::Portal {
+        let cap = portal::PortalCapture::open(&host.cfg.state_dir, 60).await?;
+        let _ = host.portal.set(cap);
+    }
     let no_input = args.no_input;
     control::spawn(
         host.clone(),
