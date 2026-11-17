@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # Build release archives: one for the host (server) and one for the client.
-#   scripts/package-release.sh v0.1.0 [output-dir]
+#   scripts/package-release.sh v0.2.0 [output-dir]
+#
+# Binaries are built inside a Debian 12 container (glibc 2.36) so they run on
+# most distributions (Arch, Debian 12+, Ubuntu 23.04+, Fedora 37+...).
+# Set NATIVE=1 to build with the local toolchain instead.
 set -eu
 VERSION="${1:?usage: $0 <version> [output-dir]}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${2:-$ROOT/dist}"
 ARCH="linux-$(uname -m)"
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
+if [ "${NATIVE:-0}" = 1 ]; then
+    cargo build --release --manifest-path "$ROOT/Cargo.toml"
+    BIN="$ROOT/target/release"
+else
+    docker run --rm -u "$(id -u):$(id -g)" -v "$ROOT":/src -w /src \
+        -e CARGO_HOME=/src/target/cargo-home -e CARGO_TARGET_DIR=/src/target/bookworm \
+        rust:1.97-bookworm cargo build --release --locked
+    BIN="$ROOT/target/bookworm/release"
+fi
 mkdir -p "$OUT"
 
 package() { # name binary [extra files...]
@@ -14,7 +26,7 @@ package() { # name binary [extra files...]
     local dir="$OUT/2moon-$name-$VERSION-$ARCH"
     rm -rf "$dir"
     mkdir -p "$dir"
-    cp "$ROOT/target/release/$bin" "$dir/"
+    cp "$BIN/$bin" "$dir/"
     strip "$dir/$bin"
     cp "$ROOT/README.md" "$ROOT/LICENSE" "$dir/"
     for f in "$@"; do mkdir -p "$dir/$(dirname "$f")"; cp "$ROOT/$f" "$dir/$f"; done
