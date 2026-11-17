@@ -66,6 +66,9 @@ pub struct Config {
     pub av1: bool,
     /// Reference frame invalidation available (direct NVENC).
     pub rfi: bool,
+    /// 4:4:4 encoding available for H.264 / HEVC (direct NVENC).
+    pub yuv444_h264: bool,
+    pub yuv444_hevc: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -113,6 +116,8 @@ impl Config {
             hevc: false,
             av1: false,
             rfi: false,
+            yuv444_h264: false,
+            yuv444_hevc: false,
         }
     }
 }

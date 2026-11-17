@@ -273,6 +273,8 @@ struct Renderer {
     tex_cuda: [glow::Texture; 2],
     cuda: Option<CudaGlTarget>,
     size: [usize; 2],
+    /// Chroma format of the I420 textures.
+    yuv444: bool,
     csc: Csc,
     source: Source,
     imported: Option<Imported>,
@@ -367,13 +369,14 @@ impl Renderer {
         let tex_nv12 = [new_texture(gl)?, new_texture(gl)?];
         let tex_cuda = [new_texture(gl)?, new_texture(gl)?];
         gl.bind_texture(glow::TEXTURE_2D, None);
-        Ok(Self { i420, nv12, vbo, vao, a_pos: 0, tex, tex_nv12, tex_cuda, cuda: None, size: [0, 0], csc: Csc::default(), source: Source::None, imported: None, modern })
+        Ok(Self { i420, nv12, vbo, vao, a_pos: 0, tex, tex_nv12, tex_cuda, cuda: None, size: [0, 0], yuv444: false, csc: Csc::default(), source: Source::None, imported: None, modern })
     }
 
     unsafe fn upload(&mut self, gl: &glow::Context, f: &I420Frame) {
         let (w, h) = (f.width, f.height);
-        let (cw, ch) = (f.chroma_width(), h.div_ceil(2));
-        let realloc = self.size != [w, h] || !matches!(self.source, Source::I420);
+        let (cw, ch) = (f.chroma_width(), f.chroma_height());
+        let realloc = self.size != [w, h] || self.yuv444 != f.yuv444 || !matches!(self.source, Source::I420);
+        self.yuv444 = f.yuv444;
         let (ifmt, fmt) = if self.modern { (glow::R8 as i32, glow::RED) } else { (glow::LUMINANCE as i32, glow::LUMINANCE) };
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         for (t, (data, pw, ph)) in self.tex.iter().zip([(&f.y, w, h), (&f.u, cw, ch), (&f.v, cw, ch)]) {

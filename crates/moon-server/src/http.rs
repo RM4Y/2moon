@@ -203,7 +203,11 @@ fn server_info(host: &Host, ctx: &Ctx, paired: bool) -> xml::Response {
         .field("mac", "00:00:00:00:00:00")
         .field("LocalIP", local_ip)
         // SCM flags: H.264 0x1, HEVC 0x100, AV1 main8 0x10000
-        .field("ServerCodecModeSupport", 0x0001 | if host.cfg.hevc { 0x100 } else { 0 } | if host.cfg.av1 { 0x10000 } else { 0 })
+        .field(
+            "ServerCodecModeSupport",
+            // H.264, HEVC, AV1 main 8-bit, then the Sunshine 4:4:4 extension bits.
+            0x0001 | if host.cfg.hevc { 0x100 } else { 0 } | if host.cfg.av1 { 0x10000 } else { 0 } | if host.cfg.yuv444_h264 { 0x40000 } else { 0 } | if host.cfg.yuv444_hevc { 0x80000 } else { 0 },
+        )
         .raw(
             "<SupportedDisplayMode><DisplayMode><Width>1920</Width><Height>1080</Height><RefreshRate>60</RefreshRate></DisplayMode>\
              <DisplayMode><Width>1280</Width><Height>720</Height><RefreshRate>60</RefreshRate></DisplayMode></SupportedDisplayMode>",

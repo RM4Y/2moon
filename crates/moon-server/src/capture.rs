@@ -29,7 +29,9 @@ impl VideoSource for TestPattern {
 
     fn grab(&mut self, out: &mut I420Frame, w: usize, h: usize) -> Result<()> {
         if out.width != w || out.height != h {
-            *out = I420Frame::new(w, h);
+            let (csc, yuv444) = (out.csc, out.yuv444);
+            *out = I420Frame::with_format(w, h, yuv444);
+            out.csc = csc;
         }
         let t = self.frame as usize;
         self.frame += 1;
@@ -47,8 +49,7 @@ impl VideoSource for TestPattern {
             }
         }
         // Chroma: eight colour bands.
-        let cw = out.chroma_width();
-        let ch = h.div_ceil(2);
+        let (cw, ch) = (out.chroma_width(), out.chroma_height());
         const BANDS: [(u8, u8); 8] = [(128, 128), (16, 146), (166, 16), (54, 34), (202, 222), (90, 240), (240, 110), (128, 128)];
         for y in 0..ch {
             for x in 0..cw {

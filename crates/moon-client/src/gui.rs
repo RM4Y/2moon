@@ -41,11 +41,13 @@ pub struct Settings {
     pub vsync: bool,
     /// Send the microphone to the host (2moon hosts only).
     pub mic: bool,
+    /// 4:4:4 chroma when available (sharper text, more bandwidth).
+    pub yuv444: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, yuv444: false }
     }
 }
 
@@ -329,7 +331,7 @@ impl GuiApp {
             },
             ..StreamConfig::default()
         };
-        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, zero_copy: Some(self.video.zero_copy_flag()) };
+        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, yuv444: s.yuv444, zero_copy: Some(self.video.zero_copy_flag()) };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
         let generation = self.video.reset();
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
@@ -703,6 +705,9 @@ impl GuiApp {
                     ui.selectable_value(&mut s.codec, v.to_string(), n);
                 }
             });
+            ui.end_row();
+            ui.label("Couleurs");
+            ui.checkbox(&mut s.yuv444, "4:4:4 (texte plus net ; plus de débit ; H.264 / HEVC si l'hôte le propose)");
             ui.end_row();
             ui.label("Audio");
             ui.horizontal(|ui| {

@@ -62,8 +62,16 @@ impl VideoEncoder {
                     info!("{codec:?} encoding with NVENC (direct{}) {width}x{height}@{fps} {bitrate_kbps} kbps", if e.supports_rfi() { ", RFI" } else { "" });
                     return Ok(Self::Nvenc(e));
                 }
+                Err(e) if opts.yuv444 => {
+                    // Only direct NVENC does 4:4:4: retry in 4:2:0 rather than fail.
+                    warn!("4:4:4 encoding unavailable ({e:#}); using 4:2:0");
+                    return Self::open(choice, codec, width, height, fps, bitrate_kbps, &crate::ffenc::EncoderOptions { yuv444: false, ..opts.clone() });
+                }
                 Err(e) => warn!("direct NVENC unavailable ({e:#}); trying FFmpeg"),
             }
+        }
+        if opts.yuv444 {
+            return Self::open(choice, codec, width, height, fps, bitrate_kbps, &crate::ffenc::EncoderOptions { yuv444: false, ..opts.clone() });
         }
         if let Some(name) = ff_name {
             match FfmpegEncoder::with_options(name, width, height, fps, bitrate_kbps, opts) {
@@ -90,6 +98,15 @@ impl VideoEncoder {
         match self {
             #[cfg(target_os = "linux")]
             Self::Nvenc(e) => e.invalidate(first, last),
+            _ => false,
+        }
+    }
+
+    /// Whether this encoder takes 4:4:4 pictures.
+    pub fn yuv444(&self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Nvenc(e) => e.yuv444,
             _ => false,
         }
     }

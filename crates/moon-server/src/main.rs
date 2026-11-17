@@ -109,8 +109,15 @@ async fn main() -> Result<()> {
         cfg.hevc = moon_media::ffenc::probe("hevc_nvenc").is_ok();
         cfg.av1 = moon_media::ffenc::probe("av1_nvenc").is_ok();
         cfg.rfi = matches!(cfg.encoder.as_str(), "auto" | "nvenc") && moon_media::nvenc::available(moon_media::encoder::Codec::Hevc);
+        if matches!(cfg.encoder.as_str(), "auto" | "nvenc") {
+            cfg.yuv444_h264 = moon_media::nvenc::available_444(moon_media::encoder::Codec::H264);
+            cfg.yuv444_hevc = cfg.hevc && moon_media::nvenc::available_444(moon_media::encoder::Codec::Hevc);
+        }
     }
     info!("codecs: H.264{}{}{}", if cfg.hevc { ", HEVC" } else { "" }, if cfg.av1 { ", AV1" } else { "" }, if cfg.rfi { " (direct NVENC, reference frame invalidation)" } else { "" });
+    if cfg.yuv444_h264 || cfg.yuv444_hevc {
+        info!("4:4:4: {}{}", if cfg.yuv444_h264 { "H.264 " } else { "" }, if cfg.yuv444_hevc { "HEVC" } else { "" });
+    }
     let host = state::Host::load(cfg)?;
     if args.list_clients {
         for c in host.paired_clients() {

@@ -134,7 +134,9 @@ impl VideoSource for PipeWireSource {
                 self.warned = true;
             }
             if out.width != w || out.height != h {
-                *out = I420Frame::new(w, h);
+                let (csc, yuv444) = (out.csc, out.yuv444);
+                *out = I420Frame::with_format(w, h, yuv444);
+                out.csc = csc;
             }
         }
         Ok(())

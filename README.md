@@ -123,6 +123,16 @@ contre de vraies captures Sunshine/Moonlight : matrice FEC vidéo de Cauchy (coe
 résolus sur trafic réel), IV GCM du contrôle et du RTSP chiffré (validés par le tag
 d'authentification), schéma d'IV de l'audio chiffré, en-tête de trame (latence hôte).
 
+## Couleurs 4:4:4
+
+Option « Couleurs 4:4:4 » du client (`moon-client stream --yuv444`) : la chrominance
+n'est plus sous-échantillonnée, le texte et les petits détails colorés restent nets.
+Négociée comme Sunshine (bits 4:4:4 de `ServerCodecModeSupport`,
+`x-ss-video[0].chromaSamplingType`), donc compatible avec Moonlight. Hôte : NVENC direct,
+H.264 et HEVC. Client : NVDEC pour le HEVC (GPU Turing ou plus récent), sinon le processeur.
+Plus de débit pour la même qualité ; repli automatique en 4:2:0 si l'un des deux côtés
+ne sait pas faire.
+
 ## Affichage sans copie (copie zéro)
 
 Dans l'interface graphique, les images décodées par le GPU ne repassent pas par la
@@ -161,5 +171,5 @@ scripts/e2e.sh                     # 25 vérifications bout en bout client ↔ h
 - HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC). Côté client : NVDEC (NVIDIA),
   VAAPI (Intel/AMD) ou le processeur.
 - Le micro n'existe qu'entre un client et un hôte 2moon.
-- Pas de HDR / 10 bits, ni de 4:4:4.
+- Pas de HDR / 10 bits. Pas de 4:4:4 en AV1 (NVENC ne le propose pas).
 - Les caractères absents de la disposition clavier de l'hôte (touches mortes) ne sont pas saisis.

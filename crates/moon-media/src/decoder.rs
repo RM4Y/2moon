@@ -81,10 +81,30 @@ pub fn supported(hardware: bool) -> Vec<Codec> {
     v
 }
 
+/// Can this machine decode `codec` in 4:4:4? NVDEC (HEVC, recent GPUs) or the
+/// CPU through FFmpeg; VAAPI is not used for 4:4:4.
+pub fn supports_444(codec: Codec, hardware: bool) -> bool {
+    match codec {
+        Codec::H264 => FfmpegDecoder::new(&["h264"]).is_ok(),
+        Codec::Hevc => (hardware && crate::nvdec::supports_444(Codec::Hevc)) || FfmpegDecoder::new(&["hevc"]).is_ok(),
+        Codec::Av1 => false,
+    }
+}
+
 impl VideoDecoder {
     /// `hardware`: try NVDEC, then VAAPI, before the CPU. `zero_copy`: let VAAPI
     /// pictures stay on the GPU (the caller must handle [`Decoded::Vaapi`]) while true.
-    pub fn open(codec: Codec, hardware: bool, zero_copy: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Self> {
+    pub fn open(codec: Codec, hardware: bool, zero_copy: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, yuv444: bool) -> Result<Self> {
+        if yuv444 {
+            if hardware && codec == Codec::Hevc && crate::nvdec::supports_444(codec) {
+                if let Ok(d) = NvDecoder::new(codec) {
+                    info!("{codec:?} 4:4:4 decoding with NVDEC");
+                    return Ok(Self::Nvdec(d));
+                }
+            }
+            info!("{codec:?} 4:4:4: decoding on the CPU");
+            return Self::open_cpu(codec);
+        }
         if hardware {
             match NvDecoder::new(codec) {
                 Ok(mut d) => {

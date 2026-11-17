@@ -349,8 +349,11 @@ impl FfmpegEncoder {
             if r < 0 {
                 bail!("av_frame_make_writable: {}", err_str(r));
             }
+            if f.yuv444 {
+                bail!("4:4:4 needs the direct NVENC encoder");
+            }
             let cw = f.chroma_width();
-            let ch = f.height.div_ceil(2);
+            let ch = f.chroma_height();
             for (plane, src, w, h) in [(0usize, &f.y, f.width, f.height), (1, &f.u, cw, ch), (2, &f.v, cw, ch)] {
                 let dst = *((self.frame as *const u8).add(FRAME_DATA + plane * 8) as *const *mut u8);
                 let ls = rd_i32(self.frame, FRAME_LINESIZE + plane * 4) as usize;
@@ -411,11 +414,13 @@ pub struct EncoderOptions {
     pub preset: String,
     /// The client uses reference frame invalidation: keep several references.
     pub rfi: bool,
+    /// Encode 4:4:4 (direct NVENC, H.264 / HEVC only).
+    pub yuv444: bool,
 }
 
 impl Default for EncoderOptions {
     fn default() -> Self {
-        Self { max_refs: 1, csc: Default::default(), preset: "p4".into(), rfi: false }
+        Self { max_refs: 1, csc: Default::default(), preset: "p4".into(), rfi: false, yuv444: false }
     }
 }
 
@@ -430,6 +435,8 @@ pub struct FfmpegDecoder {
     out: I420Frame,
     yuv420p: c_int,
     yuvj420p: c_int,
+    yuv444p: c_int,
+    yuvj444p: c_int,
     nv12: c_int,
     /// Hardware device reference (null for software decoding).
     hw_device: *mut c_void,
@@ -591,6 +598,8 @@ impl FfmpegDecoder {
                 out: I420Frame::new(2, 2),
                 yuv420p: fmt("yuv420p"),
                 yuvj420p: fmt("yuvj420p"),
+                yuv444p: fmt("yuv444p"),
+                yuvj444p: fmt("yuvj444p"),
                 nv12: fmt("nv12"),
                 va_display: if hw.is_some_and(|(k, _)| k == "vaapi") { vaapi_display(a, hw_device) } else { std::ptr::null_mut() },
                 hw_device,
@@ -671,6 +680,11 @@ impl FfmpegDecoder {
                     let (u, su) = plane(1, ch);
                     let (v, sv) = plane(2, ch);
                     self.out.copy_from_planes(w, h, [y, u, v], [sy, su, sv]);
+                } else if fmt == self.yuv444p || fmt == self.yuvj444p {
+                    let (y, sy) = plane(0, h);
+                    let (u, su) = plane(1, h);
+                    let (v, sv) = plane(2, h);
+                    self.out.copy_from_planes_fmt(w, h, true, [y, u, v], [sy, su, sv]);
                 } else if fmt == self.nv12 {
                     let (y, sy) = plane(0, h);
                     let (uv, suv) = plane(1, ch);

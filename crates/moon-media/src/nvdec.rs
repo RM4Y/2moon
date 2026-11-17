@@ -35,6 +35,7 @@ struct Api {
     map_frame: unsafe extern "C" fn(*mut c_void, c_int, *mut u64, *mut c_uint, *mut u8) -> CuResult,
     unmap_frame: unsafe extern "C" fn(*mut c_void, u64) -> CuResult,
     destroy_decoder: unsafe extern "C" fn(*mut c_void) -> CuResult,
+    get_decoder_caps: unsafe extern "C" fn(*mut u8) -> CuResult,
     mem_alloc_pitch: unsafe extern "C" fn(*mut u64, *mut usize, usize, usize, c_uint) -> CuResult,
     mem_free: unsafe extern "C" fn(u64) -> CuResult,
     gl_register_image: unsafe extern "C" fn(*mut *mut c_void, c_uint, c_uint, c_uint) -> CuResult,
@@ -73,6 +74,7 @@ fn api() -> Result<&'static Api> {
             map_frame: sym!(cuvid, b"cuvidMapVideoFrame64\0"),
             unmap_frame: sym!(cuvid, b"cuvidUnmapVideoFrame64\0"),
             destroy_decoder: sym!(cuvid, b"cuvidDestroyDecoder\0"),
+            get_decoder_caps: sym!(cuvid, b"cuvidGetDecoderCaps\0"),
             mem_alloc_pitch: sym!(cuda, b"cuMemAllocPitch_v2\0"),
             mem_free: sym!(cuda, b"cuMemFree_v2\0"),
             gl_register_image: sym!(cuda, b"cuGraphicsGLRegisterImage\0"),
@@ -259,6 +261,8 @@ struct Inner {
     width: usize,
     height: usize,
     surface_height: usize,
+    /// Stream is 4:4:4 (three full-size planes) rather than NV12.
+    yuv444: bool,
     surfaces: u32,
     out: I420Frame,
     ready: bool,
@@ -313,13 +317,13 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     let depth: u8 = get(fmt, 13);
     let min_surfaces: u8 = get(fmt, 15);
     let (w, h) = ((r - l).max(2) as usize, (b - t).max(2) as usize);
-    if depth != 0 || chroma != 1 {
+    if depth != 0 || (chroma != 1 && chroma != 3) {
         s.error = Some(format!("unsupported stream (bit depth {}, chroma format {chroma})", depth + 8));
         return 0;
     }
     let surfaces = (min_surfaces as u32).max(4) + 2;
     if !s.decoder.is_null() {
-        if s.width == w && s.height == h {
+        if s.width == w && s.height == h && s.yuv444 == (chroma == 3) {
             return surfaces as c_int;
         }
         (a.destroy_decoder)(s.decoder);
@@ -331,7 +335,7 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     put::<u64>(&mut ci, 8, coded_h as u64); // ulHeight
     put::<u64>(&mut ci, 16, surfaces as u64); // ulNumDecodeSurfaces
     put::<c_int>(&mut ci, 24, cuvid_codec(s.codec)); // CodecType
-    put::<c_int>(&mut ci, 28, 1); // ChromaFormat 4:2:0
+    put::<c_int>(&mut ci, 28, chroma); // ChromaFormat 4:2:0 / 4:4:4
     put::<u64>(&mut ci, 32, 4); // ulCreationFlags = PreferCUVID
     put::<u64>(&mut ci, 40, 0); // bitDepthMinus8
     put::<u64>(&mut ci, 56, coded_w as u64); // ulMaxWidth
@@ -340,7 +344,7 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     put::<i16>(&mut ci, 82, t as i16);
     put::<i16>(&mut ci, 84, r as i16);
     put::<i16>(&mut ci, 86, b as i16);
-    put::<c_int>(&mut ci, 88, 0); // OutputFormat NV12
+    put::<c_int>(&mut ci, 88, if chroma == 3 { 2 } else { 0 }); // OutputFormat NV12 / YUV444
     put::<c_int>(&mut ci, 92, 0); // DeinterlaceMode weave
     put::<u64>(&mut ci, 96, w as u64); // ulTargetWidth
     put::<u64>(&mut ci, 104, h as u64); // ulTargetHeight
@@ -354,6 +358,7 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, fmt: *mut c_void) -> c_int {
     s.width = w;
     s.height = h;
     s.surface_height = h;
+    s.yuv444 = chroma == 3;
     s.surfaces = surfaces;
     info!("NVDEC {:?} decoder {w}x{h} ({surfaces} surfaces)", s.codec);
     surfaces as c_int
@@ -393,6 +398,26 @@ unsafe extern "C" fn on_display(user: *mut c_void, info: *mut c_void) -> c_int {
     let (w, h) = (s.width, s.height);
     let chroma_src = dptr + pitch as u64 * ((s.surface_height as u64 + 1) & !1);
     s.gpu_out = None;
+    if s.yuv444 {
+        // Three full-size planes, one after the other (no zero-copy for 4:4:4).
+        if s.out.width != w || s.out.height != h || !s.out.yuv444 {
+            let csc = s.out.csc;
+            s.out = I420Frame::with_format(w, h, true);
+            s.out.csc = csc;
+        }
+        let plane = pitch as u64 * s.surface_height as u64;
+        let mut ok = true;
+        for (i, dst) in [s.out.y.as_mut_ptr(), s.out.u.as_mut_ptr(), s.out.v.as_mut_ptr()].into_iter().enumerate() {
+            ok &= memcpy2d(a, dptr + plane * i as u64, pitch as usize, 1, dst as u64, w, w, h) == 0;
+        }
+        (a.unmap_frame)(s.decoder, dptr);
+        if !ok {
+            s.error = Some("cuMemcpy2D failed".into());
+            return 0;
+        }
+        s.ready = true;
+        return 1;
+    }
     if s.zero_copy.as_ref().is_some_and(|z| z.load(Ordering::Relaxed)) {
         if let Some(b) = s.free_buffer(a, w, h) {
             let ok = memcpy2d(a, dptr, pitch as usize, 2, b.dptr, b.pitch, w, h) == 0
@@ -407,8 +432,10 @@ unsafe extern "C" fn on_display(user: *mut c_void, info: *mut c_void) -> c_int {
             return 1;
         }
     }
-    if s.out.width != w || s.out.height != h {
+    if s.out.width != w || s.out.height != h || s.out.yuv444 {
+        let csc = s.out.csc;
         s.out = I420Frame::new(w, h);
+        s.out.csc = csc;
     }
     let chroma_rows = h.div_ceil(2);
     let cw = s.out.chroma_width();
@@ -467,6 +494,7 @@ impl NvDecoder {
                 width: 0,
                 height: 0,
                 surface_height: 0,
+                yuv444: false,
                 surfaces: 0,
                 out: I420Frame::new(2, 2),
                 ready: false,
@@ -559,6 +587,31 @@ impl Drop for NvDecoder {
             }
         }
     }
+}
+
+/// True if this GPU's NVDEC decodes `codec` in 8-bit 4:4:4 (HEVC on Turing and later).
+pub fn supports_444(codec: Codec) -> bool {
+    // Probing opens a decoder (~0.3 s): do it once per codec.
+    static CACHE: std::sync::Mutex<Vec<(Codec, bool)>> = std::sync::Mutex::new(Vec::new());
+    if let Some(&(_, r)) = CACHE.lock().unwrap().iter().find(|(c, _)| *c == codec) {
+        return r;
+    }
+    let r = probe_444(codec);
+    CACHE.lock().unwrap().push((codec, r));
+    r
+}
+
+fn probe_444(codec: Codec) -> bool {
+    let Ok(d) = NvDecoder::new(codec) else { return false };
+    with_ctx(&d.ctx, |a| unsafe {
+        // CUVIDDECODECAPS (88 bytes): codec, chroma format, bit depth - 8, ..., bIsSupported at 24.
+        let mut caps = [0u8; 128];
+        put::<c_int>(&mut caps, 0, cuvid_codec(codec));
+        put::<c_int>(&mut caps, 4, 3);
+        put::<c_uint>(&mut caps, 8, 0);
+        (a.get_decoder_caps)(caps.as_mut_ptr()) == 0 && caps[24] != 0
+    })
+    .unwrap_or(false)
 }
 
 /// True if NVDEC can be initialised on this machine.

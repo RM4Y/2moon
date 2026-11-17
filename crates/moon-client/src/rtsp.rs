@@ -26,6 +26,8 @@ pub struct StreamConfig {
     pub encryption_requested: u32,
     /// Use reference frame invalidation if the host supports it.
     pub rfi: bool,
+    /// Ask for 4:4:4 chroma (only when the host advertises it for the codec).
+    pub yuv444: bool,
 }
 
 impl Default for StreamConfig {
@@ -43,6 +45,7 @@ impl Default for StreamConfig {
             min_fec_packets: 2,
             encryption_requested: 1 | 4,
             rfi: true,
+            yuv444: false,
         }
     }
 }
@@ -270,7 +273,7 @@ pub fn announce_sdp(c: &StreamConfig, host: &str, encryption: u32) -> String {
     // recover from a loss with a P-frame; without it, one reference keeps decoders happy.
     push("x-nv-video[0].maxNumReferenceFrames", if c.rfi { "0" } else { "1" }.into());
     push("x-nv-video[0].encoderCscMode", "0".into());
-    push("x-ss-video[0].chromaSamplingType", "0".into());
+    push("x-ss-video[0].chromaSamplingType", if c.yuv444 { "1" } else { "0" }.into());
     push("x-ss-video[0].intraRefresh", "0".into());
     push("x-nv-audio.surround.numChannels", c.audio_channels.to_string());
     push("x-nv-audio.surround.channelMask", c.audio_mask.to_string());

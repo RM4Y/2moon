@@ -83,6 +83,9 @@ enum Cmd {
         /// Send this computer's default microphone to the host (2moon hosts only).
         #[arg(long)]
         mic: bool,
+        /// Ask for 4:4:4 chroma (sharper text) if the host and this computer support it.
+        #[arg(long)]
+        yuv444: bool,
     },
 }
 
@@ -169,7 +172,7 @@ async fn main() -> Result<()> {
             }
             let _ = mdns.shutdown();
         }
-        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input, codec, software_decode, mic } => {
+        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input, codec, software_decode, mic, yuv444 } => {
             use moon_media::encoder::Codec;
             let codec = match codec.to_lowercase().as_str() {
                 "auto" => None,
@@ -193,7 +196,7 @@ async fn main() -> Result<()> {
                 },
                 ..StreamConfig::default()
             };
-            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, zero_copy: None };
+            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, yuv444, zero_copy: None };
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();

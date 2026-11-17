@@ -59,6 +59,7 @@ pub struct NvencEncoder {
     dpb: u32,
     force_idr: bool,
     pub codec_name: String,
+    pub yuv444: bool,
 }
 
 unsafe impl Send for NvencEncoder {}
@@ -79,7 +80,7 @@ impl NvencEncoder {
             bitrate_kbps: bitrate_kbps as c_int,
             preset,
             dpb: dpb.max(1) as c_int,
-            yuv444: 0,
+            yuv444: opts.yuv444 as c_int,
             matrix: match opts.csc.matrix {
                 Matrix::Bt601 => 0,
                 Matrix::Bt709 => 1,
@@ -97,7 +98,7 @@ impl NvencEncoder {
             Codec::Hevc => "hevc",
             Codec::Av1 => "av1",
         });
-        Ok(Self { e, codec, width, height, dpb: dpb.max(1), force_idr: true, codec_name })
+        Ok(Self { e, codec, width, height, dpb: dpb.max(1), force_idr: true, codec_name, yuv444: opts.yuv444 })
     }
 
     pub fn codec(&self) -> Codec {
@@ -110,6 +111,9 @@ impl NvencEncoder {
 
     /// Encode `f`; `ts` identifies the picture for [`Self::invalidate`] (the frame index).
     pub fn encode(&mut self, f: &I420Frame, ts: u64) -> Result<EncodedFrame<'_>> {
+        if f.yuv444 != self.yuv444 {
+            bail!("NVENC: frame and encoder chroma formats differ");
+        }
         if f.width != self.width || f.height != self.height {
             bail!("NVENC: frame is {}x{}, encoder is {}x{}", f.width, f.height, self.width, self.height);
         }
@@ -157,9 +161,45 @@ pub fn available(codec: Codec) -> bool {
     NvencEncoder::new(codec, 640, 360, 30, 2000, &Default::default(), RFI_DPB).is_ok()
 }
 
+/// True if NVENC can encode `codec` in 4:4:4 here.
+pub fn available_444(codec: Codec) -> bool {
+    codec != Codec::Av1 && NvencEncoder::new(codec, 640, 360, 30, 2000, &crate::ffenc::EncoderOptions { yuv444: true, ..Default::default() }, 1).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 4:4:4 HEVC: NVENC -> NVDEC keeps full-resolution chroma (one-pixel colour stripes).
+    #[test]
+    fn nvenc_nvdec_444_roundtrip() {
+        if !crate::nvdec::available() || !available_444(Codec::Hevc) || !crate::nvdec::supports_444(Codec::Hevc) {
+            eprintln!("no HEVC 4:4:4 on this GPU, skipping");
+            return;
+        }
+        let (w, h) = (1280, 720);
+        let opts = crate::ffenc::EncoderOptions { yuv444: true, ..Default::default() };
+        let mut enc = NvencEncoder::new(Codec::Hevc, w, h, 60, 20000, &opts, 1).unwrap();
+        let mut dec = crate::nvdec::NvDecoder::new(Codec::Hevc).unwrap();
+        let mut f = I420Frame::with_format(w, h, true);
+        for (k, (u, v)) in f.u.iter_mut().zip(f.v.iter_mut()).enumerate() {
+            // alternate chroma every pixel: impossible to represent in 4:2:0
+            (*u, *v) = if k % 2 == 0 { (60, 200) } else { (200, 60) };
+        }
+        let mut checked = 0;
+        for i in 1..=10u64 {
+            let data = enc.encode(&f, i).unwrap().data.to_vec();
+            if let Some(out) = dec.decode(&data).unwrap() {
+                assert!(out.yuv444, "decoder output is not 4:4:4");
+                let eu = out.u.iter().zip(&f.u).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum::<u64>() / f.u.len() as u64;
+                let ev = out.v.iter().zip(&f.v).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum::<u64>() / f.v.len() as u64;
+                assert!(eu <= 8 && ev <= 8, "chroma detail lost: mean error U {eu}, V {ev}");
+                checked += 1;
+            }
+        }
+        eprintln!("4:4:4 HEVC: {checked} pictures with full chroma");
+        assert!(checked >= 8);
+    }
 
     /// Encode with NVENC, decode with NVDEC; invalidate references mid-stream and
     /// check that the decoder, which never sees the "lost" frames, still decodes

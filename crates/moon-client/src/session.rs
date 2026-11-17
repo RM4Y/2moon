@@ -82,6 +82,8 @@ pub struct SessionOptions {
     pub hw_decode: bool,
     /// Send the default microphone to the host (if the host supports it).
     pub mic: bool,
+    /// Ask for 4:4:4 chroma when the host and this machine can do it.
+    pub yuv444: bool,
     /// Zero-copy: let GPU-decoded pictures stay on the GPU while this is true
     /// (the sink must handle [`Decoded::Vaapi`] and clear it if it cannot).
     pub zero_copy: Option<Arc<AtomicBool>>,
@@ -135,7 +137,17 @@ impl Session {
         };
         let mut opts = opts;
         opts.stream.video_format = codec as u32;
-        info!("video codec: {codec:?}");
+        // 4:4:4: Sunshine-extension bits of ServerCodecModeSupport.
+        let host_444 = match codec {
+            Codec::H264 => info.codec_support & 0x40000 != 0,
+            Codec::Hevc => info.codec_support & 0x80000 != 0,
+            Codec::Av1 => info.codec_support & 0x200000 != 0,
+        };
+        opts.stream.yuv444 = opts.yuv444 && host_444 && moon_media::decoder::supports_444(codec, opts.hw_decode);
+        if opts.yuv444 && !opts.stream.yuv444 {
+            info!("4:4:4 not available ({}); using 4:2:0", if host_444 { "this computer cannot decode it" } else { "not offered by the host for this codec" });
+        }
+        info!("video codec: {codec:?}{}", if opts.stream.yuv444 { " 4:4:4" } else { "" });
         let s = &opts.stream;
         let lp = LaunchParams { app_id, width: s.width, height: s.height, fps: s.fps, rikey, rikeyid, audio_channels: s.audio_channels };
         let resume = info.current_game != 0 && info.current_game == app_id;
@@ -175,12 +187,14 @@ impl Session {
         }
         if opts.decode {
             let hw = opts.hw_decode;
-            let zero_copy = opts.zero_copy.clone();
+            // No zero-copy for 4:4:4 (three full-size planes go through the CPU path).
+            let zero_copy = if opts.stream.yuv444 { None } else { opts.zero_copy.clone() };
+            let yuv444 = opts.stream.yuv444;
             let stats = stats.clone();
             let ctl = ctrl.sender.clone();
             let stop = stop.clone();
             threads.push(std::thread::Builder::new().name("video-dec".into()).spawn(move || {
-                if let Err(e) = video_decode(frx, sink, stats, ctl, stop, codec, hw, zero_copy) {
+                if let Err(e) = video_decode(frx, sink, stats, ctl, stop, codec, hw, zero_copy, yuv444) {
                     warn!("video decoder: {e:#}");
                 }
             })?);
@@ -396,8 +410,8 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
 const MAX_DECODE_BACKLOG: usize = 2;
 
 #[allow(clippy::too_many_arguments)]
-fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool, zero_copy: Option<Arc<AtomicBool>>) -> Result<()> {
-    let mut dec = VideoDecoder::open(codec, hw, zero_copy)?;
+fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool, zero_copy: Option<Arc<AtomicBool>>, yuv444: bool) -> Result<()> {
+    let mut dec = VideoDecoder::open(codec, hw, zero_copy, yuv444)?;
     let mut decoder_name = dec.name();
     *stats.decoder.lock().unwrap() = decoder_name.to_string();
     let mut need_idr = false;

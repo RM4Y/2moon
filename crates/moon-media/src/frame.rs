@@ -85,6 +85,8 @@ impl Csc {
     }
 }
 
+/// Planar YUV picture: 4:2:0 (chroma planes half size in both directions, the
+/// GameStream default) or 4:4:4 (full-size chroma, `yuv444`).
 #[derive(Clone, Debug)]
 pub struct I420Frame {
     pub width: usize,
@@ -94,27 +96,54 @@ pub struct I420Frame {
     pub v: Vec<u8>,
     /// Colour space used by the conversions to/from RGB.
     pub csc: Csc,
+    /// Full-resolution chroma (4:4:4) instead of 4:2:0.
+    pub yuv444: bool,
 }
 
 impl I420Frame {
     pub fn new(width: usize, height: usize) -> Self {
-        let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
-        Self { width, height, y: vec![16; width * height], u: vec![128; cw * ch], v: vec![128; cw * ch], csc: Csc::default() }
+        Self::with_format(width, height, false)
+    }
+
+    pub fn with_format(width: usize, height: usize, yuv444: bool) -> Self {
+        let (cw, ch) = if yuv444 { (width, height) } else { (width.div_ceil(2), height.div_ceil(2)) };
+        Self { width, height, y: vec![16; width * height], u: vec![128; cw * ch], v: vec![128; cw * ch], csc: Csc::default(), yuv444 }
     }
 
     pub fn chroma_width(&self) -> usize {
-        self.width.div_ceil(2)
+        if self.yuv444 { self.width } else { self.width.div_ceil(2) }
+    }
+
+    pub fn chroma_height(&self) -> usize {
+        if self.yuv444 { self.height } else { self.height.div_ceil(2) }
+    }
+
+    /// Reallocate for another size / chroma format, keeping the colour space.
+    fn reshape(&mut self, width: usize, height: usize, yuv444: bool) {
+        if self.width != width || self.height != height || self.yuv444 != yuv444 {
+            let csc = self.csc;
+            *self = Self::with_format(width, height, yuv444);
+            self.csc = csc;
+        }
     }
 
     /// Convert from packed 32-bit BGRX/BGRA (little-endian `0xAARRGGBB` words) with the given stride in bytes.
     pub fn from_bgrx(&mut self, src: &[u8], width: usize, height: usize, stride: usize) {
         assert!(src.len() >= stride * (height - 1) + width * 4);
-        if self.width != width || self.height != height {
-            let csc = self.csc;
-            *self = Self::new(width, height);
-            self.csc = csc;
-        }
+        self.reshape(width, height, self.yuv444);
         let ([cy_, cu_, cv_], yo) = self.csc.forward();
+        if self.yuv444 {
+            self.y.par_chunks_mut(width).zip(self.u.par_chunks_mut(width).zip(self.v.par_chunks_mut(width))).enumerate().for_each(|(row, (yrow, (urow, vrow)))| {
+                let s = &src[row * stride..row * stride + width * 4];
+                for (x, px) in s.chunks_exact(4).enumerate() {
+                    let (b, g, r) = (px[0] as i32, px[1] as i32, px[2] as i32);
+                    yrow[x] = (((cy_[0] * r + cy_[1] * g + cy_[2] * b + 32768) >> 16) + yo).clamp(0, 255) as u8;
+                    urow[x] = (((cu_[0] * r + cu_[1] * g + cu_[2] * b + 32768) >> 16) + 128).clamp(0, 255) as u8;
+                    vrow[x] = (((cv_[0] * r + cv_[1] * g + cv_[2] * b + 32768) >> 16) + 128).clamp(0, 255) as u8;
+                }
+            });
+            return;
+        }
         let cw = self.chroma_width();
         // Process two source rows at a time: one chroma row.
         self.y
@@ -158,15 +187,12 @@ impl I420Frame {
     /// resampling with a 2x2 box filter at the mapped position (cheap and
     /// reasonably alias-free for typical downscales). `rgb_order` is true for
     /// R,G,B,X byte order and false for B,G,R,X.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_rgb32_scaled(&mut self, src: &[u8], sw: usize, sh: usize, stride: usize, rgb_order: bool, dw: usize, dh: usize) {
         if sw == dw && sh == dh && !rgb_order {
             return self.from_bgrx(src, sw, sh, stride);
         }
-        if self.width != dw || self.height != dh {
-            let csc = self.csc;
-            *self = Self::new(dw, dh);
-            self.csc = csc;
-        }
+        self.reshape(dw, dh, self.yuv444);
         let ([cy_, cu_, cv_], yo) = self.csc.forward();
         let (ri, bi) = if rgb_order { (0, 2) } else { (2, 0) };
         let xmap: Vec<usize> = (0..dw).map(|x| ((x * 2 + 1) * sw / (dw * 2)).min(sw - 1)).collect();
@@ -184,6 +210,18 @@ impl I420Frame {
             }
             (acc.0 >> 2, acc.1 >> 2, acc.2 >> 2)
         };
+        if self.yuv444 {
+            self.y.par_chunks_mut(dw).zip(self.u.par_chunks_mut(dw).zip(self.v.par_chunks_mut(dw))).enumerate().for_each(|(row, (yrow, (urow, vrow)))| {
+                let sy = ymap[row];
+                for x in 0..dw {
+                    let (r, g, b) = px(xmap[x], sy);
+                    yrow[x] = (((cy_[0] * r + cy_[1] * g + cy_[2] * b + 32768) >> 16) + yo).clamp(0, 255) as u8;
+                    urow[x] = (((cu_[0] * r + cu_[1] * g + cu_[2] * b + 32768) >> 16) + 128).clamp(0, 255) as u8;
+                    vrow[x] = (((cv_[0] * r + cv_[1] * g + cv_[2] * b + 32768) >> 16) + 128).clamp(0, 255) as u8;
+                }
+            });
+            return;
+        }
         let cw = self.chroma_width();
         self.y
             .par_chunks_mut(dw * 2)
@@ -219,15 +257,17 @@ impl I420Frame {
         let (w, h) = (self.width, self.height);
         assert!(dst.len() >= w * h);
         let cw = self.chroma_width();
+        let shift = if self.yuv444 { 0 } else { 1 };
         let (ky, krv, kgu, kgv, kbu, yo) = self.csc.inverse();
         dst[..w * h].par_chunks_mut(w).enumerate().for_each(|(row, out)| {
             let yrow = &self.y[row * w..row * w + w];
-            let urow = &self.u[(row / 2) * cw..(row / 2) * cw + cw];
-            let vrow = &self.v[(row / 2) * cw..(row / 2) * cw + cw];
+            let cr = row >> shift;
+            let urow = &self.u[cr * cw..cr * cw + cw];
+            let vrow = &self.v[cr * cw..cr * cw + cw];
             for x in 0..w {
                 let c = ky * (yrow[x] as i32 - yo);
-                let d = urow[x / 2] as i32 - 128;
-                let e = vrow[x / 2] as i32 - 128;
+                let d = urow[x >> shift] as i32 - 128;
+                let e = vrow[x >> shift] as i32 - 128;
                 let r = ((c + krv * e + 32768) >> 16).clamp(0, 255) as u32;
                 let g = ((c + kgu * d + kgv * e + 32768) >> 16).clamp(0, 255) as u32;
                 let b = ((c + kbu * d + 32768) >> 16).clamp(0, 255) as u32;
@@ -241,6 +281,7 @@ impl I420Frame {
         self.width = o.width;
         self.height = o.height;
         self.csc = o.csc;
+        self.yuv444 = o.yuv444;
         self.y.clone_from(&o.y);
         self.u.clone_from(&o.u);
         self.v.clone_from(&o.v);
@@ -248,11 +289,7 @@ impl I420Frame {
 
     /// Copy from NV12 (luma plane + interleaved U/V plane), e.g. GPU decoder output.
     pub fn copy_from_nv12(&mut self, w: usize, h: usize, y: &[u8], y_stride: usize, uv: &[u8], uv_stride: usize) {
-        if self.width != w || self.height != h {
-            let csc = self.csc;
-            *self = Self::new(w, h);
-            self.csc = csc;
-        }
+        self.reshape(w, h, false);
         let cw = self.chroma_width();
         for r in 0..h {
             self.y[r * w..r * w + w].copy_from_slice(&y[r * y_stride..r * y_stride + w]);
@@ -266,15 +303,15 @@ impl I420Frame {
         }
     }
 
-    /// Copy from strided planes (e.g. decoder output).
+    /// Copy from strided 4:2:0 planes (e.g. decoder output).
     pub fn copy_from_planes(&mut self, w: usize, h: usize, planes: [&[u8]; 3], strides: [usize; 3]) {
-        if self.width != w || self.height != h {
-            let csc = self.csc;
-            *self = Self::new(w, h);
-            self.csc = csc;
-        }
-        let cw = self.chroma_width();
-        let ch = h.div_ceil(2);
+        self.copy_from_planes_fmt(w, h, false, planes, strides)
+    }
+
+    /// Copy from strided planes, 4:2:0 or 4:4:4.
+    pub fn copy_from_planes_fmt(&mut self, w: usize, h: usize, yuv444: bool, planes: [&[u8]; 3], strides: [usize; 3]) {
+        self.reshape(w, h, yuv444);
+        let (cw, ch) = (self.chroma_width(), self.chroma_height());
         for r in 0..h {
             self.y[r * w..r * w + w].copy_from_slice(&planes[0][r * strides[0]..r * strides[0] + w]);
         }
@@ -323,6 +360,30 @@ mod tests {
                     let cpu = ((out[0] >> shift) & 0xff) as i32;
                     assert!((gpu - cpu).abs() <= 1, "mode {mode} yuv ({y},{u},{v}) channel {c}: gpu {gpu} cpu {cpu}");
                 }
+            }
+        }
+    }
+
+    /// 4:4:4 keeps full-resolution chroma: a one-pixel colour pattern survives exactly.
+    #[test]
+    fn yuv444_keeps_chroma_detail() {
+        let (w, h) = (16, 8);
+        let mut src = vec![0u8; w * h * 4];
+        for (i, px) in src.chunks_exact_mut(4).enumerate() {
+            // alternating red / blue columns: lost entirely by 4:2:0 subsampling
+            px.copy_from_slice(if i % 2 == 0 { &[0, 0, 220, 255] } else { &[220, 0, 0, 255] });
+        }
+        let mut f = I420Frame::with_format(w, h, true);
+        f.from_bgrx(&src, w, h, w * 4);
+        assert_eq!((f.u.len(), f.chroma_width(), f.chroma_height()), (w * h, w, h));
+        let mut out = vec![0u32; w * h];
+        f.to_xrgb(&mut out);
+        for (i, o) in out.iter().enumerate() {
+            let (r, b) = ((o >> 16) & 0xff, o & 0xff);
+            if i % 2 == 0 {
+                assert!(r > 180 && b < 40, "pixel {i}: {o:06x}");
+            } else {
+                assert!(b > 180 && r < 40, "pixel {i}: {o:06x}");
             }
         }
     }

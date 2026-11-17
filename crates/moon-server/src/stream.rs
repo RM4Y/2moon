@@ -35,6 +35,8 @@ pub struct StreamParams {
     pub encoder: String,
     /// Client's `maxNumReferenceFrames` (0 = unconstrained).
     pub max_ref_frames: u32,
+    /// Client asked for 4:4:4 chroma (x-ss-video[0].chromaSamplingType = 1).
+    pub yuv444: bool,
     /// Client's `encoderCscMode`.
     pub csc_mode: u32,
     pub nvenc_preset: String,
@@ -56,6 +58,7 @@ impl Default for StreamParams {
             encryption: 0,
             encoder: "auto".into(),
             max_ref_frames: 1,
+            yuv444: false,
             csc_mode: 0,
             nvenc_preset: "p4".into(),
         }
@@ -234,10 +237,11 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         fps,
         p.bitrate_kbps,
         // maxNumReferenceFrames=0: the client uses RFI and lets us keep several references.
-        &EncoderOptions { max_refs: if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames }, csc: Csc::from_mode(p.csc_mode), preset: p.nvenc_preset.clone(), rfi: p.max_ref_frames == 0 },
+        &EncoderOptions { max_refs: if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames }, csc: Csc::from_mode(p.csc_mode), preset: p.nvenc_preset.clone(), rfi: p.max_ref_frames == 0, yuv444: p.yuv444 },
     )?;
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
-    let mut frame = I420Frame::new(p.width as usize, p.height as usize);
+    // 4:4:4 only if the encoder could really be opened that way.
+    let mut frame = I420Frame::with_format(p.width as usize, p.height as usize, enc.yuv444());
     frame.csc = Csc::from_mode(p.csc_mode);
     *live.lock().unwrap() = LiveStats {
         active: true,
@@ -262,7 +266,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     let start = Instant::now();
     let mut next = start;
     let mut index: u32 = 0;
-    info!("video: {}x{}@{} {} kbps from {} via {}", p.width, p.height, fps, p.bitrate_kbps, src.name(), enc.name());
+    info!("video: {}x{}@{} {} kbps {} from {} via {}", p.width, p.height, fps, p.bitrate_kbps, if enc.yuv444() { "4:4:4" } else { "4:2:0" }, src.name(), enc.name());
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now < next {

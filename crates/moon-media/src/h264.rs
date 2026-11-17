@@ -45,6 +45,9 @@ impl H264Encoder {
             self.enc.force_intra_frame();
             self.force_idr = false;
         }
+        if f.yuv444 {
+            return Err(anyhow!("OpenH264 cannot encode 4:4:4"));
+        }
         let cw = f.chroma_width();
         let src = YUVSlices::new((&f.y, &f.u, &f.v), (f.width, f.height), (f.width, cw, cw));
         let bs = self.enc.encode(&src).map_err(|e| anyhow!("encode: {e}"))?;
