@@ -11,14 +11,19 @@ hex = "0.4.3"
 http-body-util = "0.1.5"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+moon-media = { version = "0.1.0", path = "../moon-media" }
 moon-proto = { version = "0.1.0", path = "../moon-proto" }
 rand = "0.8"
+rayon = "1.12.0"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rusty_enet = "0.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+socket2 = "0.6.5"
+softbuffer = "0.4.8"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
+winit = "0.30.13"

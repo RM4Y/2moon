@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use moon_client::http::GsClient;
+use moon_client::rtsp::StreamConfig;
+use moon_client::session::{Session, SessionOptions};
 use moon_client::store::{KnownHost, Store};
 
 #[derive(Parser)]
@@ -36,6 +38,33 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, default_value_t = 5)]
         seconds: u64,
+    },
+    /// Stream an application from a paired host.
+    Stream {
+        host: String,
+        /// Application id (default: first app).
+        #[arg(long)]
+        app: Option<u32>,
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+        #[arg(long, default_value_t = 60)]
+        fps: u32,
+        /// Video bitrate in kbit/s.
+        #[arg(long, default_value_t = 20000)]
+        bitrate: u32,
+        /// Audio channels (2, 6 or 8).
+        #[arg(long, default_value_t = 2)]
+        audio_channels: u32,
+        /// No window and no audio output: receive and decode for N seconds, print stats.
+        #[arg(long)]
+        headless: bool,
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Quit the app on the host when the stream window closes.
+        #[arg(long)]
+        quit_on_exit: bool,
     },
 }
 
@@ -103,6 +132,75 @@ async fn main() -> Result<()> {
         Cmd::Probe { host, out, seconds } => {
             let c = client_for(&store, &host);
             moon_client::probe::run(&c, &out, seconds).await?;
+        }
+        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit } => {
+            let c = client_for(&store, &host);
+            c.server_cert.as_ref().context("not paired with this host (run `pair` first)")?;
+            let stream = StreamConfig {
+                width,
+                height,
+                fps,
+                bitrate_kbps: bitrate,
+                audio_channels,
+                audio_mask: match audio_channels {
+                    6 => 0x3f,
+                    8 => 0x63f,
+                    _ => 0x3,
+                },
+                ..StreamConfig::default()
+            };
+            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true };
+            if headless {
+                let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
+                let f2 = first.clone();
+                let session = Session::start(&c, opts, Box::new(move |p| {
+                    f2.lock().unwrap().get_or_insert((p.width, p.height, p.pixels[p.pixels.len() / 2]));
+                }))
+                .await?;
+                let t = std::time::Instant::now();
+                while t.elapsed() < std::time::Duration::from_secs(seconds) {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if let Ok(moon_client::control::ControlEvent::Terminated(code)) = session.control_events.try_recv() {
+                        println!("host terminated the session (0x{code:08x})");
+                        break;
+                    }
+                }
+                let fps = session.stats.frames_decoded.load(std::sync::atomic::Ordering::Relaxed) as f64 / t.elapsed().as_secs_f64();
+                println!("{}", session.stats.summary());
+                println!("decode rate {fps:.1} fps; first picture {:?}", first.lock().unwrap());
+                session.stop();
+            } else {
+                let (el, slot) = moon_client::window::make_event_loop()?;
+                let s2 = slot.clone();
+                let mut session = Session::start(&c, opts, Box::new(move |p| s2.put(p))).await?;
+                let proxy = moon_client::window::proxy(&slot);
+                let events = std::mem::replace(&mut session.control_events, std::sync::mpsc::channel().1);
+                std::thread::spawn(move || {
+                    while let Ok(ev) = events.recv() {
+                        match ev {
+                            moon_client::control::ControlEvent::Terminated(code) => {
+                                let _ = proxy.send_event(moon_client::window::UserEvent::SessionEnded(format!("host ended the session (0x{code:08x})")));
+                            }
+                            moon_client::control::ControlEvent::Disconnected => {
+                                let _ = proxy.send_event(moon_client::window::UserEvent::SessionEnded("control stream disconnected".into()));
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                let title = format!("2moon — {}", c.host);
+                let mut app = moon_client::window::App::new(title, width, height, slot, session.control.clone(), session.stats.clone());
+                el.run_app(&mut app)?;
+                if let Some(why) = &app.exit_reason {
+                    println!("{why}");
+                }
+                println!("{}", session.stats.summary());
+                session.stop();
+                if quit_on_exit {
+                    c.cancel().await?;
+                }
+            }
         }
         Cmd::Quit { host } => {
             client_for(&store, &host).cancel().await?;
