@@ -47,6 +47,9 @@ struct Args {
     /// Output to capture for --video kwin (substring of the output name; empty = first).
     #[arg(long, default_value = "")]
     output: String,
+    /// List paired clients and exit.
+    #[arg(long)]
+    list_clients: bool,
     /// Authorise this executable to use KWin's screencast protocol, then exit.
     #[arg(long)]
     install_kwin_permission: bool,
@@ -85,6 +88,12 @@ async fn main() -> Result<()> {
     }
     info!("codecs: H.264{}{}", if cfg.hevc { ", HEVC" } else { "" }, if cfg.av1 { ", AV1" } else { "" });
     let host = state::Host::load(cfg)?;
+    if args.list_clients {
+        for c in host.paired_clients() {
+            println!("{}", c.name);
+        }
+        return Ok(());
+    }
     if host.cfg.video_source == state::VideoSourceKind::Portal {
         let cap = portal::PortalCapture::open(&host.cfg.state_dir, 60).await?;
         let _ = host.portal.set(cap);

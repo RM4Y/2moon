@@ -32,7 +32,6 @@ const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
 const SPA_FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
 const SPA_MEDIA_TYPE_VIDEO: u32 = 2;
 const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
-const SPA_CHOICE_NONE: u32 = 0;
 const SPA_CHOICE_RANGE: u32 = 1;
 const SPA_CHOICE_ENUM: u32 = 3;
 const SPA_CHOICE_FLAGS: u32 = 4;
@@ -516,6 +515,7 @@ impl PwCapture {
         self.shared.state.lock().unwrap().clone()
     }
 
+    #[allow(dead_code)]
     pub fn frames(&self) -> u64 {
         self.shared.frames.load(std::sync::atomic::Ordering::Relaxed)
     }

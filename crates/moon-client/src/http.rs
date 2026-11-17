@@ -265,6 +265,8 @@ impl GsClient {
             ("localAudioPlayMode", "0".into()),
             ("surroundAudioInfo", ((mask << 16) | lp.audio_channels).to_string()),
             ("remoteControllersBitmap", "0".into()),
+            // We support encrypted RTSP (rtspenc://).
+            ("corever", "1".into()),
             ("gcmap", "0".into()),
         ];
         let path = if resume { "/resume" } else { "/launch" };

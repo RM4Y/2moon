@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use moon_proto::rtsp::{sdp_attributes, Message};
+use moon_proto::rtsp::{enc, sdp_attributes, Message};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
@@ -37,6 +37,17 @@ async fn connection(host: Arc<Host>, mut sock: TcpStream) -> Result<()> {
             return Ok(());
         }
         buf.extend_from_slice(&tmp[..n]);
+        if enc::is_encrypted(&buf) {
+            let Some(sess) = host.current_session() else { return Ok(()) };
+            let Some((seq, plain, _)) = enc::open(&sess.rikey, &buf, false).map_err(|e| anyhow::anyhow!(e))? else { continue };
+            let Some((req, _)) = Message::parse(&plain).map_err(|e| anyhow::anyhow!(e))? else {
+                anyhow::bail!("truncated encrypted RTSP request");
+            };
+            let resp = handle(&host, &req);
+            sock.write_all(&enc::seal(&sess.rikey, seq, true, &resp.encode())).await?;
+            sock.shutdown().await?;
+            return Ok(());
+        }
         if let Some((req, _)) = Message::parse(&buf).map_err(|e| anyhow::anyhow!(e))? {
             let resp = handle(&host, &req);
             sock.write_all(&resp.encode()).await?;

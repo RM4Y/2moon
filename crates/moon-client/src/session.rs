@@ -124,7 +124,7 @@ impl Session {
         }
         let url = gs.launch(&lp, resume).await?;
         info!("{} app {app_id}; RTSP at {url}", if resume { "resumed" } else { "launched" });
-        let mut rtsp = RtspClient::new(&url, &gs.host, info.http_port.wrapping_add(21));
+        let mut rtsp = RtspClient::new(&url, &gs.host, info.http_port.wrapping_add(21)).with_key(&url, rikey);
         let neg = rtsp.handshake(s).await?;
         debug!("negotiated {neg:?}");
 

@@ -40,7 +40,6 @@ pub struct LaunchSession {
     pub rikey: [u8; 16],
     pub rikeyid: u32,
     pub client_ip: std::net::IpAddr,
-    pub surround_info: u32,
     pub ss_ping_payload: [u8; 16],
     pub control_connect_data: u32,
 }

@@ -303,16 +303,17 @@ fn launch(host: &Host, q: &HashMap<String, String>, ctx: &Ctx, resume: bool) -> 
         rikey,
         rikeyid: rikeyid as u32,
         client_ip: canonical_ip(ctx.peer.ip()),
-        surround_info: q.get("surroundAudioInfo").and_then(|s| s.parse().ok()).unwrap_or(196610),
         ss_ping_payload: rand_alnum16(),
         control_connect_data: rand::random(),
     };
     info!("{} app {app_id} at {width}x{height}@{fps} for {}", if resume { "Resuming" } else { "Launching" }, session.client_ip);
     host.set_session(Some(session));
     let local = ctx.local.map(|a| canonical_ip(a.ip())).unwrap_or(IpAddr::from([127, 0, 0, 1]));
+    // Clients announcing `corever` support encrypted RTSP; use it unless disabled.
+    let scheme = if q.contains_key("corever") && std::env::var_os("MOON_NO_RTSPENC").is_none() { "rtspenc" } else { "rtsp" };
     let url = match local {
-        IpAddr::V4(v4) => format!("rtsp://{v4}:{}", host.cfg.rtsp_port),
-        IpAddr::V6(v6) => format!("rtsp://[{v6}]:{}", host.cfg.rtsp_port),
+        IpAddr::V4(v4) => format!("{scheme}://{v4}:{}", host.cfg.rtsp_port),
+        IpAddr::V6(v6) => format!("{scheme}://[{v6}]:{}", host.cfg.rtsp_port),
     };
     let r = xml::Response::ok();
     Ok(if resume { r.field("resume", 1) } else { r.field("gamesession", 1) }.field("sessionUrl0", url))

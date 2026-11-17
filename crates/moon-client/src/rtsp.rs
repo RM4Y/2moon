@@ -76,6 +76,8 @@ pub struct RtspClient {
     url: String,
     cseq: u32,
     session: Option<String>,
+    /// Session key when the host asked for encrypted RTSP (`rtspenc://`).
+    key: Option<[u8; 16]>,
 }
 
 impl RtspClient {
@@ -87,7 +89,15 @@ impl RtspClient {
             .map(|(h, p)| (h.trim_matches(['[', ']']).to_string(), p.trim_end_matches('/').parse().unwrap_or(fallback_port)))
             .unwrap_or((fallback_host.to_string(), fallback_port));
         let url = if host.contains(':') { format!("rtsp://[{host}]:{port}") } else { format!("rtsp://{host}:{port}") };
-        Self { host, port, url, cseq: 0, session: None }
+        Self { host, port, url, cseq: 0, session: None, key: None }
+    }
+
+    /// Enable encrypted RTSP if the session URL requires it.
+    pub fn with_key(mut self, session_url: &str, key: [u8; 16]) -> Self {
+        if session_url.starts_with("rtspenc://") {
+            self.key = Some(key);
+        }
+        self
     }
 
     /// Send one request on its own TCP connection (what modern hosts expect) and read the reply.
@@ -102,9 +112,27 @@ impl RtspClient {
         debug!("RTSP > {}", String::from_utf8_lossy(&req.encode()));
         let mut sock = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((self.host.as_str(), self.port))).await.context("RTSP connect timeout")??;
         sock.set_nodelay(true)?;
-        sock.write_all(&req.encode()).await?;
         let mut buf = Vec::with_capacity(4096);
         let mut tmp = [0u8; 4096];
+        if let Some(key) = self.key {
+            sock.write_all(&rtsp::enc::seal(&key, self.cseq, false, &req.encode())).await?;
+            loop {
+                let n = tokio::time::timeout(Duration::from_secs(10), sock.read(&mut tmp)).await.context("RTSP read timeout")??;
+                if n == 0 {
+                    bail!("RTSP connection closed before a complete encrypted response");
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some((_, plain, _)) = rtsp::enc::open(&key, &buf, true).map_err(|e| anyhow::anyhow!(e))? {
+                    let (mut m, used) = Message::parse(&plain).map_err(|e| anyhow::anyhow!(e))?.context("truncated RTSP response")?;
+                    if m.get("Content-Length").is_none() {
+                        m.body = plain[used..].to_vec();
+                    }
+                    debug!("RTSP (encrypted) < {:?}", m.start);
+                    return Ok(m);
+                }
+            }
+        }
+        sock.write_all(&req.encode()).await?;
         loop {
             let n = tokio::time::timeout(Duration::from_secs(10), sock.read(&mut tmp)).await.context("RTSP read timeout")??;
             if n == 0 {

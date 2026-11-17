@@ -60,6 +60,22 @@ check "gamepad event decoded" 'grep -q "input: Gamepad(Gamepad { index: 0, activ
 check "control stream used encryption v2" 'grep -q "encryption v2" "$WORK/server.log"'
 check "audio was encrypted" 'grep -q "packets, encrypted" "$WORK/server.log"'
 
+check "RTSP negotiated encrypted (rtspenc)" 'grep -q "RTSP at rtspenc://" "$WORK/stream.txt"'
+
+echo "== codecs and surround audio"
+for codec in h264 hevc av1; do
+    $C stream "127.0.0.1:$PORT" --headless --seconds 2 --width 1280 --height 720 --codec $codec >"$WORK/c-$codec.txt" 2>&1
+    if grep -q "not available\|cannot encode" "$WORK/c-$codec.txt"; then echo "  SKIP  $codec (no hardware support)"; continue; fi
+    n=$(grep -oP '\d+(?= decoded)' "$WORK/c-$codec.txt" || echo 0)
+    check "$codec stream decodes (got $n frames)" '[ "${n:-0}" -ge 80 ] && grep -qi "^codec $codec" "$WORK/c-$codec.txt"'
+done
+for ch in 6 8; do
+    $C stream "127.0.0.1:$PORT" --headless --seconds 2 --width 640 --height 360 --audio-channels $ch >"$WORK/a-$ch.txt" 2>&1
+    ap=$(grep -oP 'audio: \K\d+' "$WORK/a-$ch.txt" || echo 0)
+    check "$ch-channel audio received (got $ap packets)" '[ "${ap:-0}" -ge 250 ]'
+done
+check "host encoded 6 and 8 channel Opus" 'grep -q "audio: 6-channel" "$WORK/server.log" && grep -q "audio: 8-channel" "$WORK/server.log"'
+
 echo "== resume + quit"
 $C stream "127.0.0.1:$PORT" --headless --seconds 2 --width 640 --height 360 >"$WORK/stream2.txt" 2>&1
 check "second session (resume) streams" 'grep -qP "\d+ decoded" "$WORK/stream2.txt" && [ "$(grep -oP "\d+(?= decoded)" "$WORK/stream2.txt")" -gt 30 ]'

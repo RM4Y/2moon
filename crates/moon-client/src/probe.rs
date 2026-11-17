@@ -26,7 +26,7 @@ pub async fn run(c: &GsClient, out: &Path, seconds: u64) -> Result<()> {
     let info = c.server_info().await?;
     let url = c.launch(&lp, info.current_game != 0).await?;
     println!("session url: {url}");
-    let mut rtsp = RtspClient::new(&url, &c.host, c.http_port + 21);
+    let mut rtsp = RtspClient::new(&url, &c.host, c.http_port + 21).with_key(&url, rikey);
     let neg = rtsp.handshake(&cfg).await?;
     std::fs::write(out.join("describe.sdp"), &neg.describe_sdp)?;
     std::fs::write(out.join("keys.txt"), format!("rikey={}\nrikeyid={rikeyid}\n{neg:#?}\n", hex::encode(rikey)))?;

@@ -72,7 +72,6 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, ()> for State {
 /// Keeps the Wayland connection (and therefore the KWin screencast) alive.
 pub struct KwinScreencast {
     pub node: u32,
-    pub output_name: String,
     _conn: Connection,
     _stream: ZkdeScreencastStreamUnstableV1,
     _queue: Arc<std::sync::Mutex<EventQueue<State>>>,
@@ -119,7 +118,7 @@ impl KwinScreencast {
         }
         let node = st.node.context("KWin did not create the screencast stream")?;
         info!("KWin screencast of output '{name}' -> PipeWire node {node} (outputs: {names:?})");
-        Ok(Self { node, output_name: name, _conn: conn, _stream: stream, _queue: Arc::new(std::sync::Mutex::new(queue)) })
+        Ok(Self { node, _conn: conn, _stream: stream, _queue: Arc::new(std::sync::Mutex::new(queue)) })
     }
 }
 

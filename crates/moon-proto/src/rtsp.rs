@@ -175,3 +175,69 @@ mod tests {
         assert!(a.contains_key("flag"));
     }
 }
+
+/// Encrypted RTSP ("rtspenc://") envelope:
+/// `u32 BE (0x80000000 | ciphertext length) | u32 BE seq | tag[16] | AES-128-GCM ciphertext`.
+/// IV = `seq (LE) | 0.. | origin ('C' client / 'H' host) | 'R'`.
+pub mod enc {
+    use crate::crypto;
+
+    pub const FLAG: u32 = 0x8000_0000;
+
+    fn iv(seq: u32, from_host: bool) -> [u8; 12] {
+        let mut iv = [0u8; 12];
+        iv[..4].copy_from_slice(&seq.to_le_bytes());
+        iv[10] = if from_host { b'H' } else { b'C' };
+        iv[11] = b'R';
+        iv
+    }
+
+    pub fn is_encrypted(buf: &[u8]) -> bool {
+        buf.first().map(|b| b & 0x80 != 0).unwrap_or(false)
+    }
+
+    pub fn seal(key: &[u8; 16], seq: u32, from_host: bool, plain: &[u8]) -> Vec<u8> {
+        let (tag, ct) = crypto::gcm_encrypt(key, &iv(seq, from_host), plain);
+        let mut out = Vec::with_capacity(24 + ct.len());
+        out.extend_from_slice(&(FLAG | ct.len() as u32).to_be_bytes());
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&tag);
+        out.extend_from_slice(&ct);
+        out
+    }
+
+    /// Returns Ok(None) if more bytes are needed, else (seq, plaintext, bytes consumed).
+    pub fn open(key: &[u8; 16], buf: &[u8], from_host: bool) -> Result<Option<(u32, Vec<u8>, usize)>, &'static str> {
+        if buf.len() < 24 {
+            return Ok(None);
+        }
+        let hdr = u32::from_be_bytes(buf[..4].try_into().unwrap());
+        if hdr & FLAG == 0 {
+            return Err("not an encrypted RTSP message");
+        }
+        let len = (hdr & !FLAG) as usize;
+        if len > 1 << 20 {
+            return Err("encrypted RTSP message too large");
+        }
+        if buf.len() < 24 + len {
+            return Ok(None);
+        }
+        let seq = u32::from_be_bytes(buf[4..8].try_into().unwrap());
+        let plain = crypto::gcm_decrypt(key, &iv(seq, from_host), &buf[8..24], &buf[24..24 + len]).map_err(|_| "RTSP decryption failed")?;
+        Ok(Some((seq, plain, 24 + len)))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn roundtrip_and_direction() {
+            let k = [3u8; 16];
+            let m = super::seal(&k, 7, false, b"OPTIONS * RTSP/1.0\r\n\r\n");
+            assert!(super::is_encrypted(&m));
+            let (seq, p, n) = super::open(&k, &m, false).unwrap().unwrap();
+            assert_eq!((seq, p.as_slice(), n), (7, &b"OPTIONS * RTSP/1.0\r\n\r\n"[..], m.len()));
+            assert!(super::open(&k, &m, true).is_err(), "client/host IVs must differ");
+            assert!(super::open(&k, &m[..m.len() - 1], false).unwrap().is_none());
+        }
+    }
+}
