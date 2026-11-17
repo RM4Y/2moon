@@ -246,6 +246,26 @@ impl I420Frame {
         self.v.clone_from(&o.v);
     }
 
+    /// Copy from NV12 (luma plane + interleaved U/V plane), e.g. GPU decoder output.
+    pub fn copy_from_nv12(&mut self, w: usize, h: usize, y: &[u8], y_stride: usize, uv: &[u8], uv_stride: usize) {
+        if self.width != w || self.height != h {
+            let csc = self.csc;
+            *self = Self::new(w, h);
+            self.csc = csc;
+        }
+        let cw = self.chroma_width();
+        for r in 0..h {
+            self.y[r * w..r * w + w].copy_from_slice(&y[r * y_stride..r * y_stride + w]);
+        }
+        for (r, (du, dv)) in self.u.chunks_exact_mut(cw).zip(self.v.chunks_exact_mut(cw)).enumerate() {
+            let src = &uv[r * uv_stride..r * uv_stride + cw * 2];
+            for ((pair, u), v) in src.chunks_exact(2).zip(du.iter_mut()).zip(dv.iter_mut()) {
+                *u = pair[0];
+                *v = pair[1];
+            }
+        }
+    }
+
     /// Copy from strided planes (e.g. decoder output).
     pub fn copy_from_planes(&mut self, w: usize, h: usize, planes: [&[u8]; 3], strides: [usize; 3]) {
         if self.width != w || self.height != h {

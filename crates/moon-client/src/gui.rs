@@ -707,7 +707,7 @@ impl GuiApp {
             });
             ui.end_row();
             ui.label("Décodage");
-            ui.checkbox(&mut s.hw_decode, "Utiliser le GPU (NVDEC) si disponible");
+            ui.checkbox(&mut s.hw_decode, "Décoder sur le GPU si possible (NVIDIA : NVDEC, Intel/AMD : VAAPI)");
             ui.end_row();
             ui.label("Affichage");
             ui.checkbox(&mut s.fullscreen, "Plein écran au démarrage du stream");

@@ -6,3 +6,4 @@ pub mod nvdec;
 pub mod h264;
 pub mod opus;
 pub mod pulse;
+pub mod vaapi;

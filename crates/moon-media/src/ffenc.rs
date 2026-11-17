@@ -42,6 +42,13 @@ struct Api {
     opt_set: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int) -> c_int,
     get_pix_fmt: unsafe extern "C" fn(*const c_char) -> c_int,
     strerror: unsafe extern "C" fn(c_int, *mut c_char, usize) -> c_int,
+    frame_unref: unsafe extern "C" fn(*mut c_void),
+    opt_find: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, c_int) -> *const c_void,
+    buffer_ref: unsafe extern "C" fn(*const c_void) -> *mut c_void,
+    buffer_unref: unsafe extern "C" fn(*mut *mut c_void),
+    hwdevice_find_type_by_name: unsafe extern "C" fn(*const c_char) -> c_int,
+    hwdevice_ctx_create: unsafe extern "C" fn(*mut *mut c_void, c_int, *const c_char, *mut c_void, c_int) -> c_int,
+    hwframe_transfer_data: unsafe extern "C" fn(*mut c_void, *const c_void, c_int) -> c_int,
 }
 
 fn load() -> std::result::Result<Api, String> {
@@ -56,8 +63,18 @@ fn load() -> std::result::Result<Api, String> {
             }
             Err(format!("cannot load {}: {last}", names[0]))
         };
-        let avutil = open(&["libavutil.so.60", "libavutil.so.59", "libavutil.so"])?;
-        let avcodec = open(&["libavcodec.so.62", "libavcodec.so.61", "libavcodec.so"])?;
+        // Matching libavcodec / libavutil pairs: FFmpeg 8, 7, 6, 5.
+        let mut pair = None;
+        for (c, u) in [(62, 60), (61, 59), (60, 58), (59, 57)] {
+            if let (Ok(u), Ok(c)) = (open(&[&format!("libavutil.so.{u}")]), open(&[&format!("libavcodec.so.{c}")])) {
+                pair = Some((u, c));
+                break;
+            }
+        }
+        let (avutil, avcodec) = match pair {
+            Some(p) => p,
+            None => (open(&["libavutil.so"])?, open(&["libavcodec.so"])?),
+        };
         macro_rules! sym {
             ($l:expr, $n:literal) => {
                 *$l.get($n).map_err(|e| format!("ffmpeg symbol {}: {e}", String::from_utf8_lossy($n)))?
@@ -83,6 +100,13 @@ fn load() -> std::result::Result<Api, String> {
             opt_set: sym!(avutil, b"av_opt_set\0"),
             get_pix_fmt: sym!(avutil, b"av_get_pix_fmt\0"),
             strerror: sym!(avutil, b"av_strerror\0"),
+            frame_unref: sym!(avutil, b"av_frame_unref\0"),
+            opt_find: sym!(avutil, b"av_opt_find\0"),
+            buffer_ref: sym!(avutil, b"av_buffer_ref\0"),
+            buffer_unref: sym!(avutil, b"av_buffer_unref\0"),
+            hwdevice_find_type_by_name: sym!(avutil, b"av_hwdevice_find_type_by_name\0"),
+            hwdevice_ctx_create: sym!(avutil, b"av_hwdevice_ctx_create\0"),
+            hwframe_transfer_data: sym!(avutil, b"av_hwframe_transfer_data\0"),
             _avutil: avutil,
             _avcodec: avcodec,
         })
@@ -366,19 +390,62 @@ impl Default for EncoderOptions {
     }
 }
 
-/// Software decoding through FFmpeg (used for AV1 via libdav1d).
+/// Decoding through FFmpeg: software (libdav1d, h264, hevc...) or with a
+/// hardware accelerator (VAAPI on Intel/AMD, CUDA...) whose frames are copied
+/// back to system memory.
 pub struct FfmpegDecoder {
     ctx: *mut c_void,
     frame: *mut c_void,
+    sw_frame: *mut c_void,
     pkt: *mut c_void,
     out: I420Frame,
     yuv420p: c_int,
+    yuvj420p: c_int,
+    nv12: c_int,
+    /// Hardware device reference (null for software decoding).
+    hw_device: *mut c_void,
+    /// Pixel format of hardware frames (-1 for software decoding).
+    hw_fmt: c_int,
+    /// Whether the last picture really came from the hardware decoder.
+    pub hw_active: bool,
 }
 
 unsafe impl Send for FfmpegDecoder {}
 
+/// Offset of `AVCodecContext.hw_device_ctx`. Not exposed through AVOptions,
+/// but in every FFmpeg version it is the pointer right before `hwaccel_flags`,
+/// which is.
+unsafe fn hw_device_ctx_offset(a: &Api, ctx: *mut c_void) -> Result<usize> {
+    let name = CString::new("hwaccel_flags")?;
+    let opt = (a.opt_find)(ctx, name.as_ptr(), std::ptr::null(), 0, 0);
+    if opt.is_null() {
+        bail!("AVCodecContext has no hwaccel_flags option");
+    }
+    let off = rd_i32(opt, 16) as usize; // AVOption.offset
+    if off < 8 || off % 8 != 0 {
+        bail!("unexpected hwaccel_flags offset {off}");
+    }
+    let slot = off - 8;
+    // A fresh context has no device: the slot must be a null pointer.
+    if *((ctx as *const u8).add(slot) as *const usize) != 0 {
+        bail!("unexpected AVCodecContext layout");
+    }
+    Ok(slot)
+}
+
 impl FfmpegDecoder {
+    /// Software decoder: the first of `names` that FFmpeg has.
     pub fn new(names: &[&str]) -> Result<Self> {
+        Self::open(names, None)
+    }
+
+    /// Hardware-accelerated decoder. `hw` is an FFmpeg device type ("vaapi",
+    /// "cuda"...) and `device` an optional device path (DRM render node for VAAPI).
+    pub fn new_hw(names: &[&str], hw: &str, device: Option<&str>) -> Result<Self> {
+        Self::open(names, Some((hw, device)))
+    }
+
+    fn open(names: &[&str], hw: Option<(&str, Option<&str>)>) -> Result<Self> {
         let a = api()?;
         probe_frame_layout(a)?;
         unsafe {
@@ -394,23 +461,80 @@ impl FfmpegDecoder {
                 bail!("FFmpeg has none of the decoders {names:?}");
             }
             let mut ctx = (a.alloc_context3)(codec);
+            if ctx.is_null() {
+                bail!("avcodec_alloc_context3 failed");
+            }
             // Low latency: frame threading delays output by one frame per thread,
             // so only slice/tile threads; dav1d must output each frame at once.
             for (k, v) in [("threads", "4"), ("thread_type", "slice"), ("flags", "+low_delay"), ("max_frame_delay", "1")] {
                 let (k, v) = (CString::new(k)?, CString::new(v)?);
                 (a.opt_set)(ctx, k.as_ptr(), v.as_ptr(), AV_OPT_SEARCH_CHILDREN);
             }
+            let fmt = |n: &str| CString::new(n).map(|c| (a.get_pix_fmt)(c.as_ptr())).unwrap_or(-1);
+            let mut hw_device = std::ptr::null_mut();
+            let mut hw_fmt = -1;
+            if let Some((kind, device)) = hw {
+                let r = (|| -> Result<()> {
+                    let k = CString::new(kind)?;
+                    let ty = (a.hwdevice_find_type_by_name)(k.as_ptr());
+                    if ty <= 0 {
+                        bail!("FFmpeg has no {kind} support");
+                    }
+                    let dev = device.map(CString::new).transpose()?;
+                    let r = (a.hwdevice_ctx_create)(&mut hw_device, ty, dev.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()), std::ptr::null_mut(), 0);
+                    if r < 0 {
+                        hw_device = std::ptr::null_mut();
+                        bail!("cannot open the {kind} device: {}", err_str(r));
+                    }
+                    let off = hw_device_ctx_offset(a, ctx)?;
+                    // FFmpeg's default get_format picks the hardware format of the supplied device.
+                    *((ctx as *mut u8).add(off) as *mut *mut c_void) = (a.buffer_ref)(hw_device);
+                    hw_fmt = fmt(kind);
+                    Ok(())
+                })();
+                if let Err(e) = r {
+                    if !hw_device.is_null() {
+                        (a.buffer_unref)(&mut hw_device);
+                    }
+                    (a.free_context)(&mut ctx);
+                    return Err(e);
+                }
+            }
             let r = (a.open2)(ctx, codec, std::ptr::null_mut());
             if r < 0 {
                 (a.free_context)(&mut ctx);
+                if !hw_device.is_null() {
+                    (a.buffer_unref)(&mut hw_device);
+                }
                 bail!("cannot open decoder: {}", err_str(r));
             }
-            let pix = CString::new("yuv420p")?;
-            Ok(Self { ctx, frame: (a.frame_alloc)(), pkt: (a.packet_alloc)(), out: I420Frame::new(2, 2), yuv420p: (a.get_pix_fmt)(pix.as_ptr()) })
+            Ok(Self {
+                ctx,
+                frame: (a.frame_alloc)(),
+                sw_frame: (a.frame_alloc)(),
+                pkt: (a.packet_alloc)(),
+                out: I420Frame::new(2, 2),
+                yuv420p: fmt("yuv420p"),
+                yuvj420p: fmt("yuvj420p"),
+                nv12: fmt("nv12"),
+                hw_device,
+                hw_fmt,
+                hw_active: false,
+            })
         }
     }
 
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<&I420Frame>> {
+        Ok(if self.decode_ready(data)? { Some(&self.out) } else { None })
+    }
+
+    /// The last decoded picture.
+    pub fn picture(&self) -> &I420Frame {
+        &self.out
+    }
+
+    /// Decode one access unit; true if a new picture is available in [`Self::picture`].
+    pub fn decode_ready(&mut self, data: &[u8]) -> Result<bool> {
         let a = api()?;
         unsafe {
             *((self.pkt as *mut u8).add(PKT_DATA) as *mut *const u8) = data.as_ptr();
@@ -430,23 +554,39 @@ impl FfmpegDecoder {
                 if r < 0 {
                     bail!("avcodec_receive_frame: {}", err_str(r));
                 }
-                let (w, h, fmt) = (rd_i32(self.frame, 104) as usize, rd_i32(self.frame, 108) as usize, rd_i32(self.frame, 116));
-                if fmt != self.yuv420p {
-                    bail!("unsupported decoded pixel format {fmt}");
+                let mut src = self.frame;
+                self.hw_active = self.hw_fmt >= 0 && rd_i32(self.frame, 116) == self.hw_fmt;
+                if self.hw_active {
+                    // GPU surface -> system memory (NV12 for 8-bit 4:2:0).
+                    (a.frame_unref)(self.sw_frame);
+                    let r = (a.hwframe_transfer_data)(self.sw_frame, self.frame, 0);
+                    if r < 0 {
+                        bail!("av_hwframe_transfer_data: {}", err_str(r));
+                    }
+                    src = self.sw_frame;
                 }
-                let plane = |i: usize| -> (&[u8], usize) {
-                    let p = *((self.frame as *const u8).add(FRAME_DATA + i * 8) as *const *const u8);
-                    let ls = rd_i32(self.frame, FRAME_LINESIZE + i * 4) as usize;
-                    let rows = if i == 0 { h } else { h.div_ceil(2) };
+                let (w, h, fmt) = (rd_i32(src, 104) as usize, rd_i32(src, 108) as usize, rd_i32(src, 116));
+                let plane = |i: usize, rows: usize| -> (&[u8], usize) {
+                    let p = *((src as *const u8).add(FRAME_DATA + i * 8) as *const *const u8);
+                    let ls = rd_i32(src, FRAME_LINESIZE + i * 4) as usize;
                     (std::slice::from_raw_parts(p, ls * rows), ls)
                 };
-                let (y, sy) = plane(0);
-                let (u, su) = plane(1);
-                let (v, sv) = plane(2);
-                self.out.copy_from_planes(w, h, [y, u, v], [sy, su, sv]);
+                let ch = h.div_ceil(2);
+                if fmt == self.yuv420p || fmt == self.yuvj420p {
+                    let (y, sy) = plane(0, h);
+                    let (u, su) = plane(1, ch);
+                    let (v, sv) = plane(2, ch);
+                    self.out.copy_from_planes(w, h, [y, u, v], [sy, su, sv]);
+                } else if fmt == self.nv12 {
+                    let (y, sy) = plane(0, h);
+                    let (uv, suv) = plane(1, ch);
+                    self.out.copy_from_nv12(w, h, y, sy, uv, suv);
+                } else {
+                    bail!("unsupported decoded pixel format {fmt}");
+                }
                 got = true;
             }
-            Ok(if got { Some(&self.out) } else { None })
+            Ok(got)
         }
     }
 }
@@ -457,7 +597,11 @@ impl Drop for FfmpegDecoder {
             unsafe {
                 (a.packet_free)(&mut self.pkt);
                 (a.frame_free)(&mut self.frame);
+                (a.frame_free)(&mut self.sw_frame);
                 (a.free_context)(&mut self.ctx);
+                if !self.hw_device.is_null() {
+                    (a.buffer_unref)(&mut self.hw_device);
+                }
             }
         }
     }
@@ -471,6 +615,48 @@ pub fn probe(codec: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FFmpeg decoding through a hardware accelerator (same code path as VAAPI;
+    /// CUDA is used here because it exists wherever NVENC does). Skipped without
+    /// NVENC or without FFmpeg's native AV1 decoder.
+    #[test]
+    fn hwaccel_decode_roundtrip() {
+        let (w, h) = (1280, 720);
+        let Ok(mut enc) = FfmpegEncoder::new("av1_nvenc", w, h, 60, 8000) else {
+            eprintln!("no av1_nvenc, skipping");
+            return;
+        };
+        let mut dec = match FfmpegDecoder::new_hw(&["av1"], "cuda", None) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("no CUDA hwaccel decoder ({e:#}), skipping");
+                return;
+            }
+        };
+        let mut f = I420Frame::new(w, h);
+        let (mut decoded, mut hw, mut err_sum) = (0, 0, 0u64);
+        for i in 0..30usize {
+            for (k, p) in f.y.iter_mut().enumerate() {
+                *p = (16 + (k % w / 4 + i * 2) % 200) as u8;
+            }
+            for (k, p) in f.u.iter_mut().enumerate() {
+                *p = (64 + k % 97) as u8;
+            }
+            let data = enc.encode(&f, i as i64 * 1500).unwrap().data.to_vec();
+            if let Some(out) = dec.decode(&data).unwrap() {
+                assert_eq!((out.width, out.height), (w, h));
+                err_sum += out.y.iter().zip(&f.y).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum::<u64>() / (w * h) as u64;
+                let uerr = out.u.iter().zip(&f.u).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum::<u64>() / f.u.len() as u64;
+                assert!(uerr <= 8, "chroma mismatch (NV12 deinterleave?) {uerr}");
+                decoded += 1;
+                hw += dec.hw_active as u32;
+            }
+        }
+        eprintln!("hwaccel: {decoded}/30 decoded, {hw} on the GPU, mean luma error {}", err_sum / decoded.max(1) as u64);
+        assert!(decoded >= 28, "decoded only {decoded}");
+        assert_eq!(hw, decoded, "frames did not come from the GPU");
+        assert!(err_sum / decoded as u64 <= 6);
+    }
     use crate::h264::H264Decoder;
 
     #[test]

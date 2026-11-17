@@ -110,6 +110,9 @@ impl Session {
         let local = moon_media::decoder::supported(opts.hw_decode);
         let codec = match opts.codec {
             Some(c) if !host_codecs(c) => anyhow::bail!("the host cannot encode {c:?}"),
+            Some(c) if opts.decode && !local.contains(&c) => {
+                anyhow::bail!("this computer cannot decode {c:?} (no GPU decoder for it, and FFmpeg lacks a CPU decoder); choose another codec or \"auto\"")
+            }
             Some(c) => c,
             None => local.iter().copied().find(|c| host_codecs(*c)).unwrap_or(Codec::H264),
         };
@@ -281,7 +284,8 @@ const MAX_DECODE_BACKLOG: usize = 2;
 
 fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool) -> Result<()> {
     let mut dec = VideoDecoder::open(codec, hw)?;
-    *stats.decoder.lock().unwrap() = dec.name().to_string();
+    let mut decoder_name = dec.name();
+    *stats.decoder.lock().unwrap() = decoder_name.to_string();
     let mut need_idr = false;
     let mut last_idr_req = Instant::now() - Duration::from_secs(1);
     let mut backlog = std::collections::VecDeque::new();
@@ -338,6 +342,11 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: Fram
                 stats.idr_requests.fetch_add(1, Ordering::Relaxed);
                 need_idr = true;
             }
+        }
+        // The decoder may change (VAAPI falling back to the CPU): keep the stats right.
+        if dec.name() != decoder_name {
+            decoder_name = dec.name();
+            *stats.decoder.lock().unwrap() = decoder_name.to_string();
         }
     }
     Ok(())
