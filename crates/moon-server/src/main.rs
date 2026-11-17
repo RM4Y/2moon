@@ -78,6 +78,11 @@ async fn main() -> Result<()> {
     cfg.video_source = args.video;
     cfg.audio_source = args.audio;
     cfg.encoder = args.encoder.clone();
+    if cfg.encoder != "software" && cfg.encoder != "openh264" {
+        cfg.hevc = moon_media::ffenc::probe("hevc_nvenc").is_ok();
+        cfg.av1 = moon_media::ffenc::probe("av1_nvenc").is_ok();
+    }
+    info!("codecs: H.264{}{}", if cfg.hevc { ", HEVC" } else { "" }, if cfg.av1 { ", AV1" } else { "" });
     let host = state::Host::load(cfg)?;
     if host.cfg.video_source == state::VideoSourceKind::Portal {
         let cap = portal::PortalCapture::open(&host.cfg.state_dir, 60).await?;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use moon_media::frame::I420Frame;
-use moon_media::encoder::VideoEncoder;
+use moon_media::encoder::{Codec, VideoEncoder};
 use moon_media::opus::{OpusEncoder, StreamLayout};
 use moon_proto::audio::{AudioCipher, AudioPacketizer};
 use moon_proto::video::Packetizer;
@@ -192,11 +192,8 @@ pub fn start(a: StartArgs) -> Result<StreamHandle> {
 }
 
 fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, peer: Arc<Peer>, stop: Arc<AtomicBool>, idr: Arc<AtomicBool>, stats: Arc<StreamStats>) -> Result<()> {
-    if p.video_format != 0 {
-        warn!("client asked for codec {} but only H.264 is implemented; sending H.264", p.video_format);
-    }
     let fps = p.fps.clamp(1, 240);
-    let mut enc = VideoEncoder::open(&p.encoder, p.width as usize, p.height as usize, fps, p.bitrate_kbps, if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames })?;
+    let mut enc = VideoEncoder::open(&p.encoder, Codec::from_format(p.video_format), p.width as usize, p.height as usize, fps, p.bitrate_kbps, if p.max_ref_frames == 0 { 1 } else { p.max_ref_frames })?;
     let mut pk = Packetizer::new(p.packet_size as usize, p.fec_percent, p.min_fec_packets as usize);
     let mut frame = I420Frame::new(p.width as usize, p.height as usize);
     let period = Duration::from_secs_f64(1.0 / fps as f64);

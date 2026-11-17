@@ -66,6 +66,13 @@ fn handle(host: &Host, req: &Message) -> Message {
             sdp.push_str("a=x-ss-general.encryptionSupported:5\r\n");
             sdp.push_str("a=x-ss-general.encryptionRequested:1\r\n");
             sdp.push_str("a=fmtp:97 surround-params=21101\r\n");
+            // Codec support markers understood by clients.
+            if host.cfg.hevc {
+                sdp.push_str("sprop-parameter-sets=AAAAAU\r\n");
+            }
+            if host.cfg.av1 {
+                sdp.push_str("a=rtpmap:98 AV1/90000\r\n");
+            }
             ok().header("Content-Type", "application/sdp").with_body(sdp.into_bytes())
         }
         "SETUP" => {

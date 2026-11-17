@@ -59,6 +59,9 @@ pub struct Config {
     pub video_source: VideoSourceKind,
     pub audio_source: AudioSourceKind,
     pub encoder: String,
+    /// Codecs the host can encode (filled at startup by probing).
+    pub hevc: bool,
+    pub av1: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -101,6 +104,8 @@ impl Config {
             video_source: VideoSourceKind::Test,
             audio_source: AudioSourceKind::Sine,
             encoder: "auto".into(),
+            hevc: false,
+            av1: false,
         }
     }
 }

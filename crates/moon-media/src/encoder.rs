@@ -7,6 +7,33 @@ use crate::ffenc::FfmpegEncoder;
 use crate::frame::I420Frame;
 use crate::h264::{EncodedFrame, H264Encoder};
 
+/// Video codecs of the GameStream protocol (`bitStreamFormat` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    H264 = 0,
+    Hevc = 1,
+    Av1 = 2,
+}
+
+impl Codec {
+    pub fn from_format(v: u32) -> Self {
+        match v {
+            1 => Codec::Hevc,
+            2 => Codec::Av1,
+            _ => Codec::H264,
+        }
+    }
+
+    /// FFmpeg NVENC encoder name.
+    pub fn nvenc(self) -> &'static str {
+        match self {
+            Codec::H264 => "h264_nvenc",
+            Codec::Hevc => "hevc_nvenc",
+            Codec::Av1 => "av1_nvenc",
+        }
+    }
+}
+
 pub enum VideoEncoder {
     Software(H264Encoder),
     Ffmpeg(FfmpegEncoder),
@@ -14,12 +41,15 @@ pub enum VideoEncoder {
 
 impl VideoEncoder {
     /// `choice`: "auto" (hardware if available), "software", "nvenc", or any FFmpeg encoder name.
-    pub fn open(choice: &str, width: usize, height: usize, fps: u32, bitrate_kbps: u32, max_refs: u32) -> Result<Self> {
+    /// HEVC and AV1 always need a hardware encoder.
+    pub fn open(choice: &str, codec: Codec, width: usize, height: usize, fps: u32, bitrate_kbps: u32, max_refs: u32) -> Result<Self> {
         let ff_name = match choice {
-            "software" | "openh264" => None,
-            "auto" | "nvenc" => Some("h264_nvenc"),
+            "software" | "openh264" if codec == Codec::H264 => None,
+            "software" | "openh264" => anyhow::bail!("{codec:?} needs a hardware encoder"),
+            "auto" | "nvenc" => Some(codec.nvenc()),
             other => Some(other),
         };
+        let choice = if codec != Codec::H264 && choice == "auto" { "nvenc" } else { choice };
         if let Some(name) = ff_name {
             match FfmpegEncoder::with_refs(name, width, height, fps, bitrate_kbps, max_refs) {
                 Ok(e) => return Ok(Self::Ffmpeg(e)),

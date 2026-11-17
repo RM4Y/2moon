@@ -200,10 +200,11 @@ fn server_info(host: &Host, ctx: &Ctx, paired: bool) -> xml::Response {
         .field("uniqueid", &host.uuid)
         .field("HttpsPort", host.cfg.https_port)
         .field("ExternalPort", host.cfg.http_port)
-        .field("MaxLumaPixelsHEVC", 0)
+        .field("MaxLumaPixelsHEVC", if host.cfg.hevc { 1869449984u64 } else { 0 })
         .field("mac", "00:00:00:00:00:00")
         .field("LocalIP", local_ip)
-        .field("ServerCodecModeSupport", 0x0001) // H.264
+        // SCM flags: H.264 0x1, HEVC 0x100, AV1 main8 0x10000
+        .field("ServerCodecModeSupport", 0x0001 | if host.cfg.hevc { 0x100 } else { 0 } | if host.cfg.av1 { 0x10000 } else { 0 })
         .raw(
             "<SupportedDisplayMode><DisplayMode><Width>1920</Width><Height>1080</Height><RefreshRate>60</RefreshRate></DisplayMode>\
              <DisplayMode><Width>1280</Width><Height>720</Height><RefreshRate>60</RefreshRate></DisplayMode></SupportedDisplayMode>",
