@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use moon_media::h264::H264Decoder;
+use moon_media::decoder::VideoDecoder;
+use moon_media::encoder::Codec;
 use moon_media::opus::{OpusDecoder, StreamLayout};
 use moon_media::pulse::PulseStream;
 use moon_proto::audio::{AudioCipher, AudioReassembler};
@@ -69,6 +70,10 @@ pub struct SessionOptions {
     pub audio_output: bool,
     /// Decode video (false only for pure network tests).
     pub decode: bool,
+    /// Requested codec (None = best supported by both sides).
+    pub codec: Option<Codec>,
+    /// Use the GPU decoder (NVDEC) when available.
+    pub hw_decode: bool,
 }
 
 pub type FrameSink = Box<dyn Fn(Picture) + Send>;
@@ -80,6 +85,7 @@ pub struct Session {
     pub negotiated: Negotiated,
     pub width: u32,
     pub height: u32,
+    pub codec: Codec,
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -94,6 +100,21 @@ impl Session {
         let app_id = opts.app_id.or_else(|| apps.first().map(|a| a.id)).context("host has no applications")?;
         let rikey: [u8; 16] = moon_proto::crypto::random_bytes();
         let rikeyid: u32 = rand::random::<u32>() & 0x7fff_ffff;
+        // Pick the codec: the best one both the host and this machine support.
+        let host_codecs = |c: Codec| match c {
+            Codec::H264 => true,
+            Codec::Hevc => info.codec_support & 0x300 != 0,
+            Codec::Av1 => info.codec_support & 0x30000 != 0,
+        };
+        let local = moon_media::decoder::supported(opts.hw_decode);
+        let codec = match opts.codec {
+            Some(c) if !host_codecs(c) => anyhow::bail!("the host cannot encode {c:?}"),
+            Some(c) => c,
+            None => local.iter().copied().find(|c| host_codecs(*c)).unwrap_or(Codec::H264),
+        };
+        let mut opts = opts;
+        opts.stream.video_format = codec as u32;
+        info!("video codec: {codec:?}");
         let s = &opts.stream;
         let lp = LaunchParams { app_id, width: s.width, height: s.height, fps: s.fps, rikey, rikeyid, audio_channels: s.audio_channels };
         let resume = info.current_game != 0 && info.current_game == app_id;
@@ -131,11 +152,12 @@ impl Session {
             })?);
         }
         if opts.decode {
+            let hw = opts.hw_decode;
             let stats = stats.clone();
             let ctl = ctrl.sender.clone();
             let stop = stop.clone();
             threads.push(std::thread::Builder::new().name("video-dec".into()).spawn(move || {
-                if let Err(e) = video_decode(frx, sink, stats, ctl, stop) {
+                if let Err(e) = video_decode(frx, sink, stats, ctl, stop, codec, hw) {
                     warn!("video decoder: {e:#}");
                 }
             })?);
@@ -159,7 +181,7 @@ impl Session {
             })?);
         }
 
-        Ok(Session { control: ctrl.sender, control_events: ctrl.events, stats, negotiated: neg, width: s.width, height: s.height, stop, threads })
+        Ok(Session { control: ctrl.sender, control_events: ctrl.events, stats, negotiated: neg, width: s.width, height: s.height, codec, stop, threads })
     }
 
     pub fn stop(mut self) {
@@ -253,8 +275,8 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
     Ok(())
 }
 
-fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>) -> Result<()> {
-    let mut dec = H264Decoder::new()?;
+fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool) -> Result<()> {
+    let mut dec = VideoDecoder::open(codec, hw)?;
     let mut need_idr = false;
     while let Ok(f) = frames.recv() {
         if stop.load(Ordering::Relaxed) {

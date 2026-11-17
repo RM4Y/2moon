@@ -24,6 +24,9 @@ struct Api {
     _avutil: Library,
     _avcodec: Library,
     find_encoder_by_name: unsafe extern "C" fn(*const c_char) -> *const c_void,
+    find_decoder_by_name: unsafe extern "C" fn(*const c_char) -> *const c_void,
+    send_packet: unsafe extern "C" fn(*mut c_void, *const c_void) -> c_int,
+    receive_frame: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
     alloc_context3: unsafe extern "C" fn(*const c_void) -> *mut c_void,
     free_context: unsafe extern "C" fn(*mut *mut c_void),
     open2: unsafe extern "C" fn(*mut c_void, *const c_void, *mut *mut c_void) -> c_int,
@@ -62,6 +65,9 @@ fn load() -> std::result::Result<Api, String> {
         }
         Ok(Api {
             find_encoder_by_name: sym!(avcodec, b"avcodec_find_encoder_by_name\0"),
+            find_decoder_by_name: sym!(avcodec, b"avcodec_find_decoder_by_name\0"),
+            send_packet: sym!(avcodec, b"avcodec_send_packet\0"),
+            receive_frame: sym!(avcodec, b"avcodec_receive_frame\0"),
             alloc_context3: sym!(avcodec, b"avcodec_alloc_context3\0"),
             free_context: sym!(avcodec, b"avcodec_free_context\0"),
             open2: sym!(avcodec, b"avcodec_open2\0"),
@@ -324,6 +330,100 @@ impl Drop for FfmpegEncoder {
     }
 }
 
+/// Software decoding through FFmpeg (used for AV1 via libdav1d).
+pub struct FfmpegDecoder {
+    ctx: *mut c_void,
+    frame: *mut c_void,
+    pkt: *mut c_void,
+    out: I420Frame,
+    yuv420p: c_int,
+}
+
+unsafe impl Send for FfmpegDecoder {}
+
+impl FfmpegDecoder {
+    pub fn new(names: &[&str]) -> Result<Self> {
+        let a = api()?;
+        probe_frame_layout(a)?;
+        unsafe {
+            let mut codec = std::ptr::null();
+            for n in names {
+                let c = CString::new(*n)?;
+                codec = (a.find_decoder_by_name)(c.as_ptr());
+                if !codec.is_null() {
+                    break;
+                }
+            }
+            if codec.is_null() {
+                bail!("FFmpeg has none of the decoders {names:?}");
+            }
+            let mut ctx = (a.alloc_context3)(codec);
+            let k = CString::new("threads")?;
+            let v = CString::new("4")?;
+            (a.opt_set)(ctx, k.as_ptr(), v.as_ptr(), AV_OPT_SEARCH_CHILDREN);
+            let r = (a.open2)(ctx, codec, std::ptr::null_mut());
+            if r < 0 {
+                (a.free_context)(&mut ctx);
+                bail!("cannot open decoder: {}", err_str(r));
+            }
+            let pix = CString::new("yuv420p")?;
+            Ok(Self { ctx, frame: (a.frame_alloc)(), pkt: (a.packet_alloc)(), out: I420Frame::new(2, 2), yuv420p: (a.get_pix_fmt)(pix.as_ptr()) })
+        }
+    }
+
+    pub fn decode(&mut self, data: &[u8]) -> Result<Option<&I420Frame>> {
+        let a = api()?;
+        unsafe {
+            *((self.pkt as *mut u8).add(PKT_DATA) as *mut *const u8) = data.as_ptr();
+            wr_i32(self.pkt, PKT_SIZE, data.len() as i32);
+            let r = (a.send_packet)(self.ctx, self.pkt);
+            *((self.pkt as *mut u8).add(PKT_DATA) as *mut *const u8) = std::ptr::null();
+            wr_i32(self.pkt, PKT_SIZE, 0);
+            if r < 0 && r != AVERROR_EAGAIN {
+                bail!("avcodec_send_packet: {}", err_str(r));
+            }
+            let mut got = false;
+            loop {
+                let r = (a.receive_frame)(self.ctx, self.frame);
+                if r == AVERROR_EAGAIN {
+                    break;
+                }
+                if r < 0 {
+                    bail!("avcodec_receive_frame: {}", err_str(r));
+                }
+                let (w, h, fmt) = (rd_i32(self.frame, 104) as usize, rd_i32(self.frame, 108) as usize, rd_i32(self.frame, 116));
+                if fmt != self.yuv420p {
+                    bail!("unsupported decoded pixel format {fmt}");
+                }
+                let plane = |i: usize| -> (&[u8], usize) {
+                    let p = *((self.frame as *const u8).add(FRAME_DATA + i * 8) as *const *const u8);
+                    let ls = rd_i32(self.frame, FRAME_LINESIZE + i * 4) as usize;
+                    let rows = if i == 0 { h } else { h.div_ceil(2) };
+                    (std::slice::from_raw_parts(p, ls * rows), ls)
+                };
+                let (y, sy) = plane(0);
+                let (u, su) = plane(1);
+                let (v, sv) = plane(2);
+                self.out.copy_from_planes(w, h, [y, u, v], [sy, su, sv]);
+                got = true;
+            }
+            Ok(if got { Some(&self.out) } else { None })
+        }
+    }
+}
+
+impl Drop for FfmpegDecoder {
+    fn drop(&mut self) {
+        if let Ok(a) = api() {
+            unsafe {
+                (a.packet_free)(&mut self.pkt);
+                (a.frame_free)(&mut self.frame);
+                (a.free_context)(&mut self.ctx);
+            }
+        }
+    }
+}
+
 /// Check whether an FFmpeg encoder can actually be opened on this machine.
 pub fn probe(codec: &str) -> Result<()> {
     FfmpegEncoder::new(codec, 640, 360, 30, 2000).map(|_| ()).with_context(|| format!("{codec} unavailable"))
@@ -333,6 +433,23 @@ pub fn probe(codec: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::h264::H264Decoder;
+
+    #[test]
+    fn dav1d_decodes_nvenc_av1_if_available() {
+        let (Ok(mut enc), Ok(mut dec)) = (FfmpegEncoder::new("av1_nvenc", 640, 360, 30, 2000), FfmpegDecoder::new(&["libdav1d"])) else {
+            eprintln!("av1_nvenc or libdav1d unavailable, skipping");
+            return;
+        };
+        let f = I420Frame::new(640, 360);
+        let mut n = 0;
+        for i in 0..30 {
+            let d = enc.encode(&f, i * 3000).unwrap().data.to_vec();
+            if dec.decode(&d).unwrap().is_some() {
+                n += 1;
+            }
+        }
+        assert!(n >= 25, "dav1d decoded {n}/30");
+    }
 
     /// Runs only where NVENC is present.
     #[test]

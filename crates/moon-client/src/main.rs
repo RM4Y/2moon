@@ -70,6 +70,12 @@ enum Cmd {
         /// Quit the app on the host when the stream window closes.
         #[arg(long)]
         quit_on_exit: bool,
+        /// Video codec: auto, h264, hevc or av1.
+        #[arg(long, default_value = "auto")]
+        codec: String,
+        /// Decode on the CPU even if a GPU decoder is available.
+        #[arg(long)]
+        software_decode: bool,
         /// Headless only: send a scripted sequence of input events (for tests).
         #[arg(long)]
         test_input: bool,
@@ -156,7 +162,15 @@ async fn main() -> Result<()> {
             }
             let _ = mdns.shutdown();
         }
-        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input } => {
+        Cmd::Stream { host, app, width, height, fps, bitrate, audio_channels, headless, seconds, quit_on_exit, test_input, codec, software_decode } => {
+            use moon_media::encoder::Codec;
+            let codec = match codec.to_lowercase().as_str() {
+                "auto" => None,
+                "h264" | "avc" => Some(Codec::H264),
+                "hevc" | "h265" => Some(Codec::Hevc),
+                "av1" => Some(Codec::Av1),
+                other => anyhow::bail!("unknown codec {other}"),
+            };
             let c = client_for(&store, &host);
             c.server_cert.as_ref().context("not paired with this host (run `pair` first)")?;
             let stream = StreamConfig {
@@ -172,7 +186,7 @@ async fn main() -> Result<()> {
                 },
                 ..StreamConfig::default()
             };
-            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true };
+            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode };
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();
@@ -213,7 +227,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 let fps = session.stats.frames_decoded.load(std::sync::atomic::Ordering::Relaxed) as f64 / t.elapsed().as_secs_f64();
-                println!("{}", session.stats.summary());
+                println!("codec {:?}; {}", session.codec, session.stats.summary());
                 println!("decode rate {fps:.1} fps; first picture {:?}", first.lock().unwrap());
                 session.stop();
             } else {
