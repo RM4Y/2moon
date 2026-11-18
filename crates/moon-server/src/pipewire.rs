@@ -678,7 +678,6 @@ impl PwCapture {
         self.shared.state.lock().unwrap().clone()
     }
 
-    #[allow(dead_code)]
     pub fn frames(&self) -> u64 {
         self.shared.frames.load(std::sync::atomic::Ordering::Relaxed)
     }

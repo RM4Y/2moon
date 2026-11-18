@@ -220,6 +220,10 @@ impl VideoSource for PipeWireSource {
         }
     }
 
+    fn pictures_received(&self) -> Option<u64> {
+        Some(self.cap().ok()?.pw.lock().unwrap().frames())
+    }
+
     fn source_fps(&self) -> Option<f64> {
         let f = self.cap().ok()?.pw.lock().unwrap().format()?;
         let (n, d) = f.max_framerate;

@@ -41,6 +41,11 @@ pub trait VideoSource: Send {
         self.wait_frame(deadline, deadline)
     }
 
+    /// Pictures the source has delivered so far, used or not (None: not counted).
+    fn pictures_received(&self) -> Option<u64> {
+        None
+    }
+
     /// Highest frame rate the source may deliver (`Some(0.0)`: variable, unknown).
     fn source_fps(&self) -> Option<f64> {
         None

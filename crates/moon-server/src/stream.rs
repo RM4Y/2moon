@@ -301,20 +301,22 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     info!("video pacing: each picture as it arrives{}", if fast_source { format!(", at most {fps} per second (compositor up to {:.0} fps)", src.source_fps().unwrap_or(0.0)) } else { String::new() });
     let idle_repeat = Duration::from_millis(100).max(period);
     let mut last_encode = Instant::now() - period;
+    let mut grid = EncodeGrid::new(period, Instant::now());
+    let mut received_at_window = src.pictures_received();
     let mut have_picture = false;
     let mut generation = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
         let new = if fast_source {
-            // Never more than ~fps encodes a second (a little slack for arrival jitter).
-            let earliest = last_encode + period.mul_f64(0.95);
+            // One encode per slot of a steady `fps` grid (see `EncodeGrid`).
+            let earliest = grid.earliest();
             let now = Instant::now();
             if earliest > now {
                 std::thread::sleep(earliest - now);
             }
-            // A picture from the first part of the interval is the compositor's extra
-            // one: prefer the next, fresher picture if it comes within the interval.
-            let fresh = last_encode + period.mul_f64(0.6);
-            if src.wait_arrival_after(fresh, last_encode + period.mul_f64(1.25)) || src.pending_arrival().is_some() {
+            // An older picture is the compositor's extra one: prefer the next, fresher
+            // picture if it comes before the slot's deadline.
+            if src.wait_arrival_after(grid.fresh(), grid.deadline()) || src.pending_arrival().is_some() {
+                grid.encoded(Instant::now());
                 true
             } else {
                 // Nothing new: wait for the next picture, re-sending the last one now and then.
@@ -322,6 +324,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
                 if !new && have_picture && last_encode.elapsed() < idle_repeat {
                     continue;
                 }
+                grid.encoded(Instant::now());
                 new
             }
         } else {
@@ -426,8 +429,14 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
                 l.peer = Some(dest.to_string());
             }
             windows += 1;
+            let received = src.pictures_received();
+            let source = match (received, received_at_window) {
+                (Some(r), Some(r0)) => format!(", compositor {:.1}/s", r.saturating_sub(r0) as f64 / secs),
+                _ => String::new(),
+            };
+            received_at_window = received;
             if windows % 5 == 0 { info!(
-                "video: {:.1} fps ({:.1} new pictures/s), {:.1} Mbit/s, {} IDR, encode avg {:.2} ms",
+                "video: {:.1} fps ({:.1} new pictures/s{source}), {:.1} Mbit/s, {} IDR, encode avg {:.2} ms",
                 win_frames as f64 / secs,
                 win_new as f64 / secs,
                 win_bytes as f64 * 8.0 / secs / 1e6,
@@ -454,6 +463,48 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
 /// buffers, without holding the frame back: the client can only decode it once the
 /// last packet is in. (Spreading every frame over a fixed share of the frame interval
 /// delayed a 40 KB frame by ~10 ms at 60 fps where 1 ms is enough.)
+/// Encode slots on a steady `fps` grid, for a compositor that sends pictures faster
+/// than the stream's rate (KWin's virtual output at 120 Hz, 90-110 pictures a second,
+/// irregular, for a 60 fps stream). Each slot takes the freshest picture around it.
+/// Spacing encodes from the previous encode instead lost rate: with pictures every
+/// ~10 ms, gaps alternated 16 and 20 ms and the stream got ~55 fps out of a 100 fps
+/// source. On a grid, a picture taken late in its slot does not delay the next slot.
+struct EncodeGrid {
+    period: Duration,
+    /// Time of the next slot.
+    next: Instant,
+}
+
+impl EncodeGrid {
+    fn new(period: Duration, now: Instant) -> Self {
+        Self { period, next: now }
+    }
+
+    /// No encode before this.
+    fn earliest(&self) -> Instant {
+        self.next - self.period.mul_f64(0.3)
+    }
+
+    /// A picture that arrived before this belongs to the previous slot.
+    fn fresh(&self) -> Instant {
+        self.next - self.period.mul_f64(0.4)
+    }
+
+    /// Wait for a fresh picture until then, else take what is there.
+    fn deadline(&self) -> Instant {
+        self.next + self.period.mul_f64(0.25)
+    }
+
+    /// A picture was encoded at `now`: move to the next slot. After a pause (static
+    /// screen) the grid restarts from `now` rather than catching up with a burst.
+    fn encoded(&mut self, now: Instant) {
+        self.next += self.period;
+        if self.next + self.period.mul_f64(0.5) < now {
+            self.next = now + self.period;
+        }
+    }
+}
+
 fn pacer(sock: UdpSocket, rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<Vec<u8>>)>, period: Duration, bitrate_kbps: u32) {
     const BATCH: usize = 8;
     // Never spread a frame over more than 60% of the interval (huge IDR frames).
@@ -511,4 +562,72 @@ fn audio_loop(p: StreamParams, mut src: Box<dyn AudioSource>, sock: UdpSocket, p
         stats.audio_packets.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    /// Simulates the video loop over a source sending `arrivals` (ms from start);
+    /// returns the encode times (ms).
+    fn simulate(arrivals: &[f64], fps: f64, until: f64) -> Vec<f64> {
+        let t0 = Instant::now();
+        let ms = |i: Instant| i.saturating_duration_since(t0).as_secs_f64() * 1000.0;
+        let at = |m: f64| t0 + Duration::from_secs_f64(m / 1000.0);
+        let mut grid = EncodeGrid::new(Duration::from_secs_f64(1.0 / fps), t0);
+        let (mut now, mut used, mut out) = (0.0f64, -1.0f64, Vec::new());
+        while now < until {
+            now = now.max(ms(grid.earliest()));
+            let (fresh, deadline) = (ms(grid.fresh()), ms(grid.deadline()));
+            // Newest picture not used yet, and the first fresh one.
+            let latest_by = |t: f64| arrivals.iter().copied().filter(|&a| a > used && a <= t).last();
+            let wait_fresh = arrivals.iter().copied().find(|&a| a > used && a >= fresh && a <= deadline);
+            let take = match wait_fresh {
+                Some(a) if a <= now => latest_by(now),
+                Some(a) => {
+                    now = a;
+                    Some(a)
+                }
+                None => latest_by(deadline.max(now)).map(|a| {
+                    now = now.max(deadline);
+                    a
+                }),
+            };
+            match take {
+                Some(a) => {
+                    used = a;
+                    out.push(now);
+                    grid.encoded(at(now));
+                }
+                None => now += 1.0,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn full_rate_from_an_irregular_fast_source() {
+        // ~100 pictures a second with jitter, like KWin's virtual output at 120 Hz.
+        let mut arrivals = Vec::new();
+        let mut t = 0.0;
+        let mut k = 0u32;
+        while t < 10_000.0 {
+            arrivals.push(t);
+            k = k.wrapping_mul(1103515245).wrapping_add(12345);
+            t += 8.3 + (k >> 16) as f64 % 4.0;
+        }
+        let enc = simulate(&arrivals, 60.0, 10_000.0);
+        let fps = enc.len() as f64 / 10.0;
+        assert!(fps >= 59.5 && fps <= 60.5, "{fps} fps");
+    }
+
+    #[test]
+    fn no_burst_after_a_pause() {
+        let mut arrivals: Vec<f64> = (0..60).map(|i| i as f64 * 8.33).collect();
+        arrivals.extend((0..120).map(|i| 2000.0 + i as f64 * 8.33));
+        let enc = simulate(&arrivals, 60.0, 3000.0);
+        let after: Vec<f64> = enc.iter().copied().filter(|&t| t >= 2000.0).collect();
+        let min_gap = after.windows(2).map(|w| w[1] - w[0]).fold(f64::MAX, f64::min);
+        assert!(min_gap >= 10.0, "encodes {min_gap} ms apart after the pause");
+    }
 }
