@@ -124,10 +124,18 @@ impl UinputInjector {
         let mouse = VirtualDevice::builder()?.name("2moon virtual mouse").with_keys(&mouse_buttons())?.with_relative_axes(&rel)?.build()?;
 
         // Absolute pointer modelled after virtual-machine tablets (understood by libinput as a pointer).
+        // Exactly ABS_X/ABS_Y and BTN_LEFT/RIGHT/MIDDLE: that is the kernel's "absolute mouse" rule
+        // (joydev_dev_is_absolute_mouse). With any other button joydev made it /dev/input/js0, so
+        // games reading the joystick API saw a first "controller" that never moved, before the
+        // real virtual gamepad. Buttons are sent through the relative mouse anyway.
         let abs = AbsInfo::new(0, 0, ABS_RANGE, 0, 0, 0);
+        let mut abs_buttons = AttributeSet::<KeyCode>::new();
+        for k in [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE] {
+            abs_buttons.insert(k);
+        }
         let tablet = VirtualDevice::builder()?
             .name("2moon virtual absolute pointer")
-            .with_keys(&mouse_buttons())?
+            .with_keys(&abs_buttons)?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs))?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs))?
             .build()?;
@@ -137,7 +145,7 @@ impl UinputInjector {
         Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), ff: HashMap::new(), held_keys: vec![], held_buttons: vec![], typer, typer_layout, layout_fn })
     }
 
-    fn gamepad(index: u16) -> Result<VirtualDevice> {
+    fn gamepad() -> Result<VirtualDevice> {
         let mut keys = AttributeSet::<KeyCode>::new();
         for k in [
             KeyCode::BTN_SOUTH,
@@ -157,13 +165,15 @@ impl UinputInjector {
         let stick = AbsInfo::new(0, -32768, 32767, 16, 128, 0);
         let trig = AbsInfo::new(0, 0, 255, 0, 0, 0);
         let hat = AbsInfo::new(0, -1, 1, 0, 0, 0);
-        let name = format!("2moon virtual gamepad {index}");
+        // The exact identity of a wired Xbox 360 pad under the xpad driver (name, USB ids, version
+        // 0x0114): SDL's database, Unity, Proton and engines matching on the name all know it.
+        let name = "Microsoft X-Box 360 pad";
         // Rumble, like a real Xbox 360 pad: games upload effects, we forward them.
         let mut ff = AttributeSet::<FFEffectCode>::new();
         ff.insert(FFEffectCode::FF_RUMBLE);
         let mut b = VirtualDevice::builder()?
             .name(name.as_bytes())
-            .input_id(evdev::InputId::new(evdev::BusType::BUS_USB, 0x045e, 0x028e, 0x110))
+            .input_id(evdev::InputId::new(evdev::BusType::BUS_USB, 0x045e, 0x028e, 0x0114))
             .with_keys(&keys)?
             .with_ff(&ff)?
             .with_ff_effects_max(16);
@@ -196,7 +206,7 @@ impl UinputInjector {
             return;
         }
         if !self.pads.contains_key(&g.index) {
-            match Self::gamepad(g.index) {
+            match Self::gamepad() {
                 Ok(d) => {
                     self.pads.insert(g.index, (d, Gamepad::default()));
                 }

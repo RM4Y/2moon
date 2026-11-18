@@ -4,6 +4,7 @@
 #   - FFmpeg (decoders: h264, hevc, av1, libdav1d; hwaccels: D3D11VA, DXVA2),
 #     dav1d linked statically -> avcodec-62.dll, avutil-60.dll
 #   - Opus -> opus.dll
+#   - SDL3 (game controllers only) -> SDL3.dll
 # libgcc is linked statically; the MinGW thread runtime (libwinpthread-1.dll) is shipped.
 #
 #   scripts/build-windows-deps.sh   -> target/windows-deps/{*.dll,LICENSES}
@@ -15,10 +16,12 @@ DAV1D_VERSION=1.5.5
 DAV1D_SHA256=ca96b1d0ba3f01f55de7231d775892b64994ba061aaeeaaa4f662a390b3abf9e
 OPUS_VERSION=1.6.1
 OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+SDL_VERSION=3.4.20
+SDL_SHA256=f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f
 
 SRC="$ROOT/target/ffmpeg-src"
 OUT="$ROOT/target/windows-deps"
-STAMP="$OUT/.built-ffmpeg-$FFMPEG_VERSION-dav1d-$DAV1D_VERSION-opus-$OPUS_VERSION"
+STAMP="$OUT/.built-ffmpeg-$FFMPEG_VERSION-dav1d-$DAV1D_VERSION-opus-$OPUS_VERSION-sdl-$SDL_VERSION"
 [ -f "$STAMP" ] && { echo "$OUT (up to date)"; exit 0; }
 
 mkdir -p "$SRC"
@@ -29,10 +32,11 @@ fetch() { # url file sha256
 fetch "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256"
 fetch "https://downloads.videolan.org/pub/videolan/dav1d/$DAV1D_VERSION/dav1d-$DAV1D_VERSION.tar.xz" "dav1d-$DAV1D_VERSION.tar.xz" "$DAV1D_SHA256"
 fetch "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz" "opus-$OPUS_VERSION.tar.gz" "$OPUS_SHA256"
+fetch "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz" "SDL3-$SDL_VERSION.tar.gz" "$SDL_SHA256"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
-docker run --rm -v "$SRC":/src:ro -v "$OUT":/out -e FFV="$FFMPEG_VERSION" -e DAV="$DAV1D_VERSION" -e OPV="$OPUS_VERSION" -e OWNER="$(id -u):$(id -g)" \
+docker run --rm -v "$SRC":/src:ro -v "$OUT":/out -e FFV="$FFMPEG_VERSION" -e DAV="$DAV1D_VERSION" -e OPV="$OPUS_VERSION" -e SDLV="$SDL_VERSION" -e OWNER="$(id -u):$(id -g)" \
     rust:1.97-bookworm bash -euc '
     apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64 nasm meson ninja-build cmake pkg-config >/dev/null
@@ -90,13 +94,23 @@ CROSS
     run ninja -C $B/opus-build
     cp "$(ls $B/opus-build/*opus*.dll | head -1)" /out/opus.dll
     cp $B/opus-$OPV/COPYING /out/LICENSES/Opus-BSD-3-Clause.txt
+    # SDL3, game controllers only (HIDAPI, RawInput, XInput, Windows.Gaming.Input)
+    tar -C $B -xzf /src/SDL3-$SDLV.tar.gz
+    run cmake -S $B/SDL3-$SDLV -B $B/sdl-build -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=$X-gcc-posix \
+        -DCMAKE_CXX_COMPILER=$X-g++-posix -DCMAKE_RC_COMPILER=$X-windres -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+        -DSDL_AUDIO=OFF -DSDL_VIDEO=OFF -DSDL_RENDER=OFF -DSDL_GPU=OFF -DSDL_CAMERA=OFF \
+        -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc"
+    run ninja -C $B/sdl-build
+    cp $B/sdl-build/SDL3.dll /out/
+    cp $B/SDL3-$SDLV/LICENSE.txt /out/LICENSES/SDL3-zlib.txt
     # MinGW thread runtime used by avutil (MIT licence)
     cp /usr/$X/lib/libwinpthread-1.dll /out/
     for f in /usr/share/doc/mingw-w64-common/copyright /usr/share/doc/libwinpthread-mingw-w64-dev/copyright; do
         [ -f $f ] && { cp $f /out/LICENSES/MinGW-w64-winpthreads.txt; break; }
     done
     $X-strip --strip-unneeded /out/*.dll
-    printf "FFmpeg %s (LGPL 2.1, https://ffmpeg.org) with dav1d %s (BSD 2-Clause), and Opus %s (BSD 3-Clause, https://opus-codec.org).\nBuilt by scripts/build-windows-deps.sh from the unmodified release tarballs.\n" $FFV $DAV $OPV > /out/LICENSES/README.txt
+    printf "FFmpeg %s (LGPL 2.1, https://ffmpeg.org) with dav1d %s (BSD 2-Clause), Opus %s (BSD 3-Clause, https://opus-codec.org) and SDL %s (zlib, https://libsdl.org).\nBuilt by scripts/build-windows-deps.sh from the unmodified release tarballs.\n" $FFV $DAV $OPV $SDLV > /out/LICENSES/README.txt
     echo "== DLL imports"
     for d in /out/*.dll; do echo "$(basename $d): $($X-objdump -p $d | sed -n "s/.*DLL Name: //p" | sort -u | tr "\n" " ")"; done
     chown -R $OWNER /out

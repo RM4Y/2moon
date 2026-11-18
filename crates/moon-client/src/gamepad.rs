@@ -1,6 +1,7 @@
-//! Game controllers (Xbox 360/One/Series, PS4/PS5, Switch Pro and anything
-//! SDL knows) read with gilrs and sent to the host as GameStream gamepad
-//! state, like Moonlight. The host sees each of them as an Xbox 360 pad.
+//! Game controllers read with SDL3, like Moonlight: the same HIDAPI drivers
+//! (PlayStation, Switch, Xbox, Steam controllers) and the same mapping
+//! database, so a controller Moonlight understands is understood here. Each is
+//! sent to the host as GameStream gamepad state; the host sees an Xbox 360 pad.
 //!
 //! Up to four controllers, numbered in the order they appear. A controller's
 //! state is sent when it changes; when the stream loses focus a neutral state
@@ -10,14 +11,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use std::time::Duration;
 
-use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Replay, Ticks};
-use gilrs::{Axis, Button, Gamepad as Pad, GamepadId, Gilrs};
 use moon_proto::control::input::{pad, Event, Gamepad};
 use tracing::{debug, info, warn};
 
 use crate::control::ControlSender;
+use crate::sdl::{self, axis, button, Api, JoystickId};
 
 /// GameStream hosts (and Moonlight) handle four controllers.
 const MAX_PADS: usize = 4;
@@ -36,89 +35,62 @@ pub fn parse_rumble(payload: &[u8]) -> Option<Rumble> {
     Some(Rumble { index: u(4)?, low: u(6)?, high: u(8)? })
 }
 
+/// SDL trigger (0..32767) to GameStream (0..255), as Moonlight does.
+pub fn trigger(v: i16) -> u8 {
+    (v.max(0) as u32 * 255 / 32767) as u8
+}
+
+/// SDL stick Y (down-positive) to GameStream (up-positive).
+pub fn flip_y(v: i16) -> i16 {
+    (-(v as i32)).clamp(-32768, 32767) as i16
+}
+
 /// GameStream state of one controller.
-pub fn state_of(p: &Pad<'_>) -> Gamepad {
+fn state_of(api: &Api, g: *mut sdl::Gamepad) -> Gamepad {
     let mut buttons = 0;
     for (b, flag) in [
-        (Button::South, pad::A),
-        (Button::East, pad::B),
-        (Button::West, pad::X),
-        (Button::North, pad::Y),
-        (Button::LeftTrigger, pad::LB),
-        (Button::RightTrigger, pad::RB),
-        (Button::Select, pad::BACK),
-        (Button::Start, pad::START),
-        (Button::Mode, pad::HOME),
-        (Button::LeftThumb, pad::LS),
-        (Button::RightThumb, pad::RS),
-        (Button::DPadUp, pad::UP),
-        (Button::DPadDown, pad::DOWN),
-        (Button::DPadLeft, pad::LEFT),
-        (Button::DPadRight, pad::RIGHT),
+        (button::SOUTH, pad::A),
+        (button::EAST, pad::B),
+        (button::WEST, pad::X),
+        (button::NORTH, pad::Y),
+        (button::LEFT_SHOULDER, pad::LB),
+        (button::RIGHT_SHOULDER, pad::RB),
+        (button::BACK, pad::BACK),
+        (button::START, pad::START),
+        (button::GUIDE, pad::HOME),
+        (button::LEFT_STICK, pad::LS),
+        (button::RIGHT_STICK, pad::RS),
+        (button::DPAD_UP, pad::UP),
+        (button::DPAD_DOWN, pad::DOWN),
+        (button::DPAD_LEFT, pad::LEFT),
+        (button::DPAD_RIGHT, pad::RIGHT),
     ] {
-        if p.is_pressed(b) {
+        if unsafe { (api.gamepad_button)(g, b) } {
             buttons |= flag;
         }
     }
-    // Some controllers report the d-pad as a hat (axes) rather than buttons.
-    let (dx, dy) = (p.value(Axis::DPadX), p.value(Axis::DPadY));
-    if dx > 0.5 {
-        buttons |= pad::RIGHT;
-    } else if dx < -0.5 {
-        buttons |= pad::LEFT;
-    }
-    if dy > 0.5 {
-        buttons |= pad::UP;
-    } else if dy < -0.5 {
-        buttons |= pad::DOWN;
-    }
-    let trigger = |b: Button, a: Axis| {
-        let v = p.button_data(b).map(|d| d.value()).unwrap_or_else(|| (p.value(a) + 1.0) / 2.0 * (p.axis_data(a).is_some() as u8 as f32));
-        (v.clamp(0.0, 1.0) * 255.0).round() as u8
-    };
-    // gilrs sticks are up-positive, like GameStream.
-    let stick = |a: Axis| (p.value(a).clamp(-1.0, 1.0) * 32767.0).round() as i16;
+    let a = |x| unsafe { (api.gamepad_axis)(g, x) };
     Gamepad {
         index: 0,
         active_mask: 0,
         buttons,
-        left_trigger: trigger(Button::LeftTrigger2, Axis::LeftZ),
-        right_trigger: trigger(Button::RightTrigger2, Axis::RightZ),
-        ls_x: stick(Axis::LeftStickX),
-        ls_y: stick(Axis::LeftStickY),
-        rs_x: stick(Axis::RightStickX),
-        rs_y: stick(Axis::RightStickY),
+        left_trigger: trigger(a(axis::LEFT_TRIGGER)),
+        right_trigger: trigger(a(axis::RIGHT_TRIGGER)),
+        ls_x: a(axis::LEFTX),
+        ls_y: flip_y(a(axis::LEFTY)),
+        rs_x: a(axis::RIGHTX),
+        rs_y: flip_y(a(axis::RIGHTY)),
     }
 }
 
 /// Assigns controller numbers: the lowest free one, kept while connected.
 #[derive(Default)]
 pub struct Slots {
-    by_id: HashMap<GamepadId, u16>,
-}
-
-/// Virtual pads created by a 2moon host on this machine: never send them back.
-fn ignored(p: &Pad<'_>) -> bool {
-    p.name().starts_with("2moon virtual") || p.os_name().starts_with("2moon virtual")
-}
-
-/// Steam Input's virtual pad: a mirror of a physical controller while Steam runs.
-fn is_steam_virtual(p: &Pad<'_>) -> bool {
-    (p.vendor_id() == Some(0x28de) && p.product_id() == Some(0x11ff)) || p.name().contains("Steam Virtual") || p.os_name().contains("Steam Virtual")
-}
-
-/// Controllers to forward, like SDL (and so Moonlight): Steam Input's virtual
-/// pads are ignored unless Steam launched us and asks for them
-/// (`SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1`). Otherwise, with Steam
-/// open on this computer, the host would get a controller nobody is holding,
-/// and games switch to controller mode and ignore the keyboard.
-fn forwarded(gilrs: &Gilrs) -> Vec<GamepadId> {
-    let steam_ok = std::env::var("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD").is_ok_and(|v| v == "1");
-    gilrs.gamepads().filter(|(_, p)| !ignored(p) && (steam_ok || !is_steam_virtual(p))).map(|(id, _)| id).collect()
+    by_id: HashMap<JoystickId, u16>,
 }
 
 impl Slots {
-    pub fn assign(&mut self, id: GamepadId) -> Option<u16> {
+    pub fn assign(&mut self, id: JoystickId) -> Option<u16> {
         if let Some(i) = self.by_id.get(&id) {
             return Some(*i);
         }
@@ -126,72 +98,151 @@ impl Slots {
         self.by_id.insert(id, i);
         Some(i)
     }
-    pub fn release(&mut self, id: GamepadId) -> Option<u16> {
+    pub fn release(&mut self, id: JoystickId) -> Option<u16> {
         self.by_id.remove(&id)
-    }
-    pub fn ids(&self) -> Vec<GamepadId> {
-        self.by_id.keys().copied().collect()
     }
     pub fn mask(&self) -> u16 {
         self.by_id.values().fold(0, |m, i| m | 1 << i)
     }
-    pub fn id_of(&self, index: u16) -> Option<GamepadId> {
+    pub fn id_of(&self, index: u16) -> Option<JoystickId> {
         self.by_id.iter().find(|(_, i)| **i == index).map(|(id, _)| *id)
     }
 }
 
+/// An open controller.
+struct Open {
+    pad: *mut sdl::Gamepad,
+    name: String,
+}
+
+/// Steam Input's virtual pad: a mirror of a physical controller while Steam runs.
+fn is_steam_virtual(vendor: u16, product: u16, name: &str) -> bool {
+    (vendor == 0x28de && product == 0x11ff) || name.contains("Steam Virtual")
+}
+
+/// The Xbox 360 pad a 2moon host on this same computer created: never send it back.
+fn is_our_host_pad(vendor: u16, product: u16, path: &str) -> bool {
+    if (vendor, product) != (0x045e, 0x028e) || !cfg!(target_os = "linux") {
+        return false;
+    }
+    // uinput devices live under /sys/devices/virtual; a real pad never does.
+    let Some(ev) = path.strip_prefix("/dev/input/") else { return false };
+    let Ok(real) = std::fs::canonicalize(format!("/sys/class/input/{ev}")) else { return false };
+    let name = std::fs::read_to_string(real.join("device/name")).unwrap_or_default();
+    real.to_string_lossy().contains("/devices/virtual/") && name.trim() == "Microsoft X-Box 360 pad"
+}
+
+/// Open a controller SDL announced, unless it must not be forwarded (like SDL
+/// and so Moonlight: Steam Input's virtual pads are ignored unless Steam
+/// launched us and asks for them with `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1`;
+/// otherwise, with Steam open on this computer, the host would get a controller
+/// nobody is holding, and games switch to controller mode and ignore the keyboard).
+fn open(api: &Api, id: JoystickId) -> Option<Open> {
+    let pad = unsafe { (api.open_gamepad)(id) };
+    if pad.is_null() {
+        warn!("cannot open controller {id}: {}", api.error());
+        return None;
+    }
+    let (name, vendor, product, kind, path) = unsafe {
+        (
+            sdl::cstr((api.gamepad_name)(pad)),
+            (api.gamepad_vendor)(pad),
+            (api.gamepad_product)(pad),
+            sdl::cstr((api.type_string)((api.gamepad_type)(pad))),
+            sdl::cstr((api.gamepad_path)(pad)),
+        )
+    };
+    let steam_ok = std::env::var("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD").is_ok_and(|v| v == "1");
+    let skip = if is_steam_virtual(vendor, product, &name) && !steam_ok {
+        Some("Steam Input virtual pad")
+    } else if is_our_host_pad(vendor, product, &path) {
+        Some("a 2moon host's virtual pad")
+    } else {
+        None
+    };
+    if let Some(why) = skip {
+        info!("controller ignored: {name} ({vendor:04x}:{product:04x}, {why})");
+        unsafe { (api.close_gamepad)(pad) };
+        return None;
+    }
+    info!("controller found: {name} ({vendor:04x}:{product:04x}, type {}, {path})", if kind.is_empty() { "?" } else { &kind });
+    Some(Open { pad, name })
+}
+
 /// Read controllers until `stop`, sending their state to the host while `focus` is set.
 pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, rumble: Receiver<Rumble>) {
-    let mut gilrs = match Gilrs::new() {
-        Ok(g) => g,
-        Err(gilrs::Error::NotImplemented(g)) => {
-            warn!("game controllers are not supported on this system");
-            g
-        }
+    let api = match sdl::api() {
+        Ok(a) => a,
         Err(e) => {
-            warn!("game controllers unavailable: {e}");
+            warn!("game controllers unavailable: {e:#}");
             return;
         }
     };
+    // Set before init, as Moonlight does. No signal handlers: SDL would take Ctrl+C.
+    api.hint("SDL_NO_SIGNAL_HANDLERS", "1");
+    api.hint("SDL_APP_NAME", "2moon");
+    // We have no SDL window: always deliver controller input (focus is ours to handle).
+    api.hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+    if !unsafe { (api.init_subsystem)(sdl::INIT_GAMEPAD) } {
+        warn!("game controllers unavailable: SDL init failed: {}", api.error());
+        return;
+    }
+    info!("game controllers: SDL {}", api.version());
+
+    let mut open_pads: HashMap<JoystickId, Open> = HashMap::new();
     let mut slots = Slots::default();
     let mut sent: HashMap<u16, Gamepad> = HashMap::new();
-    let mut effects: HashMap<u16, gilrs::ff::Effect> = HashMap::new();
     let mut was_focused = true;
-    for id in forwarded(&gilrs) {
-        if let Some(i) = slots.assign(id) {
-            let p = gilrs.gamepad(id);
-            info!("controller {}: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p));
+
+    let add = |id: JoystickId, open_pads: &mut HashMap<JoystickId, Open>, slots: &mut Slots| {
+        if open_pads.contains_key(&id) {
+            return;
         }
+        if let Some(o) = open(api, id) {
+            match slots.assign(id) {
+                Some(i) => info!("controller {}: {}", i + 1, o.name),
+                None => info!("controller not forwarded (already {MAX_PADS}): {}", o.name),
+            }
+            open_pads.insert(id, o);
+        }
+    };
+    for id in api.gamepads() {
+        add(id, &mut open_pads, &mut slots);
     }
+
+    let mut ev = sdl::Event::new();
     while !stop.load(Ordering::Relaxed) {
         // Wait for something to happen (bounded, to check stop / focus / rumble).
-        let mut first = gilrs.next_event_blocking(Some(Duration::from_millis(8)));
         let mut changed = false;
-        while let Some(ev) = first.take().or_else(|| gilrs.next_event()) {
-            match ev.event {
-                gilrs::EventType::Connected => {
-                    if forwarded(&gilrs).contains(&ev.id) {
-                        if let Some(i) = slots.assign(ev.id) {
-                            let p = gilrs.gamepad(ev.id);
-                            info!("controller {} connected: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p));
-                        }
+        let mut got = unsafe { (api.wait_event_timeout)(&mut ev, 8) };
+        while got {
+            match ev.kind() {
+                sdl::EVENT_GAMEPAD_ADDED => add(ev.which(), &mut open_pads, &mut slots),
+                sdl::EVENT_GAMEPAD_REMOVED => {
+                    if let Some(o) = open_pads.remove(&ev.which()) {
+                        unsafe { (api.close_gamepad)(o.pad) };
                     }
-                }
-                gilrs::EventType::Disconnected => {
-                    if let Some(i) = slots.release(ev.id) {
+                    if let Some(i) = slots.release(ev.which()) {
                         info!("controller {} disconnected", i + 1);
-                        effects.remove(&i);
                         sent.remove(&i);
                         // The host removes its virtual pad when its bit leaves the mask.
                         ctl.input(&Event::Gamepad(Gamepad { index: i, active_mask: slots.mask(), ..Default::default() }));
                     }
                 }
+                sdl::EVENT_GAMEPAD_AXIS_MOTION | sdl::EVENT_GAMEPAD_BUTTON_DOWN | sdl::EVENT_GAMEPAD_BUTTON_UP | sdl::EVENT_GAMEPAD_REMAPPED => {}
                 _ => {}
             }
             changed = true;
+            got = unsafe { (api.poll_event)(&mut ev) };
         }
         while let Ok(r) = rumble.try_recv() {
-            play_rumble(&mut gilrs, &slots, &mut effects, r);
+            if let Some(o) = slots.id_of(r.index).and_then(|id| open_pads.get(&id)) {
+                // The host repeats the command while the game wants rumble; play a
+                // while longer than its period so it does not stutter. (0, 0) stops it.
+                if !unsafe { (api.rumble_gamepad)(o.pad, r.low, r.high, 60_000) } {
+                    debug!("rumble: {}", api.error());
+                }
+            }
         }
         let focused = focus.load(Ordering::Relaxed);
         if !focused {
@@ -210,21 +261,10 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
             continue;
         }
         was_focused = true;
-        // A real controller plugged in after a Steam virtual one: drop the latter.
-        let keep = forwarded(&gilrs);
-        for id in slots.ids() {
-            if !keep.contains(&id) {
-                if let Some(i) = slots.release(id) {
-                    sent.remove(&i);
-                    ctl.input(&Event::Gamepad(Gamepad { index: i, active_mask: slots.mask(), ..Default::default() }));
-                }
-            }
-        }
         let mask = slots.mask();
-        for id in keep {
-            let p = gilrs.gamepad(id);
-            let Some(i) = slots.assign(id) else { continue };
-            let mut g = state_of(&p);
+        for (id, o) in &open_pads {
+            let Some(i) = slots.assign(*id) else { continue };
+            let mut g = state_of(api, o.pad);
             g.index = i;
             g.active_mask = mask | 1 << i;
             if sent.get(&i) != Some(&g) {
@@ -237,46 +277,10 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
     for i in sent.keys() {
         ctl.input(&Event::Gamepad(Gamepad { index: *i, active_mask: 0, ..Default::default() }));
     }
-}
-
-/// How a controller is mapped, for the logs.
-fn describe(p: &Pad<'_>) -> String {
-    if p.mapping_source() == gilrs::MappingSource::SdlMappings {
-        "SDL mapping".into()
-    } else {
-        "no SDL mapping, standard layout assumed".into()
+    for (_, o) in open_pads {
+        unsafe { (api.close_gamepad)(o.pad) };
     }
-}
-
-fn play_rumble(gilrs: &mut Gilrs, slots: &Slots, effects: &mut HashMap<u16, gilrs::ff::Effect>, r: Rumble) {
-    let Some(id) = slots.id_of(r.index) else { return };
-    if !gilrs.gamepad(id).is_ff_supported() {
-        return;
-    }
-    // Replace the previous effect of this controller; (0, 0) just stops it.
-    if let Some(e) = effects.remove(&r.index) {
-        let _ = e.stop();
-    }
-    if r.low == 0 && r.high == 0 {
-        return;
-    }
-    // The host repeats the command while the game wants rumble; play a while
-    // longer than its period so it does not stutter, and stop on (0, 0).
-    let replay = Replay { play_for: Ticks::from_ms(60_000), ..Default::default() };
-    let built = EffectBuilder::new()
-        .add_effect(BaseEffect { kind: BaseEffectType::Strong { magnitude: r.low }, scheduling: replay, ..Default::default() })
-        .add_effect(BaseEffect { kind: BaseEffectType::Weak { magnitude: r.high }, scheduling: replay, ..Default::default() })
-        .gamepads(&[id])
-        .finish(gilrs);
-    match built {
-        Ok(e) => {
-            if let Err(err) = e.play() {
-                debug!("rumble: {err}");
-            }
-            effects.insert(r.index, e);
-        }
-        Err(err) => debug!("rumble effect: {err}"),
-    }
+    unsafe { (api.quit_subsystem)(sdl::INIT_GAMEPAD) };
 }
 
 #[cfg(test)]
@@ -288,5 +292,26 @@ mod tests {
         let p = [0x00, 0xee, 0xff, 0xc0, 1, 0, 0x34, 0x12, 0xff, 0xff];
         assert_eq!(parse_rumble(&p), Some(Rumble { index: 1, low: 0x1234, high: 0xffff }));
         assert_eq!(parse_rumble(&p[..8]), None);
+    }
+
+    #[test]
+    fn axes_like_moonlight() {
+        assert_eq!(trigger(0), 0);
+        assert_eq!(trigger(32767), 255);
+        assert_eq!(trigger(-5), 0);
+        assert_eq!(flip_y(-32768), 32767);
+        assert_eq!(flip_y(32767), -32767);
+        assert_eq!(flip_y(0), 0);
+    }
+
+    #[test]
+    fn slots_lowest_free() {
+        let mut s = Slots::default();
+        assert_eq!(s.assign(10), Some(0));
+        assert_eq!(s.assign(11), Some(1));
+        assert_eq!(s.release(10), Some(0));
+        assert_eq!(s.assign(12), Some(0));
+        assert_eq!(s.mask(), 0b11);
+        assert_eq!(s.id_of(1), Some(11));
     }
 }

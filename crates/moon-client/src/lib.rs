@@ -1,5 +1,6 @@
 pub mod control;
 pub mod gamepad;
+pub mod sdl;
 pub mod gui;
 pub mod http;
 pub mod keygrab;

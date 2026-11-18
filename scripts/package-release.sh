@@ -14,8 +14,8 @@ if [ "${NATIVE:-0}" = 1 ]; then
     cargo build --release --manifest-path "$ROOT/Cargo.toml"
     BIN="$ROOT/target/release"
 else
-    # Rust image + libudev headers (game controllers: gilrs links libudev.so.1,
-    # present on every systemd distribution).
+    # Rust image (+ libudev headers, no longer needed since controllers moved to
+    # SDL, which loads libudev at run time; kept so the cached image is reused).
     IMAGE=2moon-build:1.97-bookworm
     docker image inspect "$IMAGE" >/dev/null 2>&1 || printf 'FROM rust:1.97-bookworm\nRUN apt-get update -qq && apt-get install -y -qq libudev-dev >/dev/null && rm -rf /var/lib/apt/lists/*\n' | docker build -q -t "$IMAGE" - >/dev/null
     docker run --rm -u "$(id -u):$(id -g)" -v "$ROOT":/src -w /src \
@@ -26,6 +26,8 @@ fi
 mkdir -p "$OUT"
 "$ROOT/scripts/build-ffmpeg.sh" >/dev/null
 FFMPEG_BUNDLE="$ROOT/target/ffmpeg-bundle/linux-x86_64"
+"$ROOT/scripts/build-sdl.sh" >/dev/null
+SDL_BUNDLE="$ROOT/target/sdl-bundle/linux-x86_64"
 
 package() { # name binary [extra files...]
     local name="$1" bin="$2"; shift 2
@@ -36,10 +38,13 @@ package() { # name binary [extra files...]
     strip "$dir/$bin"
     cp "$ROOT/README.md" "$ROOT/LICENSE" "$dir/"
     for f in "$@"; do mkdir -p "$dir/$(dirname "$f")"; cp "$ROOT/$f" "$dir/$f"; done
-    # Client: bundled FFmpeg decoders (scripts/build-ffmpeg.sh), loaded from lib/.
+    # Client: bundled FFmpeg decoders (scripts/build-ffmpeg.sh) and SDL3 for
+    # game controllers (scripts/build-sdl.sh), loaded from lib/.
     if [ "$name" = client ]; then
         cp -a "$FFMPEG_BUNDLE/lib" "$dir/lib"
         cp -a "$FFMPEG_BUNDLE/LICENSES" "$dir/LICENSES"
+        cp -a "$SDL_BUNDLE/lib/." "$dir/lib/"
+        cp -a "$SDL_BUNDLE/LICENSES/." "$dir/LICENSES/"
     fi
     tar -C "$OUT" -czf "$dir.tar.gz" "$(basename "$dir")"
     (cd "$OUT" && sha256sum "$(basename "$dir").tar.gz" >"$(basename "$dir").tar.gz.sha256")

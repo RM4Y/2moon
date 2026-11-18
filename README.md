@@ -175,14 +175,14 @@ revient automatiquement à la copie. `MOON_ZERO_COPY=0` désactive la copie zér
 
 Archive `2moon-client-<version>-windows-x86_64.zip` : `moon-client.exe` (interface
 graphique ; les commandes `pair`, `stream`... s'utilisent depuis l'invite de commandes)
-et ses DLL (FFmpeg, Opus). Rien à installer : extraire et lancer.
+et ses DLL (FFmpeg, Opus, SDL3). Rien à installer : extraire et lancer.
 
 - Décodage : NVDEC (NVIDIA), sinon **D3D11VA** (tous GPU, DXVA2 sur les systèmes plus
   anciens), sinon le processeur. Copie zéro NVDEC → OpenGL comme sous Linux.
 - Son et micro : WASAPI (via cpal), avec adaptation automatique au format de la carte son.
 - Réglages et identité : `%APPDATA%\2moon-client`.
 
-Compilé depuis Linux : `scripts/build-windows-deps.sh` (DLL FFmpeg / Opus, MinGW-w64)
+Compilé depuis Linux : `scripts/build-windows-deps.sh` (DLL FFmpeg / Opus / SDL3, MinGW-w64)
 puis `scripts/build-windows.sh` ; `scripts/package-release.sh` produit le zip.
 
 ## FFmpeg fourni avec le client
@@ -194,6 +194,20 @@ n'a donc pas besoin d'un FFmpeg complet sur la machine. Il est compilé par
 sous Debian 12, et intégré par `scripts/package-release.sh`. `MOON_FFMPEG=system`
 force l'usage du FFmpeg du système. Le serveur utilise toujours le FFmpeg du système
 (pour NVENC).
+
+## Manettes
+
+Le client lit les manettes avec **SDL3**, comme Moonlight : mêmes pilotes HIDAPI
+(PlayStation 4/5, Switch Pro, Xbox, manettes Steam) et même base de correspondances,
+donc une manette reconnue par Moonlight l'est aussi ici, vibrations comprises. Jusqu'à
+quatre manettes ; l'hôte les voit comme des manettes Xbox 360. Les manettes virtuelles
+de Steam Input sont ignorées, sauf si Steam a lancé le client
+(`SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1`).
+
+SDL3 est fourni avec le client (`lib/libSDL3.so.0` sous Linux, `SDL3.dll` sous Windows),
+compilé par `scripts/build-sdl.sh` (contrôleurs uniquement), sinon celui du système est
+utilisé ; `MOON_SDL=<chemin>` en impose un autre. `cargo run --example pads 10` liste les
+manettes vues par SDL et affiche les boutons pressés pendant 10 s.
 
 ## Tests
 
