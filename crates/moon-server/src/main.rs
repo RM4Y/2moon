@@ -177,8 +177,11 @@ async fn serve(args: Args) -> Result<()> {
         cfg.hevc = moon_media::ffenc::probe("hevc_vaapi").is_ok();
         cfg.av1 = moon_media::ffenc::probe("av1_vaapi").is_ok();
     } else if cfg.encoder != "software" && cfg.encoder != "openh264" {
-        cfg.hevc = moon_media::ffenc::probe("hevc_nvenc").is_ok();
-        cfg.av1 = moon_media::ffenc::probe("av1_nvenc").is_ok();
+        // Direct NVENC first, then NVENC through FFmpeg.
+        let direct = matches!(cfg.encoder.as_str(), "auto" | "nvenc");
+        let can = |c: moon_media::encoder::Codec| (direct && moon_media::nvenc::available(c)) || moon_media::ffenc::probe(c.nvenc()).is_ok();
+        cfg.hevc = can(moon_media::encoder::Codec::Hevc);
+        cfg.av1 = can(moon_media::encoder::Codec::Av1);
         cfg.rfi = matches!(cfg.encoder.as_str(), "auto" | "nvenc") && moon_media::nvenc::available(moon_media::encoder::Codec::Hevc);
         if matches!(cfg.encoder.as_str(), "auto" | "nvenc") {
             cfg.yuv444_h264 = moon_media::nvenc::available_444(moon_media::encoder::Codec::H264);
