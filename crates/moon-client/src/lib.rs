@@ -5,6 +5,7 @@ pub mod probe;
 pub mod rtsp;
 pub mod session;
 pub mod store;
+pub mod theme;
 pub mod video_gl;
 pub mod window;
 

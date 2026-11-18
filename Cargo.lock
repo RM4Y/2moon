@@ -2067,6 +2067,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "image",
  "libloading 0.9.1",
  "mdns-sd",
  "moon-media",

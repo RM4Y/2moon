@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use eframe::egui::{self, Color32, Key, RichText, Vec2};
+use eframe::egui::{self, pos2, vec2, Align, Color32, Key, Layout, Rect, RichText, Sense, Stroke, Vec2};
 use moon_media::encoder::Codec;
 use moon_proto::control::input::{self as inp, Event as In};
 use moon_proto::xml::App as HostApp;
@@ -19,6 +19,7 @@ use crate::http::{GsClient, ServerInfo};
 use crate::rtsp::StreamConfig;
 use crate::session::{Session, SessionOptions, Stats};
 use crate::store::{KnownHost, Store};
+use crate::theme::{self as th, Look, Scene};
 use crate::video_gl::VideoView;
 
 // ---------------------------------------------------------------- settings
@@ -141,12 +142,20 @@ pub struct GuiApp {
     stream: Option<Stream>,
     /// GPU video output (shared with the decode thread).
     video: VideoView,
+    look: Look,
+    /// Home: the "add a host" panel is open.
+    show_add: bool,
+    /// Settings: section to scroll to, and where each section was last frame.
+    settings_jump: Option<usize>,
+    section_tops: [f32; 4],
+    /// Height of the pairing / connecting dialog last frame (to place it).
+    dialog_h: f32,
 }
 
 pub fn run(store: Store) -> Result<()> {
     let vsync = Settings::load(&store).vsync;
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("2moon").with_inner_size([1100.0, 700.0]).with_min_inner_size([640.0, 400.0]).with_app_id("2moon"),
+        viewport: egui::ViewportBuilder::default().with_title("2moon").with_inner_size([1180.0, 760.0]).with_min_inner_size([640.0, 400.0]).with_app_id("2moon"),
         glow_options: eframe::egui_glow::GlowConfiguration { vsync, ..Default::default() },
         ..Default::default()
     };
@@ -164,10 +173,7 @@ fn client_for(store: &Store, h: &HostRef) -> GsClient {
 
 impl GuiApp {
     fn new(cc: &eframe::CreationContext<'_>, store: Store) -> Self {
-        let mut style = (*cc.egui_ctx.global_style()).clone();
-        style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-        style.spacing.button_padding = Vec2::new(12.0, 6.0);
-        cc.egui_ctx.set_global_style(style);
+        let look = Look::new(&cc.egui_ctx);
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let (tx, rx) = mpsc::channel();
         let settings = Settings::load(&store);
@@ -185,6 +191,11 @@ impl GuiApp {
             manual: String::new(),
             stream: None,
             video: VideoView::default(),
+            look,
+            show_add: false,
+            settings_jump: None,
+            section_tops: [f32::MAX; 4],
+            dialog_h: 520.0,
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -471,64 +482,42 @@ impl eframe::App for GuiApp {
             return;
         }
 
-        egui::Panel::top("top").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("2moon").size(20.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !matches!(self.screen, Screen::Settings) && ui.button("Réglages").clicked() {
-                        self.screen = Screen::Settings;
-                    }
-                    if !matches!(self.screen, Screen::Home) && ui.button("Accueil").clicked() {
-                        self.screen = Screen::Home;
-                    }
-                });
-            });
-            ui.add_space(6.0);
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| match &self.screen {
-            Screen::Home => self.home_ui(ui),
-            Screen::Pairing { host, pin } => {
-                let (host, pin) = (host.clone(), pin.clone());
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.heading(format!("Appairage avec {}", host.name));
-                    ui.add_space(20.0);
-                    ui.label("Saisissez ce code sur l'hôte (panneau d'administration 2moon ou interface Sunshine) :");
-                    ui.add_space(10.0);
-                    ui.label(RichText::new(&pin).size(64.0).monospace().strong());
-                    ui.add_space(20.0);
-                    ui.spinner();
-                    ui.label(RichText::new("En attente de l'hôte…").weak());
-                    ui.add_space(20.0);
-                    if ui.button("Annuler").clicked() {
-                        self.screen = Screen::Home;
-                    }
-                });
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let full = ui.max_rect();
+            let scene = match self.screen {
+                Screen::Home => Scene::Home,
+                Screen::Pairing { .. } | Screen::Connecting { .. } => Scene::Centered,
+                _ => Scene::Side,
+            };
+            self.look.paint_backdrop(ui.painter(), full, scene);
+            if scene == Scene::Centered {
+                self.dialog_ui(ui, full);
+                return;
             }
-            Screen::Apps { host, apps, error } => {
-                let (host, apps, error) = (host.clone(), apps.clone(), error.clone());
-                self.apps_ui(ui, &ctx, host, apps, error);
+            let header = Rect::from_min_size(full.min, vec2(full.width(), 76.0));
+            self.header_ui(ui, header);
+            let body = Rect::from_min_max(pos2(full.left(), header.bottom()), full.max);
+            let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
+            match &self.screen {
+                Screen::Home => self.home_ui(&mut bui),
+                Screen::Apps { host, apps, error } => {
+                    let (host, apps, error) = (host.clone(), apps.clone(), error.clone());
+                    self.apps_ui(&mut bui, &ctx, host, apps, error);
+                }
+                Screen::Settings => self.settings_ui(&mut bui, body),
+                _ => {}
             }
-            Screen::Settings => self.settings_ui(ui),
-            Screen::Connecting { host, since } => {
-                let (name, secs) = (host.name.clone(), since.elapsed().as_secs());
-                ui.vertical_centered(|ui| {
-                    ui.add_space(80.0);
-                    ui.spinner();
-                    ui.heading(format!("Connexion à {name}…"));
-                    ui.label(RichText::new(format!("{secs} s")).weak());
-                });
-                ctx.request_repaint_after(Duration::from_millis(250));
-            }
-            Screen::Streaming => {}
         });
 
         if let Some((msg, at)) = &self.toast {
             if at.elapsed() < Duration::from_secs(4) {
-                egui::Area::new(egui::Id::unique("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0]).show(&ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(msg));
+                egui::Area::new(egui::Id::unique("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(&ctx, |ui| {
+                    egui::Frame::new().fill(th::SURFACE).stroke(Stroke::new(1.0, th::BORDER)).corner_radius(255).inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            th::phase(ui, 14.0, 2, th::ACCENT);
+                            ui.label(RichText::new(msg).font(th::body(14.0)).color(th::TEXT2));
+                        });
+                    });
                 });
                 ctx.request_repaint_after(Duration::from_millis(200));
             } else {
@@ -538,76 +527,318 @@ impl eframe::App for GuiApp {
     }
 }
 
+/// A centred column of at most `max_w` (side padding 40, 20 when narrow); `add` gets its width.
+fn column<R>(ui: &mut egui::Ui, max_w: f32, add: impl FnOnce(&mut egui::Ui, f32) -> R) -> R {
+    let avail = ui.available_width();
+    let pad = if avail < 800.0 { 20.0 } else { 40.0 };
+    let w = (avail - 2.0 * pad).min(max_w).max(200.0);
+    let side = ((avail - w) / 2.0).max(0.0);
+    let spacing = ui.spacing().item_spacing;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(side);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = spacing;
+            ui.set_width(w);
+            add(ui, w)
+        })
+        .inner
+    })
+    .inner
+}
+
+/// Lay `items` out in a grid of equal columns (CSS `repeat(auto-fill, minmax(min_w, 1fr))`).
+fn grid<T>(ui: &mut egui::Ui, items: &[T], min_w: f32, gap: f32, mut cell: impl FnMut(&mut egui::Ui, &T)) {
+    let w = ui.available_width();
+    let cols = (((w + gap) / (min_w + gap)).floor() as usize).max(1);
+    let cw = (w - gap * (cols - 1) as f32) / cols as f32;
+    for row in items.chunks(cols) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for it in row {
+                ui.vertical(|ui| {
+                    ui.set_width(cw);
+                    cell(ui, it);
+                });
+            }
+        });
+        ui.add_space(gap - ui.spacing().item_spacing.y);
+    }
+}
+
+/// Bold label with an optional muted description under it.
+fn label_desc(ui: &mut egui::Ui, label: &str, desc: Option<&str>) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    th::text(ui, label, th::semibold(15.0), th::TEXT);
+    if let Some(d) = desc {
+        th::text(ui, d, th::body(13.0), th::MUTED);
+    }
+}
+
+/// One settings row (padding 22×28, divider under it unless last).
+fn row(ui: &mut egui::Ui, last: bool, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(28, 22)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+        add(ui);
+    });
+    if !last {
+        th::rule(ui, th::DIVIDER);
+    }
+}
+
+/// Height of `label_desc` at width `w`.
+fn label_desc_height(ui: &egui::Ui, label: &str, desc: Option<&str>, w: f32) -> f32 {
+    let p = ui.painter();
+    let mut h = p.layout(label.into(), th::semibold(15.0), th::TEXT, w).size().y;
+    if let Some(d) = desc {
+        h += 2.0 + p.layout(d.into(), th::body(13.0), th::MUTED, w).size().y;
+    }
+    h
+}
+
+/// Label (+ description) on the left, `right` (of natural size `right_size`) on the right,
+/// both vertically centred; stacked when too narrow.
+fn split_row(ui: &mut egui::Ui, right_size: Vec2, label: &str, desc: Option<&str>, right: impl FnOnce(&mut egui::Ui)) {
+    let w = ui.available_width();
+    if right_size.x + 24.0 + 180.0 > w {
+        label_desc(ui, label, desc);
+        ui.add_space(6.0);
+        right(ui);
+        return;
+    }
+    let lw = w - right_size.x - 24.0;
+    let lh = label_desc_height(ui, label, desc, lw);
+    let h = lh.max(right_size.y);
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(vec2(lw, h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(lw);
+            ui.add_space((h - lh) / 2.0);
+            label_desc(ui, label, desc);
+        });
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), h), Layout::right_to_left(Align::Center), |ui| {
+            ui.set_height(h);
+            right(ui);
+        });
+    });
+}
+
+fn seg_row<T: PartialEq + Clone>(ui: &mut egui::Ui, last: bool, label: &str, value: &mut T, opts: &[(T, &str)], mono: bool, min_w: f32) {
+    row(ui, last, |ui| {
+        let labels: Vec<&str> = opts.iter().map(|o| o.1).collect();
+        let sw = th::segmented_width(ui, &labels, mono, min_w);
+        split_row(ui, vec2(sw, 50.0), label, None, |ui| {
+            th::segmented(ui, value, opts, mono, min_w);
+        });
+    });
+}
+
+fn toggle_row(ui: &mut egui::Ui, last: bool, label: &str, desc: &str, value: &mut bool) {
+    row(ui, last, |ui| {
+        split_row(ui, vec2(52.0, 30.0), label, Some(desc), |ui| {
+            th::switch(ui, value).on_hover_text(label);
+        });
+    });
+}
+
+/// A settings section: panel with a phase glyph + title header. Records where it is for the side nav.
+fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 4], jump: &mut Option<usize>, add: impl FnOnce(&mut egui::Ui)) {
+    let r = th::panel()
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(28, 20)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    th::phase(ui, 18.0, idx as u8, th::ACCENT);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(title).font(th::display(20.0)).color(th::TEXT));
+                });
+            });
+            th::rule(ui, th::DIVIDER);
+            add(ui);
+        })
+        .response
+        .rect;
+    tops[idx] = r.top();
+    if *jump == Some(idx) {
+        ui.scroll_to_rect(r, Some(Align::TOP));
+        *jump = None;
+    }
+    ui.add_space(32.0);
+}
+
+const SECTIONS: [&str; 4] = ["Vidéo", "Audio et micro", "Affichage", "Session"];
+
 impl GuiApp {
+    fn header_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        let p = ui.painter();
+        p.rect_filled(r, 0.0, th::alpha(th::BG, 0.45));
+        p.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, th::white(0.08)));
+        let narrow = r.width() < 800.0;
+        let pad = if narrow { 20.0 } else { 40.0 };
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(pad, 0.0))).layout(Layout::left_to_right(Align::Center)));
+        ui.spacing_mut().item_spacing.x = 8.0;
+
+        // Logo.
+        let word = ui.painter().layout_no_wrap("2moon".into(), th::display(24.0), th::TEXT);
+        let (lr, logo) = ui.allocate_exact_size(vec2(54.0 + 12.0 + word.size().x, 44.0), Sense::click());
+        th::paint_logo(ui.painter(), Rect::from_min_size(pos2(lr.left(), lr.center().y - 18.0), vec2(54.0, 36.0)));
+        ui.painter().galley(pos2(lr.left() + 66.0, lr.center().y - word.size().y / 2.0), word, th::TEXT);
+        if logo.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.screen = Screen::Home;
+        }
+        ui.add_space(if narrow { 16.0 } else { 36.0 });
+
+        // Tabs.
+        let on_settings = matches!(self.screen, Screen::Settings);
+        for (label, active, to_settings) in [("Ordinateurs", !on_settings, false), ("Réglages", on_settings, true)] {
+            let font = if active { th::semibold(15.0) } else { th::body(15.0) };
+            let g = ui.painter().layout_no_wrap(label.into(), font, Color32::PLACEHOLDER);
+            let (tr, resp) = ui.allocate_exact_size(vec2(g.size().x + 28.0, 44.0), Sense::click());
+            let col = if active || resp.hovered() { th::TEXT } else { th::MUTED };
+            ui.painter().galley(tr.center() - g.size() / 2.0, g, col);
+            if active {
+                ui.painter().rect_filled(Rect::from_min_max(pos2(tr.left(), tr.bottom() - 2.0), tr.max), 0.0, th::ACCENT);
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !active {
+                self.screen = if to_settings { Screen::Settings } else { Screen::Home };
+            }
+        }
+
+        // Right side: what is going on.
+        let s = &self.settings;
+        let summary = format!("{}×{} · {} ips · {} Mbit/s", s.width, s.height, s.fps, s.bitrate_kbps / 1000);
+        let searching = matches!(self.screen, Screen::Home);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if searching {
+                if r.width() >= 960.0 {
+                    let g = th::spaced(ui, "RECHERCHE SUR LE RÉSEAU LOCAL", th::mono(12.0), th::TEXT2, 0.5);
+                    let (tr, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+                    ui.painter().galley(tr.min, g, th::TEXT2);
+                    th::phase(ui, 14.0, 1, th::ACCENT);
+                }
+            } else if r.width() >= 760.0 {
+                let g = ui.painter().layout_no_wrap(summary, th::mono(13.0), th::TEXT);
+                let (cr, _) = ui.allocate_exact_size(g.size() + vec2(24.0, 16.0), Sense::hover());
+                ui.painter().rect(cr, 10.0, th::SURFACE, Stroke::new(1.0, th::BORDER), egui::StrokeKind::Inside);
+                ui.painter().galley(cr.center() - g.size() / 2.0, g, th::TEXT);
+            }
+        });
+    }
+
     fn home_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.heading("Ordinateurs");
-        ui.label(RichText::new("Hôtes 2moon / Sunshine / GeForce Experience trouvés sur le réseau et hôtes enregistrés.").weak());
-        ui.add_space(10.0);
         let hosts = self.all_hosts();
         let status = self.status.lock().unwrap().clone();
         let mut action: Option<(u8, HostRef)> = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for h in &hosts {
-                    let st = status.get(&h.key()).cloned().unwrap_or_default();
-                    let paired = self.is_paired(h);
-                    egui::Frame::group(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| {
-                        ui.set_width(230.0);
-                        ui.vertical(|ui| {
-                            monitor_icon(ui, 34.0);
-                            ui.label(RichText::new(&h.name).size(17.0).strong());
-                            ui.label(RichText::new(format!("{}:{}", h.address, h.port)).weak().small());
-                            let (txt, col) = match (&st.checked, st.online, &st.info) {
-                                (None, _, _) => ("…", Color32::GRAY),
-                                (_, false, _) => ("Hors ligne", Color32::from_rgb(220, 90, 90)),
-                                (_, true, Some(i)) if i.busy && i.current_game != 0 => ("En jeu", Color32::from_rgb(240, 180, 40)),
-                                _ => ("En ligne", Color32::from_rgb(60, 200, 130)),
-                            };
+        let t = self.look.t();
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            column(ui, 1120.0, |ui, w| {
+                ui.add_space(40.0);
+                // "Add a host" toggle, right-aligned.
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 48.0), Layout::right_to_left(Align::Center), |ui| {
+                    let open = self.show_add;
+                    let turn = ui.ctx().animate_bool_with_time(egui::Id::unique("add-turn"), open, 0.2) * std::f32::consts::FRAC_PI_4;
+                    let b = th::button(ui, th::Btn::Outline, Some(th::Icon::Plus(turn)), "Ajouter un hôte", None, true);
+                    if open {
+                        ui.painter().rect_stroke(b.rect, 12.0, Stroke::new(1.0, th::ACCENT), egui::StrokeKind::Inside);
+                    }
+                    if b.clicked() {
+                        self.show_add = !open;
+                    }
+                });
+                ui.add_space(32.0);
+
+                if self.show_add {
+                    let fr = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(38, 38, 44, 190)).corner_radius(18).inner_margin(28).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let iw = ui.available_width();
+                        let intro = |ui: &mut egui::Ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            th::text(ui, "Ajouter un hôte manuellement", th::display(22.0), th::TEXT);
+                            th::text(ui, "Adresse IP ou nom, port optionnel.", th::body(14.0), th::MUTED);
+                        };
+                        let mut form = |ui: &mut egui::Ui| {
                             ui.horizontal(|ui| {
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                                ui.painter().circle_filled(r.center(), 4.5, col);
-                                ui.label(txt);
-                                if paired {
-                                    ui.label(RichText::new("· appairé").weak());
+                                let bw = 196.0;
+                                let r = th::text_input(ui, &mut self.manual, "192.168.1.85:47989", (ui.available_width() - bw - 10.0).max(160.0));
+                                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                                let add = th::button(ui, th::Btn::OutlineStrong, None, "Ajouter et appairer", Some(bw), true).clicked();
+                                if (add || enter) && !self.manual.trim().is_empty() {
+                                    let (addr, port) = crate::split_host_port(self.manual.trim());
+                                    action = Some((1, HostRef { name: addr.clone(), address: addr, port }));
+                                    self.manual.clear();
                                 }
                             });
+                        };
+                        if iw < 760.0 {
+                            intro(ui);
+                            ui.add_space(12.0);
+                            form(ui);
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.allocate_ui_with_layout(vec2(iw * 0.36, 0.0), Layout::top_down(Align::Min), intro);
+                                ui.add_space(14.0);
+                                form(ui);
+                            });
+                        }
+                    });
+                    let path = th::rounded_path(fr.response.rect.shrink(0.5), 18.0);
+                    ui.painter().extend(egui::Shape::dashed_line(&path, Stroke::new(1.0, th::BORDER_STRONG), 6.0, 4.0));
+                    ui.add_space(32.0);
+                }
+
+                if hosts.is_empty() {
+                    th::card(th::white(0.12)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            th::phases_spinner(ui, t);
                             ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                if paired {
-                                    if ui.add_enabled(st.online, egui::Button::new("Ouvrir")).clicked() {
-                                        action = Some((0, h.clone()));
-                                    }
-                                } else if ui.add_enabled(st.online, egui::Button::new("Appairer")).clicked() {
-                                    action = Some((1, h.clone()));
-                                }
-                                if paired && ui.small_button("Oublier").on_hover_text("Supprimer cet hôte de la liste").clicked() {
-                                    action = Some((2, h.clone()));
-                                }
-                            });
+                            th::text(ui, "Recherche d'hôtes 2moon, Sunshine ou GeForce Experience sur le réseau local…", th::body(15.0), th::TEXT2);
                         });
                     });
+                    ui.add_space(20.0);
                 }
-            });
-            if hosts.is_empty() {
-                ui.label(RichText::new("Recherche d'hôtes sur le réseau…").weak());
-            }
-            ui.add_space(20.0);
-            ui.separator();
-            ui.label("Ajouter un hôte manuellement (adresse IP ou nom, port optionnel) :");
-            ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.manual).hint_text("192.168.1.85:47989").desired_width(240.0));
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if (ui.button("Ajouter et appairer").clicked() || enter) && !self.manual.trim().is_empty() {
-                    let (addr, port) = crate::split_host_port(self.manual.trim());
-                    action = Some((1, HostRef { name: addr.clone(), address: addr, port }));
-                    self.manual.clear();
-                }
+                grid(ui, &hosts, 340.0, 20.0, |ui, h| {
+                    let st = status.get(&h.key()).cloned().unwrap_or_default();
+                    if let Some(a) = self.host_card(ui, h, &st) {
+                        action = Some((a, h.clone()));
+                    }
+                });
+
+                // Shortcuts reminder.
+                ui.add_space(28.0);
+                th::rule(ui, th::DIVIDER);
+                ui.add_space(16.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(18.0, 10.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        th::eyebrow(ui, "Pendant le stream", th::TEXT2);
+                        ui.add_space(12.0);
+                        for k in ["Ctrl", "Alt", "Maj"] {
+                            th::kbd(ui, k, false);
+                        }
+                        ui.label(RichText::new("+").font(th::body(13.0)).color(th::MUTED));
+                    });
+                    for (k, what) in [("Q", "accueil"), ("Z", "capturer la souris"), ("F", "plein écran"), ("S", "statistiques"), ("M", "couper le micro")] {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            th::kbd(ui, k, false);
+                            ui.label(RichText::new(what).font(th::body(13.0)).color(th::MUTED));
+                        });
+                    }
+                });
+                ui.add_space(40.0);
+                let _ = w;
             });
         });
         match action {
             Some((0, h)) => self.open_apps(h),
-            Some((1, h)) => self.start_pairing(h),
+            Some((1, h)) => {
+                self.show_add = false;
+                self.start_pairing(h)
+            }
             Some((2, h)) => {
                 self.store.hosts.retain(|k| !(k.address == h.address && k.http_port == h.port));
                 let _ = self.store.save();
@@ -617,46 +848,129 @@ impl GuiApp {
         }
     }
 
+    /// One host card; returns 0 = open, 1 = pair, 2 = forget.
+    fn host_card(&self, ui: &mut egui::Ui, h: &HostRef, st: &HostStatus) -> Option<u8> {
+        let paired = self.is_paired(h);
+        let in_game = st.online && st.info.as_ref().is_some_and(|i| i.busy && i.current_game != 0);
+        let mut action = None;
+        th::card(if in_game { th::ACCENT } else { th::white(0.12) }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                th::icon_tile(ui, |p, r| th::paint_monitor(p, r, th::TEXT));
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| match (st.checked, st.online) {
+                    (None, _) => th::pill(ui, th::PillKind::Outline(th::FAINT), 0, "…"),
+                    (_, false) => th::pill(ui, th::PillKind::Outline(th::MUTED), 0, "HORS LIGNE"),
+                    _ if in_game => th::pill(ui, th::PillKind::Filled(th::ACCENT), 3, "EN JEU"),
+                    _ => th::pill(ui, th::PillKind::Outline(th::TEXT), 2, "EN LIGNE"),
+                });
+            });
+            ui.add_space(14.0);
+            ui.add(egui::Label::new(RichText::new(&h.name).font(th::display(36.0)).color(th::TEXT)).truncate());
+            ui.label(RichText::new(format!("{}:{}", h.address, h.port)).font(th::mono(14.0)).color(th::MUTED));
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (icon, txt, col) = match (paired, in_game) {
+                    (true, true) => (th::Icon::Check, "Appairé · session en cours", th::TEXT2),
+                    (true, false) => (th::Icon::Check, "Appairé", th::TEXT2),
+                    (false, _) => (th::Icon::Lock, "Pas encore appairé", th::MUTED),
+                };
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                th::paint_icon(ui.painter(), icon, r, col);
+                ui.label(RichText::new(txt).font(th::body(14.0)).color(col));
+            });
+            ui.add_space(14.0);
+            th::rule(ui, th::white(0.08));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let full = ui.available_width();
+                if paired {
+                    let forget_w = 108.0;
+                    if th::button(ui, th::Btn::Accent, Some(th::Icon::Play), "Ouvrir", Some(full - forget_w - 10.0), st.online).clicked() {
+                        action = Some(0);
+                    }
+                    if th::button(ui, th::Btn::Outline, None, "Oublier", Some(forget_w), true).on_hover_text("Supprimer cet hôte de la liste").clicked() {
+                        action = Some(2);
+                    }
+                } else if th::button(ui, th::Btn::Light, None, "Appairer", Some(full), st.online).clicked() {
+                    action = Some(1);
+                }
+            });
+        });
+        action
+    }
+
     fn apps_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, host: HostRef, apps: Option<Vec<HostApp>>, error: Option<String>) {
-        ui.add_space(8.0);
-        ui.heading(&host.name);
         let current = self.status.lock().unwrap().get(&host.key()).and_then(|s| s.info.clone()).map(|i| i.current_game).unwrap_or(0);
         let s = &self.settings;
-        ui.label(RichText::new(format!("{}×{} · {} fps · {} Mbit/s · codec {} · audio {} canaux", s.width, s.height, s.fps, s.bitrate_kbps / 1000, s.codec, s.audio_channels)).weak());
-        ui.add_space(10.0);
-        if let Some(e) = error {
-            ui.colored_label(Color32::from_rgb(220, 90, 90), e);
-            return;
-        }
-        let Some(apps) = apps else {
-            ui.spinner();
-            return;
+        let audio = match s.audio_channels {
+            6 => "5.1",
+            8 => "7.1",
+            _ => "stéréo",
         };
+        let summary = format!("{}×{} · {} ips · {} Mbit/s · codec {} · audio {audio}", s.width, s.height, s.fps, s.bitrate_kbps / 1000, s.codec);
+        let t = self.look.t();
         let mut launch = None;
         let mut quit = false;
-        ui.horizontal_wrapped(|ui| {
-            for a in &apps {
-                egui::Frame::group(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| {
-                    ui.set_width(200.0);
-                    ui.vertical(|ui| {
-                        gamepad_icon(ui, 30.0);
-                        ui.label(RichText::new(&a.title).size(16.0).strong());
-                        if current == a.id {
-                            ui.label(RichText::new("en cours").color(Color32::from_rgb(240, 180, 40)));
-                        }
+        let mut back = false;
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            column(ui, 1120.0, |ui, w| {
+                ui.add_space(28.0);
+                back = th::button(ui, th::Btn::Ghost, Some(th::Icon::Back), "Ordinateurs", None, true).clicked();
+                ui.add_space(28.0);
+                th::eyebrow(ui, "Applications", th::ACCENT);
+                th::text(ui, &host.name, th::display((w / 12.0).clamp(36.0, 64.0)), th::TEXT);
+                th::text(ui, summary, th::mono(13.0), th::MUTED);
+                ui.add_space(32.0);
+                if let Some(e) = &error {
+                    th::card(th::WARN).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        th::text(ui, "Impossible de lire la liste des applications", th::semibold(15.0), th::WARN);
+                        th::text(ui, e, th::mono(13.0), th::TEXT2);
+                    });
+                    return;
+                }
+                let Some(apps) = &apps else {
+                    ui.horizontal(|ui| {
+                        th::phases_spinner(ui, t);
+                        ui.label(RichText::new("Chargement des applications…").font(th::body(15.0)).color(th::TEXT2));
+                    });
+                    return;
+                };
+                grid(ui, apps, 260.0, 20.0, |ui, a| {
+                    let running = current == a.id;
+                    th::card(if running { th::ACCENT } else { th::white(0.12) }).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            let label = if current == a.id { "Reprendre" } else { "Lancer" };
-                            if ui.button(label).clicked() {
+                            th::icon_tile(ui, |p, r| th::paint_gamepad(p, r, th::TEXT));
+                            if running {
+                                ui.with_layout(Layout::right_to_left(Align::Min), |ui| th::pill(ui, th::PillKind::Filled(th::ACCENT), 3, "EN COURS"));
+                            }
+                        });
+                        ui.add_space(14.0);
+                        ui.add(egui::Label::new(RichText::new(&a.title).font(th::display(24.0)).color(th::TEXT)).truncate());
+                        ui.add_space(10.0);
+                        th::rule(ui, th::white(0.08));
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            let full = ui.available_width();
+                            let quit_w = 100.0;
+                            let main_w = if running { full - quit_w - 10.0 } else { full };
+                            if th::button(ui, th::Btn::Accent, Some(th::Icon::Play), if running { "Reprendre" } else { "Lancer" }, Some(main_w), true).clicked() {
                                 launch = Some(a.id);
                             }
-                            if current == a.id && ui.button("Quitter l'app").clicked() {
+                            if running && th::button(ui, th::Btn::Outline, None, "Quitter", Some(quit_w), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
                                 quit = true;
                             }
                         });
                     });
                 });
-            }
+                ui.add_space(40.0);
+            });
         });
+        if back {
+            self.screen = Screen::Home;
+        }
         if let Some(id) = launch {
             self.launch(ctx, host.clone(), id);
         }
@@ -665,87 +979,248 @@ impl GuiApp {
         }
     }
 
-    fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.heading("Réglages du stream");
-        ui.add_space(10.0);
+    fn settings_ui(&mut self, ui: &mut egui::Ui, body: Rect) {
         let before = self.settings.clone();
-        let s = &mut self.settings;
-        egui::Grid::new("settings").num_columns(2).spacing([24.0, 12.0]).show(ui, |ui| {
-            ui.label("Résolution");
-            egui::ComboBox::from_id_salt("res").selected_text(format!("{}×{}", s.width, s.height)).show_ui(ui, |ui| {
-                for (w, h, n) in [(1280, 720, "720p"), (1600, 900, "900p"), (1920, 1080, "1080p"), (2560, 1440, "1440p"), (3840, 2160, "4K")] {
-                    if ui.selectable_label(s.width == w && s.height == h, format!("{n} ({w}×{h})")).clicked() {
-                        s.width = w;
-                        s.height = h;
-                    }
+        let avail = body.width();
+        let pad = if avail < 800.0 { 20.0 } else { 40.0 };
+        let w = (avail - 2.0 * pad).min(1120.0);
+        let x0 = body.center().x - w / 2.0;
+        let side = avail >= 900.0;
+        let main_left = if side { x0 + 220.0 + 48.0 } else { x0 };
+        let main_w = x0 + w - main_left;
+
+        // Side navigation: one moon phase per section, new moon to full moon.
+        if side {
+            let mut active = 0;
+            for (i, top) in self.section_tops.iter().enumerate() {
+                if *top <= body.top() + 160.0 {
+                    active = i;
                 }
-            });
-            ui.end_row();
-            ui.label("Images par seconde");
-            ui.horizontal(|ui| {
-                for f in [30, 60, 90, 120, 144] {
-                    ui.selectable_value(&mut s.fps, f, f.to_string());
+            }
+            let nav = Rect::from_min_max(pos2(x0, body.top() + 64.0 + 150.0), pos2(x0 + 220.0, body.bottom()));
+            let mut nui = ui.new_child(egui::UiBuilder::new().max_rect(nav).layout(Layout::top_down(Align::Min)));
+            nui.spacing_mut().item_spacing.y = 2.0;
+            for (i, label) in SECTIONS.iter().enumerate() {
+                let on = i == active;
+                let (r, resp) = nui.allocate_exact_size(vec2(220.0, 44.0), Sense::click());
+                let p = nui.painter();
+                if on {
+                    p.rect_filled(r, 10.0, th::SURFACE);
+                } else if resp.hovered() {
+                    p.rect_filled(r, 10.0, th::white(0.04));
                 }
-            });
-            ui.end_row();
-            ui.label("Débit vidéo");
-            ui.horizontal(|ui| {
-                let mut mbps = s.bitrate_kbps as f32 / 1000.0;
-                if ui.add(egui::Slider::new(&mut mbps, 2.0..=150.0).suffix(" Mbit/s").logarithmic(true)).changed() {
-                    s.bitrate_kbps = (mbps * 1000.0) as u32;
+                th::paint_phase(p, pos2(r.left() + 20.0, r.center().y), 6.5, i as u8, if on { th::ACCENT } else { th::FAINT });
+                let col = if on || resp.hovered() { th::TEXT } else { th::MUTED };
+                p.text(pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, *label, th::body(15.0), col);
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.settings_jump = Some(i);
                 }
-                let sugg = s.suggested_bitrate();
-                if ui.small_button(format!("conseillé : {}", sugg / 1000)).clicked() {
-                    s.bitrate_kbps = sugg;
-                }
+            }
+            nui.add_space(16.0);
+            nui.allocate_ui_with_layout(vec2(200.0, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(200.0);
+                th::text(ui, "Une phase de lune par section, de la nouvelle lune à la pleine lune.", th::body(13.0), th::FAINT);
             });
-            ui.end_row();
-            ui.label("Codec");
-            ui.horizontal(|ui| {
-                for (v, n) in [("auto", "Automatique"), ("h264", "H.264"), ("hevc", "HEVC"), ("av1", "AV1")] {
-                    ui.selectable_value(&mut s.codec, v.to_string(), n);
-                }
+        }
+
+        let scroll = Rect::from_min_max(pos2(main_left, body.top()), body.max);
+        let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(scroll).layout(Layout::top_down(Align::Min)));
+        let (s, tops, jump) = (&mut self.settings, &mut self.section_tops, &mut self.settings_jump);
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(&mut sui, |ui| {
+            ui.set_width(main_w);
+            ui.add_space(110.0);
+            th::eyebrow(ui, "Configuration", th::ACCENT);
+            ui.add_space(2.0);
+            th::text(ui, "Réglages du stream", th::display((main_w / 10.5).clamp(40.0, 72.0)), th::TEXT);
+            ui.add_space(48.0);
+
+            section(ui, 0, SECTIONS[0], tops, jump, |ui| {
+                let mut res = (s.width, s.height);
+                let opts = [((1280, 720), "1280×720"), ((1600, 900), "1600×900"), ((1920, 1080), "1920×1080"), ((2560, 1440), "2560×1440"), ((3840, 2160), "3840×2160")];
+                seg_row(ui, false, "Résolution", &mut res, &opts, true, 0.0);
+                (s.width, s.height) = res;
+                seg_row(ui, false, "Images par seconde", &mut s.fps, &[(30, "30"), (60, "60"), (90, "90"), (120, "120"), (144, "144")], true, 56.0);
+                row(ui, false, |ui| bitrate_row(ui, s));
+                let codecs = [("auto".to_string(), "Automatique"), ("h264".to_string(), "H.264"), ("hevc".to_string(), "HEVC"), ("av1".to_string(), "AV1")];
+                seg_row(ui, false, "Codec", &mut s.codec, &codecs, false, 0.0);
+                toggle_row(ui, false, "Couleurs 4:4:4", "Texte plus net, plus de débit. H.264 / HEVC si l'hôte le propose.", &mut s.yuv444);
+                toggle_row(ui, false, "HDR / 10 bits", "HEVC ou AV1 · moins d'effets d'escalier · affichée en SDR.", &mut s.hdr);
+                toggle_row(ui, true, "Décodage GPU", "Si possible. NVIDIA : NVDEC · Intel / AMD : VAAPI.", &mut s.hw_decode);
             });
-            ui.end_row();
-            ui.label("Couleurs");
-            ui.checkbox(&mut s.yuv444, "4:4:4 (texte plus net ; plus de débit ; H.264 / HEVC si l'hôte le propose)");
-            ui.end_row();
-            ui.label("HDR");
-            ui.checkbox(&mut s.hdr, "Accepter la HDR / 10 bits (HEVC ou AV1 ; moins d'effets d'escalier ; affichée en SDR)");
-            ui.end_row();
-            ui.label("Audio");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut s.audio_channels, 2, "Stéréo");
-                ui.selectable_value(&mut s.audio_channels, 6, "5.1");
-                ui.selectable_value(&mut s.audio_channels, 8, "7.1");
+            section(ui, 1, SECTIONS[1], tops, jump, |ui| {
+                seg_row(ui, false, "Canaux audio", &mut s.audio_channels, &[(2, "Stéréo"), (6, "5.1"), (8, "7.1")], false, 64.0);
+                toggle_row(ui, true, "Envoyer mon micro à l'hôte", "Hôtes 2moon · devient le micro par défaut de l'hôte pendant le stream.", &mut s.mic);
             });
-            ui.end_row();
-            ui.label("Décodage");
-            ui.checkbox(&mut s.hw_decode, "Décoder sur le GPU si possible (NVIDIA : NVDEC, Intel/AMD : VAAPI)");
-            ui.end_row();
-            ui.label("Affichage");
-            ui.checkbox(&mut s.fullscreen, "Plein écran au démarrage du stream");
-            ui.end_row();
-            ui.label("");
-            ui.checkbox(&mut s.show_stats, "Afficher les statistiques pendant le stream");
-            ui.end_row();
-            ui.label("Micro");
-            ui.checkbox(&mut s.mic, "Envoyer mon micro à l'hôte (hôtes 2moon ; il devient le micro par défaut de l'hôte pendant le stream)");
-            ui.end_row();
-            ui.label("Synchro verticale");
-            ui.checkbox(&mut s.vsync, "V-Sync (pas de déchirement, mais plus de latence ; appliqué au prochain démarrage)");
-            ui.end_row();
-            ui.label("Fin de session");
-            ui.checkbox(&mut s.quit_app_on_exit, "Quitter l'application sur l'hôte en fermant le stream");
-            ui.end_row();
+            section(ui, 2, SECTIONS[2], tops, jump, |ui| {
+                toggle_row(ui, false, "Plein écran au démarrage", "Le stream s'ouvre directement en plein écran.", &mut s.fullscreen);
+                toggle_row(ui, false, "Statistiques pendant le stream", "Affichées en surimpression · Ctrl+Alt+Maj+S pour basculer.", &mut s.show_stats);
+                toggle_row(ui, true, "Synchro verticale (V-Sync)", "Pas de déchirement, mais plus de latence · appliqué au prochain démarrage.", &mut s.vsync);
+            });
+            section(ui, 3, SECTIONS[3], tops, jump, |ui| {
+                toggle_row(ui, true, "Quitter l'application sur l'hôte", "En fermant le stream, l'application lancée sur l'hôte est fermée aussi.", &mut s.quit_app_on_exit);
+            });
+
+            // Keyboard shortcuts.
+            let keys: [(&[&str], &str); 5] = [
+                (&["Ctrl", "Alt", "Maj", "Q"], "Revenir à l'accueil"),
+                (&["…", "Z"], "Capturer la souris"),
+                (&["…", "F"], "Plein écran"),
+                (&["…", "S"], "Statistiques"),
+                (&["…", "M"], "Couper le micro"),
+            ];
+            grid(ui, &keys, 200.0, 12.0, |ui, (ks, what)| {
+                egui::Frame::new().stroke(Stroke::new(1.0, th::BORDER)).corner_radius(14).inner_margin(18).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for k in ks.iter() {
+                            th::kbd(ui, k, ks.len() == 2 && *k != "…");
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(*what).font(th::body(14.0)).color(th::TEXT2));
+                });
+            });
+            ui.add_space(48.0);
         });
-        ui.add_space(20.0);
-        ui.label(RichText::new("Pendant le stream : Ctrl+Alt+Maj+Q revenir à l'accueil · +Z capturer la souris · +F plein écran · +S statistiques · +M couper le micro").weak());
         if format!("{:?}", before) != format!("{:?}", self.settings) {
             self.settings.save(&self.store);
         }
     }
+
+    /// Pairing and connecting: a dialog under the moon, no header.
+    fn dialog_ui(&mut self, ui: &mut egui::Ui, full: Rect) {
+        let w = (full.width() - 32.0).min(560.0);
+        let top = (full.height() - self.dialog_h - 32.0).min(full.height() * 0.3).max(24.0);
+        let r = Rect::from_min_max(pos2(full.center().x - w / 2.0, full.top() + top), pos2(full.center().x + w / 2.0, full.bottom()));
+        let mut dui = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Min)));
+        let t = self.look.t();
+        let title_size = if w < 480.0 { 32.0 } else { 40.0 };
+        let mut cancel = false;
+        let mut dialog_h = self.dialog_h;
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(&mut dui, |ui| {
+            let frame = egui::Frame::new()
+                .fill(Color32::from_rgba_unmultiplied(18, 18, 21, 199))
+                .stroke(Stroke::new(1.0, th::white(0.12)))
+                .corner_radius(22)
+                .inner_margin(36)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    let waiting = |ui: &mut egui::Ui, msg: &str| {
+                        egui::Frame::new().fill(th::SURFACE2).corner_radius(12).inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                th::phases_spinner(ui, t);
+                                ui.add_space(6.0);
+                                ui.label(RichText::new(msg).font(th::body(14.0)).color(th::TEXT2));
+                            });
+                        });
+                    };
+                    match &self.screen {
+                        Screen::Pairing { host, pin } => {
+                            th::eyebrow(ui, &format!("Appairage · {}", host.name), th::ACCENT);
+                            th::text(ui, "Saisissez ce code sur l'hôte", th::display(title_size), th::TEXT);
+                            th::text(
+                                ui,
+                                format!("Ouvrez l'interface de l'hôte ({}) — panneau d'administration 2moon ou interface Sunshine — et entrez le code PIN ci-dessous pour autoriser cet appareil.", host.address),
+                                th::body(15.0),
+                                th::MUTED,
+                            );
+                            ui.add_space(18.0);
+                            let (pr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 108.0), Sense::hover());
+                            let bw = (pr.width() - 3.0 * 12.0) / 4.0;
+                            for (i, d) in pin.chars().take(4).enumerate() {
+                                let b = Rect::from_min_size(pr.min + vec2(i as f32 * (bw + 12.0), 0.0), vec2(bw, 108.0));
+                                ui.painter().rect(b, 16.0, th::BG, Stroke::new(1.0, th::BORDER_STRONG), egui::StrokeKind::Inside);
+                                th::centered_text(ui.painter(), b, &d.to_string(), th::display(64.0), th::TEXT);
+                            }
+                            ui.add_space(18.0);
+                            waiting(ui, "En attente de la confirmation de l'hôte…");
+                            ui.add_space(18.0);
+                            ui.allocate_ui_with_layout(vec2(ui.available_width(), 48.0), Layout::right_to_left(Align::Center), |ui| {
+                                cancel = th::button(ui, th::Btn::Outline, None, "Annuler", None, true).clicked();
+                            });
+                        }
+                        Screen::Connecting { host, since } => {
+                            let s = &self.settings;
+                            th::eyebrow(ui, &format!("Connexion · {} s", since.elapsed().as_secs()), th::ACCENT);
+                            th::text(ui, &host.name, th::display(title_size), th::TEXT);
+                            th::text(ui, format!("{}×{} · {} ips · {} Mbit/s", s.width, s.height, s.fps, s.bitrate_kbps / 1000), th::mono(14.0), th::MUTED);
+                            ui.add_space(18.0);
+                            waiting(ui, "Démarrage de la session sur l'hôte…");
+                        }
+                        _ => {}
+                    }
+                });
+            dialog_h = frame.response.rect.height();
+        });
+        self.dialog_h = dialog_h;
+        if cancel {
+            self.screen = Screen::Home;
+        }
+    }
+}
+
+/// Bitrate: big value, "advised" chip, log slider.
+fn bitrate_row(ui: &mut egui::Ui, s: &mut Settings) {
+    let w = ui.available_width();
+    let left = |ui: &mut egui::Ui| label_desc(ui, "Débit vidéo", Some("Plus haut = plus net, plus de bande passante."));
+    let mut right = |ui: &mut egui::Ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        let mbps = s.bitrate_kbps / 1000;
+        let sugg = s.suggested_bitrate();
+        ui.horizontal(|ui| {
+            let g1 = ui.painter().layout_no_wrap(mbps.to_string(), th::display(40.0), th::TEXT);
+            let g2 = ui.painter().layout_no_wrap("Mbit/s".into(), th::mono(14.0), th::MUTED);
+            let (r, _) = ui.allocate_exact_size(vec2(g1.size().x + 8.0 + g2.size().x, g1.size().y), Sense::hover());
+            let base = r.top() + g1.size().y;
+            ui.painter().galley(r.min, g1.clone(), th::TEXT);
+            ui.painter().galley(pos2(r.left() + g1.size().x + 8.0, base - g2.size().y - 6.0), g2, th::MUTED);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if sugg == s.bitrate_kbps { format!("conseillé : {}", sugg / 1000) } else { format!("conseillé : {} · appliquer", sugg / 1000) };
+                let g = ui.painter().layout_no_wrap(label, th::mono(13.0), th::TEXT2);
+                let (cr, resp) = ui.allocate_exact_size(g.size() + vec2(24.0, 18.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(cr, 18.0, th::white(0.05));
+                }
+                ui.painter().extend(egui::Shape::dashed_line(&th::rounded_path(cr.shrink(0.5), cr.height() / 2.0), Stroke::new(1.0, Color32::from_rgb(0x52, 0x52, 0x5B)), 4.0, 3.0));
+                ui.painter().galley(cr.center() - g.size() / 2.0, g, th::TEXT2);
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    s.bitrate_kbps = sugg;
+                }
+            });
+        });
+        let mut v = s.bitrate_kbps as f32 / 1000.0;
+        if th::slider_log(ui, &mut v, 2.0, 150.0).changed() {
+            s.bitrate_kbps = (v * 1000.0) as u32;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("2").font(th::mono(12.0)).color(th::MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(RichText::new("150 Mbit/s").font(th::mono(12.0)).color(th::MUTED)));
+        });
+    };
+    if w < 620.0 {
+        left(ui);
+        ui.add_space(8.0);
+        right(ui);
+    } else {
+        ui.horizontal_top(|ui| {
+            let lw = (w * 0.33).max(180.0);
+            ui.allocate_ui_with_layout(vec2(lw, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(lw);
+                left(ui);
+            });
+            ui.add_space(14.0);
+            ui.vertical(|ui| {
+                ui.set_width(w - lw - 24.0);
+                right(ui);
+            });
+        });
+    }
+}
+
+impl GuiApp {
 
     // ------------------------------------------------------------ streaming
 
@@ -792,12 +1267,17 @@ impl GuiApp {
             let snap = |p: egui::Pos2| egui::pos2((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
             self.video.paint(ui.painter(), egui::Rect::from_min_max(snap(video.min), snap(video.max)));
         } else {
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "En attente de la première image…", egui::FontId::proportional(18.0), Color32::GRAY);
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "En attente de la première image…", th::body(18.0), th::MUTED);
         }
         if let Some(t) = st.mic_toast.filter(|t| t.elapsed() < Duration::from_secs(2)) {
             let muted = st.session.mic_muted.load(Ordering::Relaxed);
-            let (txt, col) = if muted { ("Micro coupé", Color32::from_rgb(240, 120, 90)) } else { ("Micro actif", Color32::from_rgb(120, 255, 160)) };
-            ui.painter().text(rect.center_top() + Vec2::new(0.0, 30.0), egui::Align2::CENTER_TOP, txt, egui::FontId::proportional(22.0), col);
+            let (txt, col, ph) = if muted { ("Micro coupé", th::WARN, 0) } else { ("Micro actif", th::ACCENT, 3) };
+            let p = ui.painter();
+            let g = p.layout_no_wrap(txt.into(), th::semibold(15.0), th::TEXT);
+            let pill = Rect::from_center_size(rect.center_top() + vec2(0.0, 48.0), vec2(g.size().x + 64.0, 44.0));
+            p.rect(pill, 255.0, th::alpha(th::BG, 0.85), Stroke::new(1.0, col), egui::StrokeKind::Inside);
+            th::paint_phase(p, pos2(pill.left() + 26.0, pill.center().y), 6.5, ph, col);
+            p.galley(pos2(pill.left() + 44.0, pill.center().y - g.size().y / 2.0), g, th::TEXT);
             ctx.request_repaint_after(Duration::from_secs(2).saturating_sub(t.elapsed()));
         }
         if self.settings.show_stats {
@@ -806,8 +1286,16 @@ impl GuiApp {
                 (true, true) => " · micro coupé".into(),
                 (true, false) => format!(" · micro {} paquets", st.session.stats.mic_packets.load(Ordering::Relaxed)),
             };
-            let txt = format!("{:.0} fps affichées · {}{mic}", st.fps_window.2, short_stats(&st.session.stats));
-            ui.painter().text(rect.left_top() + Vec2::new(10.0, 10.0), egui::Align2::LEFT_TOP, txt, egui::FontId::monospace(13.0), Color32::from_rgb(120, 255, 160));
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = (rect.width() - 56.0).max(200.0);
+            let fmt = |font, color| egui::TextFormat { font_id: font, color, ..Default::default() };
+            job.append(&format!("{:.0} fps", st.fps_window.2), 0.0, fmt(th::mono_bold(13.0), th::ACCENT));
+            job.append(&format!(" affichées · {}{mic}", short_stats(&st.session.stats)), 0.0, fmt(th::mono(13.0), th::TEXT));
+            let p = ui.painter();
+            let g = p.layout_job(job);
+            let bg = Rect::from_min_size(rect.left_top() + vec2(12.0, 12.0), g.size() + vec2(28.0, 20.0));
+            p.rect(bg, 12.0, th::alpha(th::BG, 0.78), Stroke::new(1.0, th::white(0.12)), egui::StrokeKind::Inside);
+            p.galley(bg.min + vec2(14.0, 10.0), g, th::TEXT);
         }
         // Make sure the whole area receives pointer input.
         let _ = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -924,30 +1412,6 @@ impl GuiApp {
     }
 }
 
-/// Small vector icons (the bundled font has no emoji).
-fn monitor_icon(ui: &mut egui::Ui, h: f32) {
-    let (r, _) = ui.allocate_exact_size(Vec2::new(h * 1.4, h), egui::Sense::hover());
-    let p = ui.painter();
-    let col = ui.visuals().widgets.active.fg_stroke.color;
-    let screen = egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + h * 0.72));
-    p.rect_stroke(screen, 3.0, egui::Stroke::new(2.0, col), egui::StrokeKind::Inside);
-    p.line_segment([egui::pos2(r.center().x, screen.max.y), egui::pos2(r.center().x, r.max.y - 2.0)], egui::Stroke::new(2.0, col));
-    p.line_segment([egui::pos2(r.center().x - h * 0.3, r.max.y - 2.0), egui::pos2(r.center().x + h * 0.3, r.max.y - 2.0)], egui::Stroke::new(2.0, col));
-}
-
-fn gamepad_icon(ui: &mut egui::Ui, h: f32) {
-    let (r, _) = ui.allocate_exact_size(Vec2::new(h * 1.6, h), egui::Sense::hover());
-    let p = ui.painter();
-    let col = ui.visuals().widgets.active.fg_stroke.color;
-    let body = r.shrink2(Vec2::new(0.0, h * 0.15));
-    p.rect_stroke(body, h * 0.35, egui::Stroke::new(2.0, col), egui::StrokeKind::Inside);
-    let c = body.left_center() + Vec2::new(h * 0.45, 0.0);
-    p.line_segment([c - Vec2::new(h * 0.15, 0.0), c + Vec2::new(h * 0.15, 0.0)], egui::Stroke::new(2.0, col));
-    p.line_segment([c - Vec2::new(0.0, h * 0.15), c + Vec2::new(0.0, h * 0.15)], egui::Stroke::new(2.0, col));
-    let b = body.right_center() - Vec2::new(h * 0.45, 0.0);
-    p.circle_filled(b + Vec2::new(h * 0.1, -h * 0.08), h * 0.06, col);
-    p.circle_filled(b - Vec2::new(h * 0.1, -h * 0.08), h * 0.06, col);
-}
 
 fn short_stats(s: &Stats) -> String {
     format!(
