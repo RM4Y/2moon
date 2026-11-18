@@ -49,7 +49,7 @@ const GROTESK_BOLD: &[u8] = include_bytes!("../assets/fonts/SpaceGrotesk-Bold.tt
 const MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
 
-fn install_fonts(ctx: &egui::Context) {
+pub fn install_fonts(ctx: &egui::Context) {
     let mut f = FontDefinitions::default();
     for (name, bytes) in [("inter", INTER), ("inter-semibold", INTER_SEMIBOLD), ("grotesk", GROTESK_BOLD), ("mono", MONO), ("mono-bold", MONO_BOLD)] {
         f.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));

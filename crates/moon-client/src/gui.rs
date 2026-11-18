@@ -1454,7 +1454,13 @@ fn controllers_ui(ui: &mut egui::Ui, v: &crate::padmap::View, cmds: &mut Vec<cra
                 });
             });
             ui.add_space(12.0);
-            paint_pad(ui, &p.state);
+            // During the setup, the control to use pulses on the drawing.
+            let ask = v.wizard.as_ref().filter(|w| w.pad == p.id).and_then(|w| STEPS.get(w.step)).map(|s| s.0);
+            if ask.is_some() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            }
+            let t = ui.input(|i| i.time);
+            crate::padview::paint(ui, &p.state, ask, t);
         });
     }
     if let Some(m) = &v.message {
@@ -1462,54 +1468,6 @@ fn controllers_ui(ui: &mut egui::Ui, v: &crate::padmap::View, cmds: &mut Vec<cra
             th::text(ui, m, th::body(14.0), th::TEXT2);
         });
     }
-}
-
-/// Live view of a controller as the host receives it (Xbox 360 layout).
-fn paint_pad(ui: &mut egui::Ui, g: &moon_proto::control::input::Gamepad) {
-    use egui::Pos2;
-    use inp::pad;
-    let w = ui.available_width().min(560.0);
-    let (r, _) = ui.allocate_exact_size(vec2(w, 132.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(r, 14.0, th::SURFACE2);
-    let on = |flag: u32| g.buttons & flag != 0;
-    // Triggers.
-    for (i, (label, v)) in [("LT", g.left_trigger), ("RT", g.right_trigger)].into_iter().enumerate() {
-        let x = if i == 0 { r.left() + 16.0 } else { r.right() - 16.0 - 60.0 };
-        let bar = Rect::from_min_size(pos2(x, r.top() + 14.0), vec2(60.0, 8.0));
-        p.rect_filled(bar, 4.0, th::BORDER);
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(60.0 * v as f32 / 255.0, 8.0)), 4.0, th::ACCENT);
-        p.text(pos2(bar.center().x, bar.bottom() + 9.0), egui::Align2::CENTER_CENTER, label, th::mono(11.0), th::MUTED);
-    }
-    // Sticks.
-    for (i, (x, y, click)) in [(g.ls_x, g.ls_y, on(pad::LS)), (g.rs_x, g.rs_y, on(pad::RS))].into_iter().enumerate() {
-        let c = pos2(if i == 0 { r.left() + 60.0 } else { r.right() - 60.0 }, r.top() + 82.0);
-        p.circle_stroke(c, 28.0, Stroke::new(1.5, th::BORDER_STRONG));
-        let d = c + vec2(x as f32 / 32767.0, -(y as f32) / 32767.0) * 22.0;
-        p.circle_filled(d, 7.0, if click { th::ACCENT } else { th::TEXT2 });
-    }
-    // Buttons.
-    let chip = |label: &str, c: Pos2, lit: bool| {
-        let rr = Rect::from_center_size(c, vec2(if label.chars().count() > 2 { 44.0 } else { 26.0 }, 22.0));
-        p.rect_filled(rr, 11.0, if lit { th::ACCENT } else { th::BORDER });
-        p.text(rr.center(), egui::Align2::CENTER_CENTER, label, th::mono_bold(11.0), if lit { th::BG } else { th::MUTED });
-    };
-    let mid = r.center().x;
-    chip("LB", pos2(r.left() + 46.0, r.top() + 46.0), on(pad::LB));
-    chip("RB", pos2(r.right() - 46.0, r.top() + 46.0), on(pad::RB));
-    chip("Back", pos2(mid - 52.0, r.top() + 24.0), on(pad::BACK));
-    chip("Home", pos2(mid, r.top() + 24.0), on(pad::HOME));
-    chip("Start", pos2(mid + 52.0, r.top() + 24.0), on(pad::START));
-    let dc = pos2(mid - 70.0, r.top() + 84.0);
-    chip("↑", dc + vec2(0.0, -24.0), on(pad::UP));
-    chip("↓", dc + vec2(0.0, 24.0), on(pad::DOWN));
-    chip("←", dc + vec2(-28.0, 0.0), on(pad::LEFT));
-    chip("→", dc + vec2(28.0, 0.0), on(pad::RIGHT));
-    let fc = pos2(mid + 70.0, r.top() + 84.0);
-    chip("Y", fc + vec2(0.0, -24.0), on(pad::Y));
-    chip("A", fc + vec2(0.0, 24.0), on(pad::A));
-    chip("X", fc + vec2(-28.0, 0.0), on(pad::X));
-    chip("B", fc + vec2(28.0, 0.0), on(pad::B));
 }
 
 /// Bitrate: big value, "advised" chip, log slider.

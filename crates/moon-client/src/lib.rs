@@ -4,6 +4,7 @@ pub mod gui;
 pub mod http;
 pub mod keygrab;
 pub mod padmap;
+pub mod padview;
 pub mod probe;
 pub mod rtsp;
 pub mod session;
