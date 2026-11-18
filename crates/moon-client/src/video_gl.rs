@@ -45,6 +45,9 @@ struct Exchange {
     /// Frame interval of the stream, and when the last frame was presented.
     interval: Duration,
     last_present: Option<Instant>,
+    /// Frame pacing on: frames of a burst are queued and shown one interval apart.
+    /// Off (minimum latency): only the newest frame is kept and shown at once.
+    pacing: bool,
     /// Frames dropped from the queue before being shown (display too slow).
     replaced: u64,
     /// A CPU buffer to recycle for the next copy.
@@ -56,10 +59,20 @@ struct Exchange {
     size: [usize; 2],
     /// Frames uploaded to the GPU (= frames presented).
     presented: u64,
-    /// Frame index of each queued frame (same order as `queue`).
-    queue_index: VecDeque<u32>,
-    /// Frames put on screen since the last `take_shown`: (index, when).
-    shown: Vec<(u32, Instant)>,
+    /// Frame index of each queued frame and when it was decoded (same order as `queue`).
+    queue_index: VecDeque<(u32, Instant)>,
+    /// Frames put on screen since the last `take_shown`.
+    shown: Vec<Shown>,
+}
+
+/// A frame put on screen.
+#[derive(Clone, Copy, Debug)]
+pub struct Shown {
+    pub index: u32,
+    /// When the decoder handed it over.
+    pub decoded: Instant,
+    /// When it was drawn.
+    pub at: Instant,
 }
 
 /// Frames kept waiting for display at most.
@@ -91,8 +104,9 @@ static ZERO_COPY_BROKEN: AtomicBool = AtomicBool::new(false);
 
 impl VideoView {
     /// Start a new stream at `fps`: drop previous frames, return the sink generation.
-    pub fn reset(&self, fps: u32) -> u64 {
+    pub fn reset(&self, fps: u32, pacing: bool) -> u64 {
         let mut ex = self.ex.lock().unwrap();
+        ex.pacing = pacing;
         ex.interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
         ex.generation += 1;
         ex.queue.clear();
@@ -159,10 +173,11 @@ impl VideoView {
         }
         ex.size = size;
         ex.queue.push_back(pending);
-        ex.queue_index.push_back(index);
+        ex.queue_index.push_back((index, Instant::now()));
         // More than two waiting: the display is really behind, drop the oldest
         // (bounded latency: at most one extra frame interval).
-        while ex.queue.len() > MAX_QUEUED {
+        let max = if ex.pacing { MAX_QUEUED } else { 1 };
+        while ex.queue.len() > max {
             ex.replaced += 1;
             ex.queue_index.pop_front();
             match ex.queue.pop_front() {
@@ -185,6 +200,7 @@ impl VideoView {
             return None;
         }
         Some(match ex.last_present {
+            Some(_) if !ex.pacing => Duration::ZERO,
             Some(t) => (t + ex.interval.mul_f64(PACE)).saturating_duration_since(Instant::now()),
             None => Duration::ZERO,
         })
@@ -195,6 +211,7 @@ impl VideoView {
         let mut ex = self.ex.lock().unwrap();
         let due = match ex.last_present {
             None => true,
+            Some(_) if !ex.pacing => true,
             // A frame that arrives on time is shown at once (no added latency);
             // the second frame of a burst waits for its turn.
             Some(t) => t.elapsed() >= ex.interval.mul_f64(PACE) || ex.queue.len() >= MAX_QUEUED,
@@ -205,16 +222,16 @@ impl VideoView {
         let f = ex.queue.pop_front()?;
         let now = Instant::now();
         ex.last_present = Some(now);
-        if let Some(i) = ex.queue_index.pop_front() {
+        if let Some((index, decoded)) = ex.queue_index.pop_front() {
             if ex.shown.len() < 64 {
-                ex.shown.push((i, now));
+                ex.shown.push(Shown { index, decoded, at: now });
             }
         }
         Some(f)
     }
 
-    /// Frames put on screen since the last call: (frame index, when).
-    pub fn take_shown(&self) -> Vec<(u32, Instant)> {
+    /// Frames put on screen since the last call.
+    pub fn take_shown(&self) -> Vec<Shown> {
         std::mem::take(&mut self.ex.lock().unwrap().shown)
     }
 
@@ -894,7 +911,7 @@ mod pacing_tests {
     #[test]
     fn burst_frames_are_paced_not_dropped() {
         let v = VideoView::default();
-        let g = v.reset(60);
+        let g = v.reset(60, true);
         let f = I420Frame::new(16, 16);
         v.put(g, Decoded::Cpu(&f), 1);
         v.put(g, Decoded::Cpu(&f), 2);
@@ -910,5 +927,21 @@ mod pacing_tests {
             v.put(g, Decoded::Cpu(&f), 0);
         }
         assert_eq!(v.replaced(), 3);
+    }
+
+    /// Without pacing, a burst keeps only the newest frame and shows it at once.
+    #[test]
+    fn minimum_latency_shows_newest_at_once() {
+        let v = VideoView::default();
+        let g = v.reset(60, false);
+        let f = I420Frame::new(16, 16);
+        v.put(g, Decoded::Cpu(&f), 1);
+        assert!(v.take_due().is_some());
+        v.put(g, Decoded::Cpu(&f), 2);
+        v.put(g, Decoded::Cpu(&f), 3);
+        assert_eq!(v.replaced(), 1, "frame 2 replaced by 3");
+        assert_eq!(v.next_due(), Some(Duration::ZERO));
+        assert!(v.take_due().is_some(), "shown without waiting an interval");
+        assert_eq!(v.take_shown().last().map(|s| s.index), Some(3));
     }
 }

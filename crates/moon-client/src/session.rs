@@ -61,25 +61,32 @@ pub struct Latency(Mutex<LatencyState>);
 struct LatencyState {
     /// Frames received but not shown yet: (index, first packet, host latency in µs).
     recent: std::collections::VecDeque<(u32, Instant, u32)>,
-    /// Current one-second window and the whole session: (frames, host µs, client µs).
-    window: (u64, u64, u64),
+    /// Current one-second window and the whole session.
+    window: Sums,
     window_start: Option<Instant>,
-    total: (u64, u64, u64),
+    total: Sums,
     last: Option<LatencyAvg>,
 }
+
+/// Sums over a period: frames, then host, client and display-wait microseconds.
+type Sums = (u64, u64, u64, u64);
 
 /// Average latency over a period, in milliseconds.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LatencyAvg {
     pub host_ms: f64,
     pub client_ms: f64,
+    /// Part of `client_ms` spent decoded, waiting to be drawn (frame pacing, the
+    /// compositor's frame callback on Wayland, the interface's own repaint).
+    pub wait_ms: f64,
     /// Frames the averages are over.
     pub frames: u64,
 }
 
 impl LatencyAvg {
-    fn of((n, host, client): (u64, u64, u64)) -> Option<Self> {
-        (n > 0).then(|| Self { host_ms: host as f64 / n as f64 / 1000.0, client_ms: client as f64 / n as f64 / 1000.0, frames: n })
+    fn of((n, host, client, wait): Sums) -> Option<Self> {
+        let ms = |us: u64| us as f64 / n as f64 / 1000.0;
+        (n > 0).then(|| Self { host_ms: ms(host), client_ms: ms(client), wait_ms: ms(wait), frames: n })
     }
 }
 
@@ -93,23 +100,25 @@ impl Latency {
         }
     }
 
-    /// Frame `index` was put on screen at `at`.
-    pub fn shown(&self, index: u32, at: Instant) {
+    /// Frame `index`, handed over by the decoder at `decoded`, was put on screen at `at`.
+    pub fn shown(&self, index: u32, decoded: Instant, at: Instant) {
         let mut g = self.0.lock().unwrap();
         let st = &mut *g;
         let Some(pos) = st.recent.iter().position(|r| r.0 == index) else { return };
         let (_, first, host) = st.recent[pos];
         st.recent.drain(..=pos);
         let client = at.saturating_duration_since(first).as_micros() as u64;
+        let wait = at.saturating_duration_since(decoded).as_micros() as u64;
         for w in [&mut st.window, &mut st.total] {
             w.0 += 1;
             w.1 += host as u64;
             w.2 += client;
+            w.3 += wait;
         }
         let start = *st.window_start.get_or_insert(at);
         if at.saturating_duration_since(start) >= Duration::from_secs(1) {
             st.last = LatencyAvg::of(st.window);
-            st.window = (0, 0, 0);
+            st.window = Sums::default();
             st.window_start = Some(at);
         }
     }

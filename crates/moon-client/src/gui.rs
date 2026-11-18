@@ -51,11 +51,14 @@ pub struct Settings {
     /// While the stream has focus, the system's shortcuts (Windows/Super key,
     /// Alt+Tab, Alt+F4…) go to the host instead of this computer.
     pub capture_shortcuts: bool,
+    /// Minimum latency: no frame pacing, each decoded frame is shown at once
+    /// (may stutter when frames arrive in bursts, e.g. over Wi-Fi).
+    pub min_latency: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, mic_device: None, yuv444: false, hdr: false, capture_shortcuts: true }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, mic_device: None, yuv444: false, hdr: false, capture_shortcuts: true, min_latency: false }
     }
 }
 
@@ -591,7 +594,7 @@ impl GuiApp {
         };
         let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, mic_device: s.mic_device.clone(), yuv444: s.yuv444, hdr: s.hdr, zero_copy: Some(self.video.zero_copy_flag()) };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
-        let generation = self.video.reset(s.fps);
+        let generation = self.video.reset(s.fps, !s.min_latency);
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
         let sink = Box::new(move |f: crate::session::Decoded<'_>, index: u32| {
             view.put(generation, f, index);
@@ -629,10 +632,10 @@ impl GuiApp {
             tracing::info!("stream ended: {summary}");
             if let Some(l) = st.session.stats.latency.overall() {
                 let net = st.session.control.rtt_ms() as f64 / 2.0;
-                tracing::info!("latency: {:.1} ms on average over {} frames = host {:.1} + network {:.1} + client {:.1}", l.host_ms + net + l.client_ms, l.frames, l.host_ms, net, l.client_ms);
+                tracing::info!("latency: {:.1} ms on average over {} frames = host {:.1} + network {:.1} + client {:.1} (of which decoded, waiting to be drawn {:.1})", l.host_ms + net + l.client_ms, l.frames, l.host_ms, net, l.client_ms, l.wait_ms);
             }
             std::thread::spawn(move || st.session.stop());
-            self.video.reset(60);
+            self.video.reset(60, true);
             if quit {
                 self.rt().spawn(async move {
                     let _ = c.cancel().await;
@@ -1414,6 +1417,7 @@ impl GuiApp {
                 toggle_row(ui, false, "Plein écran au démarrage", "Le stream s'ouvre directement en plein écran.", &mut s.fullscreen);
                 toggle_row(ui, false, "Statistiques pendant le stream", "Affichées en surimpression · Ctrl+Alt+Maj+S pour basculer.", &mut s.show_stats);
                 toggle_row(ui, false, "Capturer les raccourcis système", "Touche Windows, Alt+Tab, Alt+F4… vont à l'hôte quand le stream a le focus.", &mut s.capture_shortcuts);
+                toggle_row(ui, false, "Latence minimale", "Sans frame pacing : chaque image s'affiche dès qu'elle est décodée · peut saccader en Wi-Fi.", &mut s.min_latency);
                 toggle_row(ui, true, "Synchro verticale (V-Sync)", "Pas de déchirement, mais plus de latence · appliqué au prochain démarrage.", &mut s.vsync);
             });
             section(ui, 3, SECTIONS[3], tops, jump, |ui| {
@@ -1689,7 +1693,7 @@ impl GuiApp {
             if let Some(l) = st.session.stats.latency.last() {
                 let net = st.session.control.rtt_ms() as f64 / 2.0;
                 job.append(&format!("\nlatence {:.1} ms", l.host_ms + net + l.client_ms), 0.0, fmt(th::mono_bold(13.0), th::ACCENT));
-                job.append(&format!(" = hôte {:.1} + réseau {:.1} + client {:.1} (réception, décodage, affichage)", l.host_ms, net, l.client_ms), 0.0, fmt(th::mono(13.0), th::TEXT));
+                job.append(&format!(" = hôte {:.1} + réseau {:.1} + client {:.1} (dont attente d'affichage {:.1})", l.host_ms, net, l.client_ms, l.wait_ms), 0.0, fmt(th::mono(13.0), th::TEXT));
             }
             let p = ui.painter();
             let g = p.layout_job(job);
@@ -1706,8 +1710,8 @@ impl GuiApp {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
 
-        for (index, at) in self.video.take_shown() {
-            st.session.stats.latency.shown(index, at);
+        for f in self.video.take_shown() {
+            st.session.stats.latency.shown(f.index, f.decoded, f.at);
         }
 
         // Input forwarding.
