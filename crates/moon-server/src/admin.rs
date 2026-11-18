@@ -242,7 +242,7 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
     let configured = admin.creds.lock().unwrap().is_some();
 
     match (method.clone(), path.as_str()) {
-        (Method::GET, "/api/state") => return js(StatusCode::OK, json!({"setup_required": !configured, "logged_in": session.is_some()})),
+        (Method::GET, "/api/state") => return js(StatusCode::OK, json!({"setup_required": !configured, "logged_in": session.is_some(), "language": admin.host.settings.get().language})),
         (Method::POST, "/api/setup") => {
             if configured {
                 return js(StatusCode::CONFLICT, json!({"error": "déjà configuré"}));
@@ -296,13 +296,13 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
             js(
                 StatusCode::OK,
                 json!({
-                    "hostname": cfg.hostname,
+                    "hostname": host.hostname(),
                     "version": env!("CARGO_PKG_VERSION"),
                     "uptime_s": host.started_at.elapsed().as_secs(),
                     "ports": {"http": cfg.http_port, "https": cfg.https_port, "rtsp": cfg.rtsp_port},
                     "video_source": format!("{:?}", cfg.video_source),
                     "audio_source": format!("{:?}", cfg.audio_source),
-                    "encoder": cfg.encoder, "nvenc_preset": cfg.nvenc_preset,
+                    "encoder": cfg.encoder, "nvenc_preset": host.nvenc_preset(),
                     "codecs": {"h264": true, "hevc": cfg.hevc, "av1": cfg.av1},
                     "session": session.map(|s| json!({"app_id": s.app_id, "client": s.client_ip.to_string(), "width": s.width, "height": s.height, "fps": s.fps})),
                     "live": live,
@@ -376,6 +376,31 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
             };
             match host.apps.set_cover(id, (!b.is_empty()).then_some(&b[..])) {
                 Ok(()) => js(StatusCode::OK, json!({"ok": true})),
+                Err(e) => js(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            }
+        }
+        (Method::GET, "/api/settings") => {
+            let v = host.settings.get();
+            let (dl, dv) = crate::text::detect_layout();
+            let keyboards: Vec<Value> = crate::settings::KEYBOARDS.iter().map(|k| json!({"id": k.0, "label": k.3})).collect();
+            js(
+                StatusCode::OK,
+                json!({
+                    "language": v.language, "keyboard": v.keyboard, "keyboard_detected": if dv.is_empty() { dl } else { format!("{dl} ({dv})") }, "keyboards": keyboards,
+                    "host_name": v.host_name, "host_name_default": host.cfg.hostname,
+                    "nvenc_preset": v.nvenc_preset, "nvenc_preset_default": host.cfg.nvenc_preset, "encoder": host.cfg.encoder,
+                    "auto_quit_min": v.auto_quit_min, "auto_quit_choices": crate::settings::AUTO_QUIT,
+                    "mdns": v.mdns, "mdns_available": host.mdns_available.load(std::sync::atomic::Ordering::Relaxed),
+                }),
+            )
+        }
+        (Method::POST, "/api/settings") => {
+            let Some(b) = body_json(req).await else { return js(StatusCode::BAD_REQUEST, json!({"error": "requête invalide"})) };
+            match host.settings.update(&b) {
+                Ok(_) => {
+                    info!("settings changed from the admin panel: {b}");
+                    js(StatusCode::OK, json!({"ok": true}))
+                }
                 Err(e) => js(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
             }
         }

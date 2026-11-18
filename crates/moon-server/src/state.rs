@@ -157,6 +157,10 @@ pub struct Host {
     pub started_at: std::time::Instant,
     /// Applications offered to clients (editable from the admin panel).
     pub apps: crate::apps::Apps,
+    /// Settings edited from the admin panel.
+    pub settings: crate::settings::Settings,
+    /// mDNS can be used (not disabled with --no-mdns).
+    pub mdns_available: std::sync::atomic::AtomicBool,
 }
 
 impl Host {
@@ -182,6 +186,7 @@ impl Host {
             c.cert_der = moon_proto::crypto::pem_decode_cert(&c.cert_pem)?;
         }
         let apps = crate::apps::Apps::load(&cfg.state_dir, &cfg.apps);
+        let cfg_state_dir = cfg.state_dir.clone();
         let host = Arc::new(Self {
             cfg,
             identity,
@@ -203,6 +208,8 @@ impl Host {
             pending_requests: Mutex::new(Vec::new()),
             started_at: std::time::Instant::now(),
             apps,
+            settings: crate::settings::Settings::load(&cfg_state_dir),
+            mdns_available: std::sync::atomic::AtomicBool::new(true),
         });
         host.save()?;
         Ok(host)
@@ -268,6 +275,18 @@ impl Host {
         *self.session.lock().unwrap() = s;
         *self.stream_peer.lock().unwrap() = None;
         self.session_gen.send_modify(|g| *g += 1);
+    }
+
+    /// Name shown to clients (admin panel setting, else --name / system host name).
+    pub fn hostname(&self) -> String {
+        let n = self.settings.get().host_name;
+        if n.is_empty() { self.cfg.hostname.clone() } else { n }
+    }
+
+    /// NVENC preset for the next stream (admin panel setting, else --nvenc-preset).
+    pub fn nvenc_preset(&self) -> String {
+        let p = self.settings.get().nvenc_preset;
+        if p.is_empty() { self.cfg.nvenc_preset.clone() } else { p }
     }
 
     pub fn current_session(&self) -> Option<LaunchSession> {

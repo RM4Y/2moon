@@ -130,7 +130,7 @@ fn handle(host: &Host, req: &Message) -> Message {
                 encoder: host.cfg.encoder.clone(),
                 max_ref_frames: num("x-nv-video[0].maxNumReferenceFrames", 1),
                 csc_mode: num("x-nv-video[0].encoderCscMode", 0),
-                nvenc_preset: host.cfg.nvenc_preset.clone(),
+                nvenc_preset: host.nvenc_preset(),
                 yuv444: num("x-ss-video[0].chromaSamplingType", 0) == 1,
                 hdr: num("x-nv-video[0].dynamicRangeMode", 0) == 1,
             };

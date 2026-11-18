@@ -11,6 +11,7 @@ mod mic;
 mod pipewire;
 mod portal;
 mod rtsp;
+mod settings;
 mod state;
 mod stream;
 mod text;
@@ -144,13 +145,15 @@ async fn main() -> Result<()> {
         let _ = host.portal.set(cap);
     }
     let no_input = args.no_input;
+    let input_host = host.clone();
     control::spawn(
         host.clone(),
         Box::new(move || -> Box<dyn input::Injector> {
             if no_input {
                 return Box::new(input::LogInjector::default());
             }
-            match input::UinputInjector::new() {
+            let h = input_host.clone();
+            match input::UinputInjector::new(Box::new(move || h.settings.keyboard_layout())) {
                 Ok(u) => Box::new(u),
                 Err(e) => {
                     tracing::warn!("input injection disabled: {e:#}");
@@ -174,18 +177,57 @@ async fn main() -> Result<()> {
             tracing::error!("RTSP server: {e:#}");
         }
     });
-    info!("2moon host '{}' uuid {}", host.cfg.hostname, host.uuid);
-    let _mdns = if args.no_mdns {
-        None
-    } else {
-        match mdns::advertise(&host.cfg.hostname, host.cfg.http_port, args.mdns_local_only) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::warn!("mDNS advertisement failed: {e:#}");
-                None
+    info!("2moon host '{}' uuid {}", host.hostname(), host.uuid);
+    // mDNS: follows the name and visibility set in the admin panel.
+    host.mdns_available.store(!args.no_mdns, std::sync::atomic::Ordering::Relaxed);
+    if !args.no_mdns {
+        let (h, local_only) = (host.clone(), args.mdns_local_only);
+        let mut changed = host.settings.changed.subscribe();
+        tokio::spawn(async move {
+            let mut current: Option<(String, mdns::Advert)> = None;
+            loop {
+                let want = h.settings.get().mdns.then(|| h.hostname());
+                if current.as_ref().map(|c| &c.0) != want.as_ref() {
+                    current = None; // goodbye for the old name first
+                    if let Some(name) = want {
+                        let port = h.cfg.http_port;
+                        match tokio::task::spawn_blocking(move || mdns::advertise(&name, port, local_only).map(|a| (name, a))).await {
+                            Ok(Ok(a)) => current = Some(a),
+                            Ok(Err(e)) => tracing::warn!("mDNS advertisement failed: {e:#}"),
+                            Err(_) => {}
+                        }
+                    } else {
+                        info!("mDNS advertisement disabled in the settings");
+                    }
+                }
+                if changed.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Automatic stop: quit the app when no client has been streaming for the chosen time.
+    let h = host.clone();
+    tokio::spawn(async move {
+        let mut idle_since: Option<std::time::Instant> = None;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let minutes = h.settings.get().auto_quit_min;
+            let streaming = h.live.lock().unwrap().active;
+            if minutes == 0 || h.current_session().is_none() || streaming {
+                idle_since = None;
+                continue;
+            }
+            let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() >= std::time::Duration::from_secs(minutes as u64 * 60) {
+                info!("no client for {minutes} min: quitting the application");
+                h.set_session(None);
+                h.apps.stop();
+                idle_since = None;
             }
         }
-    };
+    });
 
     // PINs typed in the console are delivered to waiting pairing requests.
     let h = host.clone();

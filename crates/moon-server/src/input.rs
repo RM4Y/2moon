@@ -48,6 +48,22 @@ pub struct UinputInjector {
     held_keys: Vec<u16>,
     held_buttons: Vec<u16>,
     typer: Option<crate::text::TextTyper>,
+    /// (layout, variant) the typer was built for.
+    typer_layout: (String, String),
+    /// Layout wanted now (admin panel setting, or detected on the host).
+    layout_fn: LayoutFn,
+}
+
+pub type LayoutFn = Box<dyn Fn() -> (String, String) + Send>;
+
+fn make_typer(layout: &(String, String)) -> Option<crate::text::TextTyper> {
+    match crate::text::TextTyper::new(&layout.0, &layout.1) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            warn!("text input disabled: {e:#}");
+            None
+        }
+    }
 }
 
 fn ev(t: u16, c: u16, v: i32) -> InputEvent {
@@ -71,7 +87,7 @@ fn mouse_buttons() -> AttributeSet<KeyCode> {
 }
 
 impl UinputInjector {
-    pub fn new() -> Result<Self> {
+    pub fn new(layout_fn: LayoutFn) -> Result<Self> {
         let mut keys = AttributeSet::<KeyCode>::new();
         for code in 1..=248u16 {
             keys.insert(KeyCode::new(code));
@@ -97,15 +113,9 @@ impl UinputInjector {
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs))?
             .build()?;
         info!("uinput devices created (keyboard, mouse, absolute pointer)");
-        let (layout, variant) = crate::text::detect_layout();
-        let typer = match crate::text::TextTyper::new(&layout, &variant) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                warn!("text input disabled: {e:#}");
-                None
-            }
-        };
-        Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), held_keys: vec![], held_buttons: vec![], typer })
+        let typer_layout = layout_fn();
+        let typer = make_typer(&typer_layout);
+        Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), held_keys: vec![], held_buttons: vec![], typer, typer_layout, layout_fn })
     }
 
     fn gamepad(index: u16) -> Result<VirtualDevice> {
@@ -261,6 +271,13 @@ impl Injector for UinputInjector {
                 emit(&mut self.mouse, &evs);
             }
             Event::Text(t) => {
+                // Follow the keyboard chosen in the admin panel without restarting.
+                let want = (self.layout_fn)();
+                if want != self.typer_layout {
+                    info!("text input now uses keyboard layout {}{}", want.0, if want.1.is_empty() { String::new() } else { format!(" ({})", want.1) });
+                    self.typer = make_typer(&want);
+                    self.typer_layout = want;
+                }
                 let Some(typer) = &self.typer else { return };
                 for c in t.chars() {
                     let Some(st) = typer.stroke(c) else {

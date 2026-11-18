@@ -1601,13 +1601,14 @@ impl GuiApp {
 
 fn short_stats(s: &Stats) -> String {
     format!(
-        "{} · décodage {:.1} ms · décodées {} · jetées {} · perdues {} · FEC {} · IDR {} · RFI {}",
+        "{} · décodage {:.1} ms · décodées {} · rattrapées {} · jetées {} · perdues {} · FEC {} · IDR {} · RFI {}",
         s.decoder.lock().unwrap(),
         {
             let n = s.frames_decoded.load(Ordering::Relaxed);
             if n > 0 { s.decode_us_total.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0 } else { 0.0 }
         },
         s.frames_decoded.load(Ordering::Relaxed),
+        s.frames_skipped.load(Ordering::Relaxed),
         s.frames_dropped.load(Ordering::Relaxed),
         s.frames_lost.load(Ordering::Relaxed),
         s.shards_recovered.load(Ordering::Relaxed),

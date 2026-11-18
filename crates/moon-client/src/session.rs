@@ -42,6 +42,8 @@ pub struct Stats {
     pub decode_us_total: AtomicU64,
     /// Frames thrown away because the decoder fell behind.
     pub frames_dropped: AtomicU64,
+    /// Frames decoded but not shown, to catch up after a burst.
+    pub frames_skipped: AtomicU64,
     /// Decoder in use (set once the session starts).
     pub decoder: Mutex<String>,
 }
@@ -50,10 +52,11 @@ impl Stats {
     pub fn summary(&self) -> String {
         let dec = self.frames_decoded.load(Ordering::Relaxed);
         format!(
-            "decoder {} | frames: {} received, {} decoded, {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests, {} RFI requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | mic: {} packets sent | avg decode {:.2} ms",
+            "decoder {} | frames: {} received, {} decoded, {} skipped (catch-up), {} dropped (late), {} lost, {} FEC shards rebuilt, {} IDR requests, {} RFI requests | video {:.1} MB | audio: {} packets, {} recovered, {} lost | mic: {} packets sent | avg decode {:.2} ms",
             self.decoder.lock().unwrap(),
             self.frames_received.load(Ordering::Relaxed),
             dec,
+            self.frames_skipped.load(Ordering::Relaxed),
             self.frames_dropped.load(Ordering::Relaxed),
             self.frames_lost.load(Ordering::Relaxed),
             self.shards_recovered.load(Ordering::Relaxed),
@@ -186,7 +189,7 @@ impl Session {
         let mut threads = Vec::new();
 
         // Video: network thread -> decode thread -> sink
-        let (ftx, frx) = mpsc::sync_channel::<moon_proto::video::Frame>(8);
+        let (ftx, frx) = mpsc::sync_channel::<moon_proto::video::Frame>(64);
         {
             let addr = resolve(neg.video_port)?;
             let ping = neg.ping_payload_video.clone();
@@ -337,6 +340,12 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
     if test_loss > 0.0 {
         warn!("MOON_TEST_VIDEO_LOSS: dropping {test_loss}% of video packets");
     }
+    // Test hook: stop reading for this many ms every second (Wi-Fi stall, then a burst of packets).
+    let test_stall_ms: u64 = std::env::var("MOON_TEST_VIDEO_STALL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if test_stall_ms > 0 {
+        warn!("MOON_TEST_VIDEO_STALL_MS: pausing video reception {test_stall_ms} ms every second");
+    }
+    let mut last_stall = Instant::now();
     let request_idr = |last_idr: &mut Instant, stats: &Stats| {
         if last_idr.elapsed() > Duration::from_millis(250) {
             ctl.request_idr();
@@ -366,6 +375,10 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
             Err(e) => return Err(e.into()),
         };
         got_any = true;
+        if test_stall_ms > 0 && last_stall.elapsed() >= Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(test_stall_ms));
+            last_stall = Instant::now();
+        }
         if test_loss > 0.0 && rand::random::<f64>() * 100.0 < test_loss {
             continue;
         }
@@ -423,7 +436,12 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
 }
 
 /// Frames allowed to wait for the decoder before we skip ahead (latency bound).
-const MAX_DECODE_BACKLOG: usize = 2;
+/// Frames queued for the decoder before it gives up and skips to a keyframe (≈0.4 s at 60 fps).
+/// Smaller bursts (Wi-Fi often delivers several frames at once) are decoded in a row instead,
+/// showing only the newest: much faster than throwing them away and waiting for an IDR.
+const MAX_DECODE_BACKLOG: usize = 24;
+/// While catching up, still show a picture at least this often.
+const CATCH_UP_SHOW_EVERY: Duration = Duration::from_millis(50);
 
 #[allow(clippy::too_many_arguments)]
 fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: FrameSink, stats: Arc<Stats>, ctl: ControlSender, stop: Arc<AtomicBool>, codec: Codec, hw: bool, zero_copy: Option<Arc<AtomicBool>>, yuv444: bool) -> Result<()> {
@@ -433,6 +451,7 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: Fram
     let mut need_idr = false;
     let mut last_idr_req = Instant::now() - Duration::from_secs(1);
     let mut backlog = std::collections::VecDeque::new();
+    let mut last_shown = Instant::now();
     loop {
         // Gather everything that is already waiting.
         if backlog.is_empty() {
@@ -477,7 +496,18 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: Fram
             Ok(Some(pic)) => {
                 stats.decode_us_total.fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                 stats.frames_decoded.fetch_add(1, Ordering::Relaxed);
-                sink(pic, f.index);
+                // Catching up after a burst: newer frames are already waiting, so this
+                // picture would be replaced right away. Skip showing it (not decoding it:
+                // the next frames reference it), unless nothing was shown for a while.
+                while let Ok(f) = frames.try_recv() {
+                    backlog.push_back(f);
+                }
+                if backlog.is_empty() || last_shown.elapsed() >= CATCH_UP_SHOW_EVERY {
+                    sink(pic, f.index);
+                    last_shown = Instant::now();
+                } else {
+                    stats.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Ok(None) => {}
             Err(e) => {

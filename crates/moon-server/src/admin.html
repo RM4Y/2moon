@@ -144,15 +144,25 @@ canvas { width: 100%; height: 110px; display: block; }
 
 /* logs */
 .switch { display: inline-flex; align-items: center; gap: 10px; font: 400 13px/1 Inter, sans-serif; color: var(--muted); cursor: pointer; }
-.switch input { appearance: none; -webkit-appearance: none; margin: 0; width: 52px; height: 30px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface2); position: relative; cursor: pointer; transition: background .15s, border-color .15s; }
-.switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
-.switch input:checked { background: var(--accent); border-color: var(--accent); }
-.switch input:checked::after { transform: translateX(22px); background: var(--bg); }
+/* The thumb is part of the input's own background, so it always updates with the track. */
+.switch input { appearance: none; -webkit-appearance: none; flex: none; margin: 0; width: 52px; height: 30px; border-radius: 999px; border: 1px solid var(--border-strong); background: radial-gradient(circle at 14px 50%, var(--muted) 0 10.5px, transparent 11px) var(--surface2); cursor: pointer; transition: background-color .15s, border-color .15s; }
+.switch input:checked { background: radial-gradient(circle at 36px 50%, var(--bg) 0 10.5px, transparent 11px) var(--accent); border-color: var(--accent); }
+.switch input:disabled { opacity: .4; cursor: default; }
 pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mono); color: var(--text2); background: var(--bg); padding: 18px 28px; white-space: pre-wrap; word-break: break-word; }
 
 /* password */
 .pw { display: flex; flex-wrap: wrap; gap: 10px; padding: 22px 28px; }
 .pw input { flex: 1 1 200px; width: auto; }
+
+/* settings */
+.seg { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg); }
+.seg button { min-height: 40px; padding: 0 18px; border: 0; border-radius: 9px; }
+.seg button[aria-checked="true"] { background: var(--text); color: var(--bg); font-weight: 600; }
+select { font: 400 15px/1.3 Inter, sans-serif; min-height: 48px; min-width: min(340px, 100%); max-width: 100%; padding: 0 44px 0 16px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23A1A1AA' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 16px center; color: var(--text); appearance: none; -webkit-appearance: none; cursor: pointer; }
+select:focus { border-color: var(--accent); outline: none; }
+select option { background: var(--surface); color: var(--text); }
+.row.stack { flex-direction: column; align-items: stretch; }
+.row .pw { padding: 0; }
 
 /* auth */
 #auth { position: relative; z-index: 1; min-height: calc(100vh - 76px); display: flex; align-items: flex-end; justify-content: center; padding: 40px 16px; }
@@ -231,6 +241,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="ph0" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
   <symbol id="ph1" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A3 6 0 0 0 7 1Z" fill="currentColor"/></symbol>
+  <symbol id="ph05" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A4.6 6 0 0 0 7 1Z" fill="currentColor"/></symbol>
   <symbol id="ph2" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13Z" fill="currentColor"/></symbol>
   <symbol id="ph25" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A3 6 0 0 1 7 1Z" fill="currentColor"/></symbol>
   <symbol id="i-gamepad" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M7 7h10a5 5 0 0 1 4.8 6.4l-1 3.3a2.4 2.4 0 0 1-4 1l-2.3-2.2h-5l-2.3 2.2a2.4 2.4 0 0 1-4-1l-1-3.3A5 5 0 0 1 7 7Z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11" r=".6" fill="currentColor"/><circle cx="17.2" cy="13" r=".6" fill="currentColor"/></g></symbol>
@@ -277,11 +288,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 <div class="wrap hidden" id="app">
   <nav class="side" aria-label="Sections">
     <a href="#session" data-sec="session"><svg width="16" height="16"><use href="#ph0"/></svg>Session</a>
-    <a href="#pairing" data-sec="pairing"><svg width="16" height="16"><use href="#ph1"/></svg>Appairage</a>
-    <a href="#devices" data-sec="devices"><svg width="16" height="16"><use href="#ph2"/></svg>Appareils</a>
-    <a href="#apps" data-sec="apps"><svg width="16" height="16"><use href="#ph25"/></svg>Applications</a>
-    <a href="#host" data-sec="host"><svg width="16" height="16"><use href="#ph3"/></svg>Hôte et journal</a>
-    <p>Une phase de lune par section, de la nouvelle lune à la pleine lune.</p>
+    <a href="#pairing" data-sec="pairing"><svg width="16" height="16"><use href="#ph05"/></svg>Appairage</a>
+    <a href="#devices" data-sec="devices"><svg width="16" height="16"><use href="#ph1"/></svg>Appareils</a>
+    <a href="#apps" data-sec="apps"><svg width="16" height="16"><use href="#ph2"/></svg>Applications</a>
+    <a href="#host" data-sec="host"><svg width="16" height="16"><use href="#ph25"/></svg>Hôte et journal</a>
+    <a href="#settings" data-sec="settings"><svg width="16" height="16"><use href="#ph3"/></svg>Paramètres</a>
   </nav>
 
   <main>
@@ -316,7 +327,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
     </section>
 
     <section class="panel glass" id="pairing" aria-labelledby="t-pair">
-      <h2 id="t-pair"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph1"/></svg>Appairage</h2>
+      <h2 id="t-pair"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph05"/></svg>Appairage</h2>
       <div class="pair-body" id="pair-card">
         <span class="eyebrow" id="pair-eyebrow">Appairage</span>
         <h3>Saisissez le code affiché sur le client</h3>
@@ -335,18 +346,18 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
     </section>
 
     <section class="panel" id="devices" aria-labelledby="t-dev">
-      <h2 id="t-dev"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph2"/></svg>Appareils appairés</h2>
+      <h2 id="t-dev"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph1"/></svg>Appareils appairés</h2>
       <ul class="list" id="clients"></ul>
       <div class="row hidden" id="clients-none"><span class="muted">Aucun appareil appairé.</span></div>
     </section>
 
     <section class="panel" id="apps" aria-labelledby="t-apps">
-      <h2 id="t-apps"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph25"/></svg><span class="grow">Applications</span><button class="ghost" id="app-add"><svg width="16" height="16"><use href="#i-plus"/></svg>Ajouter</button></h2>
+      <h2 id="t-apps"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph2"/></svg><span class="grow">Applications</span><button class="ghost" id="app-add"><svg width="16" height="16"><use href="#i-plus"/></svg>Ajouter</button></h2>
       <ul class="apps-grid" id="apps-grid"></ul>
     </section>
 
     <section class="panel" id="host" aria-labelledby="t-host">
-      <h2 id="t-host"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph3"/></svg>Hôte</h2>
+      <h2 id="t-host"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph25"/></svg>Hôte</h2>
       <dl class="kv" id="host-info"></dl>
     </section>
 
@@ -355,15 +366,51 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       <pre id="logs"></pre>
     </section>
 
-    <section class="panel" aria-labelledby="t-pw">
-      <h2 id="t-pw">Mot de passe</h2>
-      <form class="pw" id="pw-form">
-        <label class="sr" for="pw-cur">Mot de passe actuel</label>
-        <input type="password" id="pw-cur" placeholder="Actuel" autocomplete="current-password">
-        <label class="sr" for="pw-new">Nouveau mot de passe</label>
-        <input type="password" id="pw-new" placeholder="Nouveau (8 caractères ou plus)" autocomplete="new-password">
-        <button class="light" type="submit">Changer</button>
-      </form>
+    <section class="panel" id="settings" aria-labelledby="t-settings">
+      <h2 id="t-settings"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph3"/></svg>Paramètres</h2>
+      <div class="row">
+        <span><span class="label">Langue</span><span class="desc">Langue de ce panneau d'administration.</span></span>
+        <div class="seg" role="radiogroup" aria-label="Langue" id="set-lang">
+          <button type="button" role="radio" data-v="fr" data-noi18n>Français</button>
+          <button type="button" role="radio" data-v="en" data-noi18n>English</button>
+        </div>
+      </div>
+      <div class="row">
+        <span><span class="label">Type de clavier</span><span class="desc">Disposition utilisée pour taper le texte envoyé par les clients (saisie de texte, coller, clavier du téléphone). Les touches, elles, suivent toujours la disposition active de l'hôte.</span></span>
+        <label class="sr" for="set-kb">Type de clavier</label>
+        <select id="set-kb"></select>
+      </div>
+      <div class="row">
+        <span><span class="label">Nom de l'hôte</span><span class="desc">Nom affiché dans Moonlight et 2moon. Vide : le nom du système.</span></span>
+        <form id="name-form" class="actions" style="flex:0 1 340px">
+          <label class="sr" for="set-name">Nom de l'hôte</label>
+          <input id="set-name" maxlength="63" autocomplete="off" spellcheck="false">
+        </form>
+      </div>
+      <div class="row">
+        <span><span class="label">Qualité d'encodage</span><span class="desc">Preset de l'encodeur NVENC : plus la qualité est haute, plus le GPU travaille. Appliqué au prochain lancement de stream.</span></span>
+        <label class="sr" for="set-preset">Qualité d'encodage</label>
+        <select id="set-preset"></select>
+      </div>
+      <div class="row">
+        <span><span class="label">Arrêt automatique</span><span class="desc">Quitte l'application lancée (et arrête sa commande) quand aucun client ne streame depuis ce temps.</span></span>
+        <label class="sr" for="set-autoquit">Arrêt automatique</label>
+        <select id="set-autoquit"></select>
+      </div>
+      <div class="row">
+        <span><span class="label">Visibilité sur le réseau</span><span class="desc" id="mdns-desc">Désactivée, l'hôte n'apparaît plus tout seul dans Moonlight et 2moon : il faut l'ajouter avec son adresse IP. Les appareils déjà ajoutés continuent de fonctionner.</span></span>
+        <label class="switch"><input type="checkbox" id="set-mdns"><span>Annoncer l'hôte sur le réseau local</span></label>
+      </div>
+      <div class="row stack">
+        <span><span class="label">Mot de passe</span><span class="desc">Mot de passe de ce panneau d'administration.</span></span>
+        <form class="pw" id="pw-form">
+          <label class="sr" for="pw-cur">Mot de passe actuel</label>
+          <input type="password" id="pw-cur" placeholder="Actuel" autocomplete="current-password">
+          <label class="sr" for="pw-new">Nouveau mot de passe</label>
+          <input type="password" id="pw-new" placeholder="Nouveau (8 caractères ou plus)" autocomplete="new-password">
+          <button class="light" type="submit">Changer</button>
+        </form>
+      </div>
     </section>
   </main>
 </div>
@@ -402,6 +449,91 @@ const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const icon = (id, size) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("width", size); s.setAttribute("height", size); const u = document.createElementNS("http://www.w3.org/2000/svg", "use"); u.setAttribute("href", "#" + id); s.append(u); return s; };
 
+// ---- language: the page is written in French; English comes from this table ----
+let LANG = "fr";
+const EN = {
+  "Hôte": "Host", "Déconnexion": "Log out", "Administration de l'hôte": "Host administration", "Connexion": "Log in",
+  "Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (": "First use: create the administrator account. The setup token is printed in the server log (",
+  "Jeton de configuration": "Setup token", "Identifiant": "Username", "Mot de passe": "Password", "Se connecter": "Log in",
+  "Créez le compte administrateur": "Create the administrator account", "Configuration initiale": "Initial setup", "Créer le compte": "Create account",
+  "Sections": "Sections", "Session": "Session", "Appairage": "Pairing", "Appareils": "Devices", "Applications": "Applications", "Hôte et journal": "Host and log", "Paramètres": "Settings",
+  "En attente d'un client": "Waiting for a client", "Aucun client ne streame en ce moment.": "No client is streaming right now.",
+  "images/s": "frames/s", "Mbit/s envoyés": "Mbit/s sent", "ms d'encodage": "ms encoding", "images clés": "keyframes", "Débit des 2 dernières minutes": "Bitrate over the last 2 minutes",
+  "Contrôle": "Control", "Arrête le stream du client, ou demande une image clé si l'image est abîmée.": "Stop the client's stream, or ask for a keyframe if the picture is corrupted.",
+  "Forcer une image clé": "Force a keyframe", "Arrêter la session": "Stop the session",
+  "Saisissez le code affiché sur le client": "Enter the code shown on the client",
+  "Lancez l'appairage depuis 2moon ou Moonlight : le client affiche un code à 4 chiffres, entrez-le ici.": "Start pairing from 2moon or Moonlight: the client shows a 4-digit code, enter it here.",
+  "Code PIN": "PIN code", "Chiffre 1": "Digit 1", "Chiffre 2": "Digit 2", "Chiffre 3": "Digit 3", "Chiffre 4": "Digit 4", "Valider le code": "Submit code",
+  "Appareils appairés": "Paired devices", "Aucun appareil appairé.": "No paired device.", "Ajouter": "Add", "Journal": "Log", "suivre": "follow",
+  "Langue": "Language", "Langue de ce panneau d'administration.": "Language of this admin panel.", "Type de clavier": "Keyboard type",
+  "Disposition utilisée pour taper le texte envoyé par les clients (saisie de texte, coller, clavier du téléphone). Les touches, elles, suivent toujours la disposition active de l'hôte.": "Layout used to type the text sent by clients (text input, paste, phone keyboard). Keys themselves always follow the host's active layout.",
+  "Mot de passe de ce panneau d'administration.": "Password of this admin panel.", "Mot de passe actuel": "Current password", "Nouveau mot de passe": "New password",
+  "Actuel": "Current", "Nouveau (8 caractères ou plus)": "New (8 characters or more)", "Changer": "Change",
+  "Nouvelle application": "New application", "Modifier l'application": "Edit application", "Vignette · 2:3": "Cover · 2:3",
+  "Glissez une image ici ou choisissez un fichier (PNG, JPEG, WebP).": "Drop an image here or choose a file (PNG, JPEG, WebP).", "zoom": "zoom",
+  "Choisir une image": "Choose an image", "Retirer": "Remove", "Nom": "Name", "Commande au lancement": "Launch command",
+  "Exécutée par": "Run by", "quand un client lance l'application, arrêtée quand il la quitte. Vide : le bureau seul.": "when a client launches the app, stopped when it quits. Empty: just the desktop.",
+  "Annoncer le HDR pour cette application": "Advertise HDR for this application", "Supprimer": "Delete", "Annuler": "Cancel", "Enregistrer": "Save",
+  "En streaming": "Streaming", "Session ouverte": "Session open", "En attente": "Waiting", "Session en cours": "Session in progress",
+  "client {c}": "client {c}", "2moon {v} · en service depuis {u}": "2moon {v} · up for {u}",
+  "{w}×{h} @ {fps} ips · {codec} via {enc} · débit cible {br} Mbit/s · audio {ch} canaux · client {c}": "{w}×{h} @ {fps} fps · {codec} via {enc} · target bitrate {br} Mbit/s · audio {ch} channels · client {c}",
+  "{w}×{h} · {fps} ips · {codec} · client {c}": "{w}×{h} · {fps} fps · {codec} · client {c}",
+  "Hôte · {h}": "Host · {h}", "Appairage · {n}": "Pairing · {n}", "{d} j ": "{d} d ", "{h} h {m} min": "{h} h {m} min",
+  "Version": "Version", "En service depuis": "Up for", "Capture": "Capture", "Encodeur": "Encoder", "Codecs": "Codecs", "Ports": "Ports", "Entrées reçues": "Inputs received",
+  "{v} · audio {a}": "{v} · audio {a}", "{e} (preset {p})": "{e} (preset {p})", "cible {t} Mbit/s": "target {t} Mbit/s",
+  "Révoquer": "Revoke", "Révoquer « {n} » ? Il devra se réappairer.": "Revoke “{n}”? It will have to pair again.", "Appareil révoqué": "Device revoked",
+  "Modifier {n}": "Edit {n}", "En cours": "Running", "Modifier": "Edit", "bureau": "desktop", "Avancer": "Move earlier", "Reculer": "Move later",
+  "Avancer {n}": "Move {n} earlier", "Reculer {n}": "Move {n} later", "Ajouter une application": "Add an application",
+  "Choisissez un fichier image": "Choose an image file", "Image illisible": "Unreadable image", "Supprimer « {n} » ?": "Delete “{n}”?",
+  "Application supprimée": "Application deleted", "Application enregistrée": "Application saved", "Application ajoutée": "Application added", "vignette : {m}": "cover: {m}",
+  "Le code fait 4 chiffres": "The code has 4 digits", "Code transmis": "Code sent", "Aucune demande d'appairage en attente": "No pairing request waiting",
+  "Arrêter la session en cours ?": "Stop the current session?", "Session arrêtée": "Session stopped", "Image clé demandée": "Keyframe requested", "Mot de passe changé": "Password changed",
+  "Automatique (détecté : {d})": "Automatic (detected: {d})", "Paramètre enregistré": "Setting saved",
+  "Nom de l'hôte": "Host name", "Nom affiché dans Moonlight et 2moon. Vide : le nom du système.": "Name shown in Moonlight and 2moon. Empty: the system name.",
+  "Qualité d'encodage": "Encoding quality", "Preset de l'encodeur NVENC : plus la qualité est haute, plus le GPU travaille. Appliqué au prochain lancement de stream.": "NVENC encoder preset: the higher the quality, the harder the GPU works. Applied from the next stream.",
+  "Par défaut du service ({p})": "Service default ({p})", "{p} · la plus rapide": "{p} · fastest", "{p} · équilibrée": "{p} · balanced", "{p} · la meilleure": "{p} · best",
+  "Arrêt automatique": "Automatic stop", "Quitte l'application lancée (et arrête sa commande) quand aucun client ne streame depuis ce temps.": "Quits the running application (and stops its command) when no client has been streaming for this long.",
+  "Jamais": "Never", "Après {n} min": "After {n} min", "Après {n} h": "After {n} h",
+  "Visibilité sur le réseau": "Network visibility", "Désactivée, l'hôte n'apparaît plus tout seul dans Moonlight et 2moon : il faut l'ajouter avec son adresse IP. Les appareils déjà ajoutés continuent de fonctionner.": "When off, the host no longer shows up by itself in Moonlight and 2moon: add it with its IP address. Devices already added keep working.",
+  "Annoncer l'hôte sur le réseau local": "Advertise the host on the local network", "Désactivée au démarrage du service (--no-mdns).": "Disabled when the service was started (--no-mdns).",
+  "nom d'hôte invalide (63 caractères maximum, sans point)": "invalid host name (63 characters maximum, no dot)", "qualité d'encodage inconnue": "unknown encoding quality", "délai d'arrêt automatique invalide": "invalid automatic stop delay",
+  // errors from the server
+  "non connecté": "not logged in", "requête invalide": "invalid request", "déjà configuré": "already configured", "identifiants incorrects": "wrong username or password",
+  "jeton de configuration incorrect (voir le journal du serveur)": "wrong setup token (see the server log)", "mot de passe : 8 caractères minimum": "password: 8 characters minimum",
+  "trop d'échecs, réessayez dans 5 minutes": "too many failures, try again in 5 minutes", "mot de passe actuel incorrect": "wrong current password", "8 caractères minimum": "8 characters minimum",
+  "appareil inconnu": "unknown device", "le PIN fait 4 chiffres": "the PIN has 4 digits", "le nom est obligatoire": "the name is required",
+  "nom trop long (80 caractères maximum)": "name too long (80 characters maximum)", "application inconnue": "unknown application",
+  "il faut garder au moins une application": "at least one application must remain", "la vignette doit être une image PNG": "the cover must be a PNG image",
+  "image trop lourde (8 Mo maximum)": "image too large (8 MB maximum)", "id manquant": "missing id", "langue inconnue": "unknown language", "disposition de clavier inconnue": "unknown keyboard layout",
+};
+/** Translate a French string (with {placeholders}) to the panel language. */
+function t(s, v) {
+  let r = (LANG === "en" && EN[s]) || s;
+  if (v) for (const k in v) r = r.split("{" + k + "}").join(v[k]);
+  return r;
+}
+// Static text: remember the French original of each text node / attribute, then swap.
+const frText = new WeakMap();
+function applyLang() {
+  document.documentElement.lang = LANG;
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.parentElement.closest("script,style,pre,code,[data-noi18n]") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  for (let n; (n = walk.nextNode());) {
+    const raw = frText.has(n) ? frText.get(n) : n.nodeValue, key = raw.trim();
+    if (!key || !(key in EN)) continue;
+    frText.set(n, raw);
+    n.nodeValue = raw.replace(key, t(key));
+  }
+  for (const e of document.querySelectorAll("[placeholder],[aria-label],[title]")) {
+    for (const a of ["placeholder", "aria-label", "title"]) {
+      if (!e.hasAttribute(a)) continue;
+      const k = "data-fr-" + a;
+      if (!e.hasAttribute(k)) { if (!(e.getAttribute(a) in EN)) continue; e.setAttribute(k, e.getAttribute(a)); }
+      e.setAttribute(a, t(e.getAttribute(k)));
+    }
+  }
+  document.querySelectorAll("#set-lang button").forEach(b => b.setAttribute("aria-checked", String(b.dataset.v === LANG)));
+}
+
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-2moon": "1" }, body: JSON.stringify(body) };
   const r = await fetch(path, { credentials: "same-origin", ...opt });
@@ -412,7 +544,7 @@ async function api(path, body) {
   return data;
 }
 
-function toast(msg) { $("toast-text").textContent = msg; const t = $("toast"); t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2500); }
+function toast(msg) { $("toast-text").textContent = t(msg); const t = $("toast"); t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2500); }
 
 let setupMode = false, timers = [];
 function showAuth(setup) {
@@ -420,9 +552,9 @@ function showAuth(setup) {
   if (setup !== undefined) setupMode = setup;
   document.body.classList.add("auth-mode"); $("state-pill").classList.add("hidden"); $("hostname").classList.add("hidden");
   $("app").classList.add("hidden"); $("logout").classList.add("hidden"); $("auth").classList.remove("hidden");
-  $("auth-title").textContent = setupMode ? "Créez le compte administrateur" : "Connexion";
-  $("auth-eyebrow").textContent = setupMode ? "Configuration initiale" : "Administration de l'hôte";
-  $("auth-btn").textContent = setupMode ? "Créer le compte" : "Se connecter";
+  $("auth-title").textContent = t(setupMode ? "Créez le compte administrateur" : "Connexion");
+  $("auth-eyebrow").textContent = t(setupMode ? "Configuration initiale" : "Administration de l'hôte");
+  $("auth-btn").textContent = t(setupMode ? "Créer le compte" : "Se connecter");
   $("setup-help").classList.toggle("hidden", !setupMode);
   $("f-token").classList.toggle("hidden", !setupMode);
   $("f-pass").autocomplete = setupMode ? "new-password" : "current-password";
@@ -431,7 +563,7 @@ function showAuth(setup) {
 function showApp() {
   document.body.classList.remove("auth-mode"); $("state-pill").classList.remove("hidden");
   $("auth").classList.add("hidden"); $("app").classList.remove("hidden"); $("logout").classList.remove("hidden");
-  refresh(); refreshClients(); refreshLogs(); refreshApps();
+  refresh(); refreshClients(); refreshLogs(); refreshApps(); loadSettings();
   timers = [setInterval(refresh, 1000), setInterval(refreshLogs, 2000), setInterval(refreshClients, 10000), setInterval(refreshApps, 4000)];
   requestAnimationFrame(markNav);
 }
@@ -443,7 +575,7 @@ $("auth-form").addEventListener("submit", async (e) => {
     if (setupMode) await api("/api/setup", { token: $("f-token").value, user: $("f-user").value, password: $("f-pass").value });
     else await api("/api/login", { user: $("f-user").value, password: $("f-pass").value });
     $("f-pass").value = ""; showApp();
-  } catch (err) { $("auth-err").textContent = err.message; }
+  } catch (err) { $("auth-err").textContent = t(err.message); }
   $("auth-btn").disabled = false;
 });
 
@@ -462,18 +594,18 @@ window.addEventListener("scroll", markNav, { passive: true }); markNav();
 
 // ---- live status ----
 const history = [];
-function fmtUptime(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + " j " : "") + h + " h " + m + " min"; }
+function fmtUptime(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? t("{d} j ", { d }) : "") + t("{h} h {m} min", { h, m }); }
 
 function setInfo(rows) {
   const dl = $("host-info"); dl.replaceChildren();
-  for (const [k, v] of rows) { dl.append(el("dt", null, k)); const dd = el("dd"); if (v instanceof Node) dd.append(v); else dd.textContent = v; dl.append(dd); }
+  for (const [k, v] of rows) { dl.append(el("dt", null, t(k))); const dd = el("dd"); if (v instanceof Node) dd.append(v); else dd.textContent = v; dl.append(dd); }
 }
 
 function setState(kind, text) {
   const p = $("state-pill");
   p.classList.toggle("live", kind === "live"); p.classList.toggle("open", kind === "open");
   $("state-icon").firstElementChild.setAttribute("href", kind === "live" ? "#ph3" : kind === "open" ? "#ph2" : "#ph0");
-  $("state-text").textContent = text;
+  $("state-text").textContent = t(text);
 }
 
 async function refresh() {
@@ -482,10 +614,10 @@ async function refresh() {
   $("hostname").textContent = st.hostname; $("hostname").classList.remove("hidden");
   const live = st.live && st.live.active ? st.live : null;
   setState(live ? "live" : st.session ? "open" : "idle", live ? "En streaming" : st.session ? "Session ouverte" : "En attente");
-  $("hero-eyebrow").textContent = "Hôte · " + st.hostname;
-  $("hero-title").textContent = live ? "Session en cours" : st.session ? "Session ouverte" : "En attente d'un client";
+  $("hero-eyebrow").textContent = t("Hôte · {h}", { h: st.hostname });
+  $("hero-title").textContent = t(live ? "Session en cours" : st.session ? "Session ouverte" : "En attente d'un client");
   const client = (live && live.peer) || (st.session && st.session.client) || "";
-  $("hero-sub").textContent = live ? `${live.width}×${live.height} · ${live.target_fps} ips · ${live.codec} · client ${client}` : st.session ? `client ${client}` : `2moon ${st.version} · en service depuis ${fmtUptime(st.uptime_s)}`;
+  $("hero-sub").textContent = live ? t("{w}×{h} · {fps} ips · {codec} · client {c}", { w: live.width, h: live.height, fps: live.target_fps, codec: live.codec, c: client }) : st.session ? t("client {c}", { c: client }) : t("2moon {v} · en service depuis {u}", { v: st.version, u: fmtUptime(st.uptime_s) });
   $("session-idle").classList.toggle("hidden", !!live);
   $("session-live").classList.toggle("hidden", !live);
   $("session").classList.toggle("hot", !!live);
@@ -495,7 +627,7 @@ async function refresh() {
     $("s-mbps").textContent = live.mbps.toFixed(1);
     $("s-enc").textContent = live.encode_ms.toFixed(2);
     $("s-idr").textContent = live.idr_frames;
-    $("s-desc").textContent = `${live.width}×${live.height} @ ${live.target_fps} ips · ${live.codec} via ${live.encoder} · débit cible ${(live.bitrate_kbps / 1000).toFixed(0)} Mbit/s · audio ${live.audio_channels} canaux · client ${client || "?"}`;
+    $("s-desc").textContent = t("{w}×{h} @ {fps} ips · {codec} via {enc} · débit cible {br} Mbit/s · audio {ch} canaux · client {c}", { w: live.width, h: live.height, fps: live.target_fps, codec: live.codec, enc: live.encoder, br: (live.bitrate_kbps / 1000).toFixed(0), ch: live.audio_channels, c: client || "?" });
     history.push(live.mbps); if (history.length > 120) history.shift();
     drawChart(live.bitrate_kbps / 1000);
   } else history.length = 0;
@@ -510,14 +642,14 @@ async function refresh() {
   }
   const waiting = st.pending.length > 0;
   $("pairing").classList.toggle("hot", waiting);
-  $("pair-eyebrow").textContent = waiting ? "Appairage · " + st.pending[0].name : "Appairage";
+  $("pair-eyebrow").textContent = waiting ? t("Appairage · {n}", { n: st.pending[0].name }) : t("Appairage");
 
   const codecs = el("span");
   for (const [k, on] of Object.entries(st.codecs)) codecs.append(el("span", "badge" + (on ? "" : " off"), k.toUpperCase()));
   setInfo([
     ["Version", st.version], ["En service depuis", fmtUptime(st.uptime_s)],
-    ["Capture", `${st.video_source} · audio ${st.audio_source}`],
-    ["Encodeur", `${st.encoder} (preset ${st.nvenc_preset})`], ["Codecs", codecs],
+    ["Capture", t("{v} · audio {a}", { v: st.video_source, a: st.audio_source })],
+    ["Encodeur", t("{e} (preset {p})", { e: st.encoder, p: st.nvenc_preset })], ["Codecs", codecs],
     ["Ports", `HTTP ${st.ports.http} · HTTPS ${st.ports.https} · RTSP ${st.ports.rtsp}`],
     ["Entrées reçues", String(st.input_events)],
   ]);
@@ -533,7 +665,7 @@ function drawChart(target) {
   g.strokeStyle = css.getPropertyValue("--border-strong").trim(); g.setLineDash([4, 4]);
   const ty = h - (target / max) * (h - 6); g.beginPath(); g.moveTo(0, ty); g.lineTo(w, ty); g.stroke(); g.setLineDash([]);
   g.fillStyle = css.getPropertyValue("--muted").trim(); g.font = "11px 'JetBrains Mono', monospace";
-  g.fillText(`cible ${target.toFixed(0)} Mbit/s`, 4, Math.max(12, ty - 6));
+  g.fillText(t("cible {t} Mbit/s", { t: target.toFixed(0) }), 4, Math.max(12, ty - 6));
   if (history.length < 2) return;
   const step = w / 119, x0 = w - (history.length - 1) * step;
   g.beginPath();
@@ -551,9 +683,9 @@ async function refreshClients() {
     const li = el("li"), d = el("div", "grow"), t = el("span", "tile");
     t.append(icon("i-monitor", 26));
     d.append(el("div", "name", c.name), el("div", "sub", c.fingerprint));
-    const b = el("button", "danger", "Révoquer");
+    const b = el("button", "danger", t("Révoquer"));
     b.addEventListener("click", async () => {
-      if (!confirm(`Révoquer « ${c.name} » ? Il devra se réappairer.`)) return;
+      if (!confirm(t("Révoquer « {n} » ? Il devra se réappairer.", { n: c.name }))) return;
       try { await api("/api/clients/unpair", { fingerprint: c.fingerprint }); toast("Appareil révoqué"); refreshClients(); } catch (e) { toast(e.message); }
     });
     li.append(t, d, b); ul.append(li);
@@ -575,23 +707,23 @@ async function refreshApps(force) {
   list.forEach((a, i) => {
     const li = el("li", "app-card");
     const p = el("button", "poster" + (a.running ? " running" : ""));
-    p.type = "button"; p.title = "Modifier " + a.title;
+    p.type = "button"; p.title = t("Modifier {n}", { n: a.title });
     if (a.cover) { const img = el("img"); img.alt = ""; img.loading = "lazy"; img.src = coverUrl(a.id); p.append(img); }
     else { const ph = el("span", "ph"); ph.append(icon("i-gamepad", 40), el("span", null, a.title)); p.append(ph); }
-    if (a.running) { const pill = el("span", "pill live"); pill.append(icon("ph3", 10), el("span", null, "En cours")); p.append(pill); }
-    p.append(el("span", "edit", "Modifier"));
+    if (a.running) { const pill = el("span", "pill live"); pill.append(icon("ph3", 10), el("span", null, t("En cours"))); p.append(pill); }
+    p.append(el("span", "edit", t("Modifier")));
     p.addEventListener("click", () => openEditor(a));
     const meta = el("div", "app-meta"), d = el("div", "grow");
-    d.append(el("div", "name", a.title), el("div", "sub", a.cmd || "bureau"));
+    d.append(el("div", "name", a.title), el("div", "sub", a.cmd || t("bureau")));
     const up = el("button", "ghost mini", "◀"), down = el("button", "ghost mini", "▶");
-    up.title = "Avancer"; down.title = "Reculer"; up.disabled = i === 0; down.disabled = i === list.length - 1;
-    up.setAttribute("aria-label", "Avancer " + a.title); down.setAttribute("aria-label", "Reculer " + a.title);
+    up.title = t("Avancer"); down.title = t("Reculer"); up.disabled = i === 0; down.disabled = i === list.length - 1;
+    up.setAttribute("aria-label", t("Avancer {n}", { n: a.title })); down.setAttribute("aria-label", t("Reculer {n}", { n: a.title }));
     up.addEventListener("click", () => moveApp(a.id, -1)); down.addEventListener("click", () => moveApp(a.id, 1));
     meta.append(d, up, down);
     li.append(p, meta); ul.append(li);
   });
   const li = el("li", "app-card"), add = el("button", "poster add-tile"), ph = el("span", "ph");
-  add.type = "button"; ph.append(icon("i-plus", 32), el("span", null, "Ajouter une application")); add.append(ph);
+  add.type = "button"; ph.append(icon("i-plus", 32), el("span", null, t("Ajouter une application"))); add.append(ph);
   add.addEventListener("click", () => openEditor(null));
   li.append(add); ul.append(li);
 }
@@ -645,7 +777,7 @@ cropEl.addEventListener("drop", (e) => { e.preventDefault(); cropEl.classList.re
 let editing = null;
 function openEditor(a) {
   editing = a;
-  $("dlg-title").textContent = a ? "Modifier l'application" : "Nouvelle application";
+  $("dlg-title").textContent = t(a ? "Modifier l'application" : "Nouvelle application");
   $("app-title").value = a ? a.title : ""; $("app-cmd").value = a ? a.cmd : ""; $("app-hdr").checked = !!(a && a.hdr);
   $("app-err").textContent = ""; $("app-del").classList.toggle("hidden", !a);
   setCropImage(null, "keep");
@@ -654,9 +786,9 @@ function openEditor(a) {
 }
 $("app-cancel").addEventListener("click", () => $("app-dlg").close());
 $("app-del").addEventListener("click", async () => {
-  if (!editing || !confirm(`Supprimer « ${editing.title} » ?`)) return;
+  if (!editing || !confirm(t("Supprimer « {n} » ?", { n: editing.title }))) return;
   try { await api("/api/apps/delete", { id: editing.id }); $("app-dlg").close(); toast("Application supprimée"); refreshApps(true); }
-  catch (e) { $("app-err").textContent = e.message; }
+  catch (e) { $("app-err").textContent = t(e.message); }
 });
 $("app-form").addEventListener("submit", async (e) => {
   e.preventDefault(); $("app-err").textContent = ""; $("app-save").disabled = true;
@@ -665,11 +797,11 @@ $("app-form").addEventListener("submit", async (e) => {
     if (crop.state !== "keep") {
       const body = crop.state === "new" && crop.img ? await new Promise((ok) => cv.toBlob(ok, "image/png")) : new Blob([]);
       const res = await fetch(`/api/apps/cover?id=${r.id}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "image/png", "X-2moon": "1" }, body });
-      if (!res.ok) { let m = "HTTP " + res.status; try { m = (await res.json()).error || m; } catch (_) {} throw new Error("vignette : " + m); }
+      if (!res.ok) { let m = "HTTP " + res.status; try { m = (await res.json()).error || m; } catch (_) {} throw new Error(t("vignette : {m}", { m: t(m) })); }
       coverVer[r.id] = (coverVer[r.id] || 0) + 1;
     }
     $("app-dlg").close(); toast(editing ? "Application enregistrée" : "Application ajoutée"); refreshApps(true);
-  } catch (err) { $("app-err").textContent = err.message; }
+  } catch (err) { $("app-err").textContent = t(err.message); }
   $("app-save").disabled = false;
 });
 $("app-add").addEventListener("click", () => openEditor(null));
@@ -700,7 +832,7 @@ $("pin-form").addEventListener("submit", async (e) => {
   try { const r = await api("/api/pin", { pin }); toast(r.delivered ? "Code transmis" : "Aucune demande d'appairage en attente"); digits.forEach(d => d.value = ""); }
   catch (err) { toast(err.message); }
 });
-$("btn-stop").addEventListener("click", async () => { if (!confirm("Arrêter la session en cours ?")) return; try { await api("/api/session/stop", {}); toast("Session arrêtée"); } catch (e) { toast(e.message); } });
+$("btn-stop").addEventListener("click", async () => { if (!confirm(t("Arrêter la session en cours ?"))) return; try { await api("/api/session/stop", {}); toast("Session arrêtée"); } catch (e) { toast(e.message); } });
 $("btn-idr").addEventListener("click", async () => { try { await api("/api/session/idr", {}); toast("Image clé demandée"); } catch (e) { toast(e.message); } });
 $("pw-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -708,8 +840,55 @@ $("pw-form").addEventListener("submit", async (e) => {
   catch (err) { toast(err.message); }
 });
 
+// ---- settings ----
+async function loadSettings() {
+  let st; try { st = await api("/api/settings"); } catch (_) { return; }
+  const sel = $("set-kb"); sel.replaceChildren();
+  const auto = el("option", null, t("Automatique (détecté : {d})", { d: st.keyboard_detected })); auto.value = "auto"; sel.append(auto);
+  for (const k of st.keyboards) { const o = el("option", null, k.label); o.value = k.id; sel.append(o); }
+  sel.value = st.keyboard;
+  const name = $("set-name");
+  if (document.activeElement !== name) name.value = st.host_name;
+  name.placeholder = st.host_name_default;
+  const pre = $("set-preset"); pre.replaceChildren();
+  const opt = (v, label) => { const o = el("option", null, label); o.value = v; return o; };
+  pre.append(opt("", t("Par défaut du service ({p})", { p: st.nvenc_preset_default })));
+  for (let i = 1; i <= 7; i++) { const p = "p" + i; pre.append(opt(p, i === 1 ? t("{p} · la plus rapide", { p }) : i === 4 ? t("{p} · équilibrée", { p }) : i === 7 ? t("{p} · la meilleure", { p }) : p)); }
+  pre.value = st.nvenc_preset;
+  const aq = $("set-autoquit"); aq.replaceChildren();
+  for (const m of st.auto_quit_choices) aq.append(opt(String(m), m === 0 ? t("Jamais") : m < 60 ? t("Après {n} min", { n: m }) : t("Après {n} h", { n: m / 60 })));
+  aq.value = String(st.auto_quit_min);
+  $("set-mdns").checked = st.mdns && st.mdns_available; $("set-mdns").disabled = !st.mdns_available;
+  if (!st.mdns_available) $("mdns-desc").textContent = t("Désactivée au démarrage du service (--no-mdns).");
+  if (st.language !== LANG) setLang(st.language);
+}
+async function saveSetting(body) {
+  try { await api("/api/settings", body); toast("Paramètre enregistré"); } catch (e) { toast(e.message); loadSettings(); }
+}
+function setLang(l) {
+  LANG = l; applyLang();
+  if (!$("app").classList.contains("hidden")) { appsJson = ""; refresh(); refreshClients(); refreshApps(true); loadSettings(); } else showAuth();
+}
+document.querySelectorAll("#set-lang button").forEach(b => b.addEventListener("click", async () => {
+  if (b.dataset.v === LANG) return;
+  setLang(b.dataset.v); await saveSetting({ language: LANG });
+}));
+$("set-kb").addEventListener("change", (e) => saveSetting({ keyboard: e.target.value }));
+let savedName = null;
+async function saveName() {
+  const v = $("set-name").value.trim();
+  if (v === savedName) return;
+  savedName = v; await saveSetting({ host_name: v }); refresh();
+}
+$("set-name").addEventListener("focus", () => { savedName = $("set-name").value.trim(); });
+$("set-name").addEventListener("change", saveName);
+$("name-form").addEventListener("submit", (e) => { e.preventDefault(); saveName(); });
+$("set-preset").addEventListener("change", (e) => saveSetting({ nvenc_preset: e.target.value }));
+$("set-autoquit").addEventListener("change", (e) => saveSetting({ auto_quit_min: Number(e.target.value) }));
+$("set-mdns").addEventListener("change", (e) => saveSetting({ mdns: e.target.checked }));
+
 (async () => {
-  try { const s = await api("/api/state"); if (s.logged_in) showApp(); else showAuth(s.setup_required); }
+  try { const s = await api("/api/state"); if (s.language) LANG = s.language; applyLang(); if (s.logged_in) showApp(); else showAuth(s.setup_required); }
   catch (e) { showAuth(false); }
 })();
 </script>

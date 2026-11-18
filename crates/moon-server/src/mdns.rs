@@ -10,7 +10,7 @@ fn is_virtual(name: &str) -> bool {
 }
 
 /// `local_only`: advertise on the loopback interface only (tests), invisible to the LAN.
-pub fn advertise(instance: &str, http_port: u16, local_only: bool) -> Result<ServiceDaemon> {
+pub fn advertise(instance: &str, http_port: u16, local_only: bool) -> Result<Advert> {
     let daemon = ServiceDaemon::new()?;
     let mut addrs = Vec::new();
     // Deny by default so interfaces created later (e.g. Docker veth/bridges) stay silent.
@@ -31,7 +31,24 @@ pub fn advertise(instance: &str, http_port: u16, local_only: bool) -> Result<Ser
     }
     let host = format!("{}.local.", instance.replace(['.', ' '], "-"));
     let info = ServiceInfo::new("_nvstream._tcp.local.", instance, &host, &addrs[..], http_port, None::<std::collections::HashMap<String, String>>)?;
+    let fullname = info.get_fullname().to_string();
     daemon.register(info)?;
     info!("advertising '{instance}' via mDNS on {addrs:?} (port {http_port})");
-    Ok(daemon)
+    Ok(Advert { daemon, fullname })
+}
+
+/// A running advertisement; dropping it sends a goodbye and stops the daemon.
+pub struct Advert {
+    daemon: ServiceDaemon,
+    fullname: String,
+}
+
+impl Drop for Advert {
+    fn drop(&mut self) {
+        if let Ok(rx) = self.daemon.unregister(&self.fullname) {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(1));
+        }
+        let _ = self.daemon.shutdown();
+        info!("mDNS advertisement '{}' stopped", self.fullname);
+    }
 }

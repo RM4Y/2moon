@@ -202,7 +202,7 @@ fn server_info(host: &Host, ctx: &Ctx, paired: bool) -> xml::Response {
     let session = host.current_session();
     let local_ip = ctx.local.map(|a| canonical_ip(a.ip()).to_string()).unwrap_or_default();
     xml::Response::ok()
-        .field("hostname", &host.cfg.hostname)
+        .field("hostname", host.hostname())
         .field("appversion", APP_VERSION)
         .field("GfeVersion", GFE_VERSION)
         .field("uniqueid", &host.uuid)
