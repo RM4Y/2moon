@@ -30,6 +30,8 @@ pub enum ControlEvent {
 
 enum Cmd {
     Send { channel: u8, msg_type: u16, payload: Vec<u8>, reliable: bool },
+    /// Relative mouse motion: moves still queued are added up into one packet.
+    MouseRel(i32, i32),
     Disconnect,
 }
 
@@ -62,6 +64,10 @@ impl ControlSender {
     }
 
     pub fn input(&self, ev: &input::Event) {
+        if let input::Event::MouseRel { dx, dy } = ev {
+            let _ = self.0.send(Cmd::MouseRel(*dx as i32, *dy as i32));
+            return;
+        }
         let channel = match ev {
             input::Event::Key { .. } => CHANNEL_KEYBOARD,
             input::Event::Text(_) => CHANNEL_UTF8,
@@ -156,8 +162,26 @@ fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2
             Err(RecvTimeoutError::Disconnected) => Some(Cmd::Disconnect),
         };
         let mut next = first;
+        // Mouse motion waiting to be sent: sent before any other input, so order is kept.
+        let mut motion: Option<(i32, i32)> = None;
+        let send_motion = |host: &mut enet::Host<UdpSocket>, cipher: &mut ControlCipher, m: &mut Option<(i32, i32)>| {
+            if let Some((dx, dy)) = m.take() {
+                let ev = input::Event::MouseRel { dx: dx.clamp(-32768, 32767) as i16, dy: dy.clamp(-32768, 32767) as i16 };
+                let data = cipher.seal(msg::INPUT_DATA, &ev.encode());
+                let _ = host.peer_mut(peer_id).send(CHANNEL_MOUSE, &enet::Packet::unreliable(data.as_slice()));
+            }
+        };
         while let Some(cmd) = next.take() {
+            if !matches!(cmd, Cmd::MouseRel(..)) {
+                send_motion(&mut host, &mut cipher, &mut motion);
+            }
             match cmd {
+                Cmd::MouseRel(dx, dy) if connected => {
+                    let m = motion.get_or_insert((0, 0));
+                    m.0 += dx;
+                    m.1 += dy;
+                }
+                Cmd::MouseRel(..) => {}
                 Cmd::Send { channel, msg_type, payload, reliable } if connected => {
                     let data = cipher.seal(msg_type, &payload);
                     let pkt = if reliable { enet::Packet::reliable(data.as_slice()) } else { enet::Packet::unreliable(data.as_slice()) };
@@ -180,6 +204,7 @@ fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2
                 Err(TryRecvError::Disconnected) => Some(Cmd::Disconnect),
             };
         }
+        send_motion(&mut host, &mut cipher, &mut motion);
         // Push queued inputs onto the wire now rather than at the next service.
         host.flush();
     }

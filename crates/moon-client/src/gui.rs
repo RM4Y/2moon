@@ -158,6 +158,8 @@ pub struct GuiApp {
     toast: Option<(String, Instant)>,
     manual: String,
     stream: Option<Stream>,
+    /// Mouse sent straight from the event loop while captured (see `FastMouse`).
+    fast_mouse: Arc<FastMouse>,
     /// GPU video output (shared with the decode thread).
     video: VideoView,
     look: Look,
@@ -190,8 +192,179 @@ pub fn run(store: Store) -> Result<()> {
         glow_options: eframe::egui_glow::GlowConfiguration { vsync, ..Default::default() },
         ..Default::default()
     };
-    eframe::run_native("2moon", opts, Box::new(|cc| Ok(Box::new(GuiApp::new(cc, store)))))
-        .map_err(|e| anyhow::anyhow!("cannot open the window: {e}"))
+    let fast = Arc::new(FastMouse::default());
+    let event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build().map_err(|e| anyhow::anyhow!("cannot open the window: {e}"))?;
+    let f = fast.clone();
+    let app = eframe::create_native("2moon", opts, Box::new(move |cc| Ok(Box::new(GuiApp::new(cc, store, f)))), &event_loop);
+    event_loop.run_app(&mut FastInputLoop { app, fast, mods: Default::default() }).map_err(|e| anyhow::anyhow!("cannot open the window: {e}"))
+}
+
+/// While the mouse is captured, mouse motion, buttons, wheel and keys go to the host as
+/// soon as the event loop receives them, like Moonlight's input thread. Through egui they
+/// would only be read once per displayed frame (60 times a second, several moves per packet).
+#[derive(Default)]
+pub struct FastMouse(Mutex<FastMouseState>);
+
+#[derive(Default)]
+struct FastMouseState {
+    /// Some while the stream has the mouse captured.
+    ctl: Option<ControlSender>,
+    /// Sub-pixel motion not sent yet (the compositor may report fractional deltas).
+    rest: (f64, f64),
+    /// Keys sent down through this path, released when capture ends.
+    pressed: HashSet<u16>,
+}
+
+impl FastMouse {
+    fn set(&self, ctl: Option<ControlSender>) {
+        let mut st = self.0.lock().unwrap();
+        if let Some(old) = st.ctl.take() {
+            for vk in st.pressed.drain() {
+                old.input(&In::Key { down: false, vk, modifiers: 0 });
+            }
+        }
+        st.pressed.clear();
+        st.ctl = ctl;
+        st.rest = (0.0, 0.0);
+    }
+
+    /// A physical key while captured. `shortcut`: Ctrl+Alt+Shift held, presses are left
+    /// to the interface (its shortcuts); releases of keys sent here always go out here.
+    fn key(&self, vk: u16, down: bool, repeat: bool, modifiers: u8, shortcut: bool) -> bool {
+        let mut st = self.0.lock().unwrap();
+        let Some(ctl) = st.ctl.clone() else { return false };
+        if down {
+            if shortcut && !st.pressed.contains(&vk) {
+                return false;
+            }
+            // No auto-repeat: the host repeats held keys itself.
+            if !repeat && st.pressed.insert(vk) {
+                ctl.input(&In::Key { down: true, vk, modifiers });
+            }
+            true
+        } else if st.pressed.remove(&vk) {
+            ctl.input(&In::Key { down: false, vk, modifiers });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Sends the events if the mouse is captured; false: let egui have them.
+    fn handle(&self, evs: &[In]) -> bool {
+        let st = self.0.lock().unwrap();
+        let Some(ctl) = &st.ctl else { return false };
+        for ev in evs {
+            ctl.input(ev);
+        }
+        true
+    }
+
+    fn motion(&self, dx: f64, dy: f64) -> bool {
+        let mut st = self.0.lock().unwrap();
+        let Some(ctl) = st.ctl.clone() else { return false };
+        let (x, y) = (st.rest.0 + dx, st.rest.1 + dy);
+        let (ix, iy) = (x.trunc(), y.trunc());
+        st.rest = (x - ix, y - iy);
+        if ix != 0.0 || iy != 0.0 {
+            ctl.input(&In::MouseRel { dx: ix.clamp(-32768.0, 32767.0) as i16, dy: iy.clamp(-32768.0, 32767.0) as i16 });
+        }
+        true
+    }
+}
+
+/// eframe's application with captured mouse input taken off the event loop first.
+struct FastInputLoop<'a> {
+    app: eframe::EframeWinitApplication<'a>,
+    fast: Arc<FastMouse>,
+    mods: winit::keyboard::ModifiersState,
+}
+
+impl winit::application::ApplicationHandler<eframe::UserEvent> for FastInputLoop<'_> {
+    fn resumed(&mut self, el: &winit::event_loop::ActiveEventLoop) {
+        self.app.resumed(el);
+    }
+
+    fn window_event(&mut self, el: &winit::event_loop::ActiveEventLoop, id: winit::window::WindowId, event: winit::event::WindowEvent) {
+        use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+        let fast = match &event {
+            WindowEvent::MouseInput { state, button, .. } => {
+                let b = match button {
+                    MouseButton::Left => Some(inp::BUTTON_LEFT),
+                    MouseButton::Right => Some(inp::BUTTON_RIGHT),
+                    MouseButton::Middle => Some(inp::BUTTON_MIDDLE),
+                    MouseButton::Back => Some(inp::BUTTON_X1),
+                    MouseButton::Forward => Some(inp::BUTTON_X2),
+                    MouseButton::Other(_) => None,
+                };
+                b.is_some_and(|b| self.fast.handle(&[In::MouseButton { down: *state == ElementState::Pressed, button: b }]))
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => ((x * 120.0) as i32, (y * 120.0) as i32),
+                    MouseScrollDelta::PixelDelta(p) => ((p.x * 2.0) as i32, (p.y * 2.0) as i32),
+                };
+                let mut evs = Vec::with_capacity(2);
+                if y != 0 {
+                    evs.push(In::Scroll { amount: y.clamp(-32768, 32767) as i16 });
+                }
+                if x != 0 {
+                    evs.push(In::HScroll { amount: x.clamp(-32768, 32767) as i16 });
+                }
+                self.fast.handle(&evs)
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                false
+            }
+            WindowEvent::KeyboardInput { event: k, is_synthetic: false, .. } => match k.physical_key {
+                winit::keyboard::PhysicalKey::Code(code) => crate::window::keycode_to_vk(code).is_some_and(|vk| {
+                    let m = self.mods;
+                    let bits = (m.shift_key() as u8) * inp::MOD_SHIFT | (m.control_key() as u8) * inp::MOD_CTRL | (m.alt_key() as u8) * inp::MOD_ALT | (m.super_key() as u8) * inp::MOD_META;
+                    let shortcut = m.control_key() && m.alt_key() && m.shift_key();
+                    self.fast.key(vk, k.state == ElementState::Pressed, k.repeat, bits, shortcut)
+                }),
+                _ => false,
+            },
+            _ => false,
+        };
+        if !fast {
+            self.app.window_event(el, id, event);
+        }
+    }
+
+    fn device_event(&mut self, el: &winit::event_loop::ActiveEventLoop, id: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if self.fast.motion(delta.0, delta.1) {
+                return;
+            }
+        }
+        self.app.device_event(el, id, event);
+    }
+
+    fn new_events(&mut self, el: &winit::event_loop::ActiveEventLoop, cause: winit::event::StartCause) {
+        self.app.new_events(el, cause);
+    }
+
+    fn user_event(&mut self, el: &winit::event_loop::ActiveEventLoop, event: eframe::UserEvent) {
+        self.app.user_event(el, event);
+    }
+
+    fn about_to_wait(&mut self, el: &winit::event_loop::ActiveEventLoop) {
+        self.app.about_to_wait(el);
+    }
+
+    fn suspended(&mut self, el: &winit::event_loop::ActiveEventLoop) {
+        self.app.suspended(el);
+    }
+
+    fn exiting(&mut self, el: &winit::event_loop::ActiveEventLoop) {
+        self.app.exiting(el);
+    }
+
+    fn memory_warning(&mut self, el: &winit::event_loop::ActiveEventLoop) {
+        self.app.memory_warning(el);
+    }
 }
 
 fn client_for(store: &Store, h: &HostRef) -> GsClient {
@@ -216,7 +389,7 @@ impl GuiApp {
         self.rt.as_ref().expect("tokio runtime")
     }
 
-    fn new(cc: &eframe::CreationContext<'_>, store: Store) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, store: Store, fast_mouse: Arc<FastMouse>) -> Self {
         let look = Look::new(&cc.egui_ctx);
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let (tx, rx) = mpsc::channel();
@@ -234,6 +407,7 @@ impl GuiApp {
             toast: None,
             manual: String::new(),
             stream: None,
+            fast_mouse,
             video: VideoView::default(),
             look,
             show_add: false,
@@ -441,6 +615,7 @@ impl GuiApp {
     }
 
     fn end_stream(&mut self, ctx: &egui::Context, why: Option<String>) {
+        self.fast_mouse.set(None);
         if let Some(g) = self.keygrab.as_mut() {
             g.set(false, None);
         }
@@ -1538,6 +1713,7 @@ impl GuiApp {
         let capture = st.want_capture && focused;
         if capture != st.captured {
             st.captured = capture;
+            self.fast_mouse.set(capture.then(|| ctl.clone()));
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if capture { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
         }
         for ev in events {
@@ -1558,6 +1734,7 @@ impl GuiApp {
                                 release_all(st, &ctl);
                                 st.want_capture = !st.want_capture;
                                 st.captured = st.want_capture;
+                                self.fast_mouse.set(st.captured.then(|| ctl.clone()));
                                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if st.captured { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
                                 continue;
                             }
