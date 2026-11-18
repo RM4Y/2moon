@@ -38,11 +38,12 @@ package() { # name binary [extra files...]
     strip "$dir/$bin"
     cp "$ROOT/README.md" "$ROOT/LICENSE" "$dir/"
     for f in "$@"; do mkdir -p "$dir/$(dirname "$f")"; cp "$ROOT/$f" "$dir/$f"; done
-    # Client: bundled FFmpeg decoders (scripts/build-ffmpeg.sh) and SDL3 for
-    # game controllers (scripts/build-sdl.sh), loaded from lib/.
+    # Bundled FFmpeg (scripts/build-ffmpeg.sh), loaded from lib/: decoders for the
+    # client, VAAPI encoders (AMD / Intel) for the host. Client: SDL3 for game
+    # controllers too (scripts/build-sdl.sh).
+    cp -a "$FFMPEG_BUNDLE/lib" "$dir/lib"
+    cp -a "$FFMPEG_BUNDLE/LICENSES" "$dir/LICENSES"
     if [ "$name" = client ]; then
-        cp -a "$FFMPEG_BUNDLE/lib" "$dir/lib"
-        cp -a "$FFMPEG_BUNDLE/LICENSES" "$dir/LICENSES"
         cp -a "$SDL_BUNDLE/lib/." "$dir/lib/"
         cp -a "$SDL_BUNDLE/LICENSES/." "$dir/LICENSES/"
     fi
@@ -55,7 +56,8 @@ package() { # name binary [extra files...]
 package server moon-server scripts/install-service.sh
 package client moon-client
 
-# Windows client: moon-client.exe + its DLLs (FFmpeg, Opus, MinGW threads) in a zip.
+# Windows client: moon-client.exe + its DLLs (FFmpeg, Opus, MinGW threads) in a zip;
+# Windows host: an installer.
 if [ "${WINDOWS:-1}" = 1 ]; then
     "$ROOT/scripts/build-windows-deps.sh" >/dev/null
     "$ROOT/scripts/build-windows.sh" >/dev/null
@@ -71,4 +73,6 @@ if [ "${WINDOWS:-1}" = 1 ]; then
     (cd "$OUT" && python3 -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.', sys.argv[1])" "$name" && sha256sum "$name.zip" >"$name.zip.sha256")
     rm -rf "$dir"
     echo "$dir.zip"
+    # Windows host: installer (service, firewall rule, ViGEmBus).
+    "$ROOT/scripts/build-windows-installer.sh" "$VERSION" "$OUT" | tail -1
 fi

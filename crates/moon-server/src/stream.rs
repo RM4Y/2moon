@@ -11,14 +11,13 @@ use anyhow::Result;
 use moon_media::ffenc::EncoderOptions;
 use moon_media::frame::{Csc, I420Frame};
 use moon_media::encoder::{Codec, VideoEncoder};
-use moon_media::glconv::{GpuConverter, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888};
-use moon_media::nvenc::CudaInput;
 use moon_media::opus::{OpusEncoder, StreamLayout};
 use moon_proto::audio::{AudioCipher, AudioPacketizer};
 use moon_proto::video::{Packetizer, FRAME_TYPE_IDR, FRAME_TYPE_P, FRAME_TYPE_RFI_RECOVERY};
 use tracing::{debug, info, warn};
 
 use crate::capture::{AudioSource, VideoSource};
+use crate::gpu::GpuPath;
 
 /// Parameters from the client's RTSP ANNOUNCE.
 #[derive(Debug, Clone)]
@@ -134,7 +133,7 @@ impl StreamSockets {
             let s = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
             s.set_only_v6(false)?;
             let _ = s.set_send_buffer_size(8 << 20);
-            s.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+            s.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into()).map_err(|e| anyhow::anyhow!("cannot use UDP port {port} ({e}); is another streaming host (Sunshine) running?"))?;
             let u: UdpSocket = s.into();
             u.set_read_timeout(Some(Duration::from_millis(100)))?;
             Ok(u)
@@ -270,20 +269,19 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         let kbps = p.bitrate_kbps;
         std::thread::Builder::new().name("video-pacer".into()).spawn(move || pacer(sock, rx, period, kbps))?
     };
-    // GPU path, as Sunshine: DMA-BUF capture -> OpenGL conversion -> NVENC CUDA input.
-    // Declared after `enc` so it is dropped first (it uses the encoder's CUDA context).
-    let mut gpu: Option<(GpuConverter, CudaInput)> = None;
+    // GPU path (see `GpuPath`). Declared after `enc` so it is dropped first (it uses
+    // the encoder's GPU context).
+    let mut gpu: Option<GpuPath> = None;
     let mut dmabuf_formats = Vec::new();
     // MOON_CPU_CONVERT=1 forces the former path (memory buffers, CPU conversion).
     if frame10.is_none() && std::env::var_os("MOON_CPU_CONVERT").is_none() {
-        if let Some(nv) = enc.nvenc_mut() {
-            match nv.cuda_input().and_then(|input| GpuConverter::new().map(|c| (c, input))) {
-                Ok((c, input)) => {
-                    dmabuf_formats = [DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888].into_iter().map(|f| (f, c.modifiers(f))).filter(|(_, m)| !m.is_empty()).collect();
-                    gpu = Some((c, input));
-                }
-                Err(e) => warn!("GPU conversion unavailable, converting on the CPU: {e:#}"),
+        match GpuPath::new(&mut enc) {
+            Some(Ok((g, formats))) => {
+                dmabuf_formats = formats;
+                gpu = Some(g);
             }
+            Some(Err(e)) => warn!("GPU conversion unavailable, converting on the CPU: {e:#}"),
+            None => {}
         }
     }
     src.start(fps, &dmabuf_formats)?;
@@ -304,7 +302,6 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     let mut grid = EncodeGrid::new(period, Instant::now());
     let mut received_at_window = src.pictures_received();
     let mut have_picture = false;
-    let mut generation = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
         let new = if fast_source {
             // One encode per slot of a steady `fps` grid (see `EncodeGrid`).
@@ -346,15 +343,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         let use_gpu = gpu.is_some() && src.is_dmabuf();
         if use_gpu {
             if new {
-                let (conv, input) = gpu.as_mut().unwrap();
-                let csc = frame.csc;
-                let r = src.with_dmabuf(&mut |f, g| {
-                    if g != generation {
-                        conv.forget_buffers();
-                        generation = g;
-                    }
-                    conv.convert(f, input, csc)
-                });
+                let r = gpu.as_mut().unwrap().convert(src.as_mut(), frame.csc);
                 match r {
                     Some(Ok(())) => have_picture = true,
                     Some(Err(e)) => {
@@ -395,7 +384,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         }
         let ts = (start.elapsed().as_micros() * 90 / 1000) as u32;
         let e = match (use_gpu, frame10.as_ref()) {
-            (true, _) => enc.nvenc_mut().expect("GPU path needs direct NVENC").encode_cuda(index.wrapping_add(1) as u64)?,
+            (true, _) => gpu.as_mut().unwrap().encode(&mut enc, index.wrapping_add(1))?,
             (false, Some(f)) => enc.encode_p010(f, index.wrapping_add(1))?,
             (false, None) => enc.encode(&frame, ts as i64, index.wrapping_add(1))?,
         };

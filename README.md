@@ -34,7 +34,7 @@ moon-server --video test --audio sine      # mire et tonalité de test
 ```
 
 Options utiles : `--port` (47989 par défaut ; les autres ports en découlent),
-`--encoder auto|nvenc|software|<encodeur ffmpeg>`, `--output <écran>` (pour `kwin`),
+`--encoder auto|nvenc|vaapi|amf|qsv|software|<encodeur ffmpeg>`, `--output <écran>` (pour `kwin`),
 `--nvenc-preset p1..p7` (qualité NVENC, `p4` par défaut), `--no-input` (n'injecte pas
 les entrées), `--no-mdns`, `--no-mic`, `--list-clients`, `--name`.
 
@@ -47,15 +47,20 @@ L'hôte crée alors un micro virtuel « 2moon Microphone » (PipeWire/PulseAudio
 entrée et le supprime à la fin. Ctrl+Alt+Maj+M coupe/réactive le micro. Les clients
 Moonlight officiels ignorent l'extension. `--no-mic` la désactive sur l'hôte.
 
-**Encodeur** : NVENC est piloté directement (en-tête `nvEncodeAPI.h` de nv-codec-headers,
+**Encodeur** : `auto` choisit NVIDIA (NVENC) s'il est là, sinon **AMD ou Intel via
+VAAPI** sous Linux (`h264_vaapi`, `hevc_vaapi`, `av1_vaapi` du FFmpeg fourni ; les images
+sont copiées dans des surfaces GPU avant l'encodage ; `MOON_VAAPI_DEVICE=/dev/dri/renderD129`
+choisit un autre GPU), sinon OpenH264 (H.264 logiciel). NVENC est piloté directement (en-tête `nvEncodeAPI.h` de nv-codec-headers,
 licence MIT, dans `crates/moon-media/csrc/`), avec repli sur NVENC via FFmpeg puis sur
 OpenH264. L'accès direct permet l'**invalidation d'images de référence (RFI)** : quand un
 client signale des images perdues, l'hôte envoie une simple image P qui ne s'appuie plus
 dessus, au lieu d'une image clé complète (H.264 et HEVC ; en AV1, NVENC répond par une
 image clé). Les clients Moonlight et 2moon l'utilisent automatiquement.
 
-Les paquets vidéo sont envoyés par un thread de *pacing* qui étale chaque image sur
-60 % de l'intervalle entre images (utile à 120 fps / haut débit, surtout en Wi-Fi).
+Chaque image capturée est encodée dès son arrivée, sur une grille régulière à la
+fréquence du stream. Les paquets vidéo partent à 300 Mbit/s (ou 3× le débit du stream) :
+une image de 40 Ko part en ~1 ms. `MOON_PACING_MBPS=<n>` change ce débit si le Wi-Fi
+perd des paquets.
 
 **Service systemd** (démarre avec la session Plasma, redémarre en cas d'échec) :
 
@@ -171,6 +176,33 @@ mémoire centrale :
 Au moindre échec (pas d'EGL, GPU d'affichage différent du GPU de décodage...), le client
 revient automatiquement à la copie. `MOON_ZERO_COPY=0` désactive la copie zéro.
 
+## Hôte Windows
+
+Installateur `2moon-host-<version>-windows-x86_64-setup.exe` : installe l'hôte dans
+`C:\Program Files\2moon Host`, le **service Windows « 2moon »**, la règle du pare-feu,
+le pilote **ViGEmBus** (manettes, facultatif) et les raccourcis du menu Démarrer
+(panneau d'administration, journaux). Comme Sunshine, le service tourne en SYSTEM et lance
+l'hôte dans la session ouverte : il capture aussi les fenêtres UAC et l'écran de
+connexion, et suit les changements de session.
+
+- Capture : **DXGI Desktop Duplication** (l'écran principal ; `--output DISPLAY2` pour un
+  autre), pointeur de la souris dessiné par l'hôte.
+- Encodage : **NVIDIA NVENC**, **AMD AMF** ou **Intel Quick Sync**, choisi automatiquement
+  (FFmpeg fourni, compilé avec nv-codec-headers, les en-têtes AMF et libvpl), sinon OpenH264.
+- Son : bouclage **WASAPI** de la sortie par défaut. Entrées : **SendInput** (codes de
+  touches matériels, texte Unicode) et manettes Xbox 360 virtuelles via **ViGEmBus**
+  (vibrations comprises).
+- Applications lancées avec le compte de l'utilisateur connecté, arrêtées avec tout ce
+  qu'elles ont lancé (objet job).
+- Données : `C:\ProgramData\2moon` (SYSTEM et administrateurs uniquement) ; journaux dans
+  `logs\` ; options supplémentaires de l'hôte dans `host-args.txt` (une par ligne).
+- Le premier compte du panneau d'administration se crée sans jeton depuis le PC hôte
+  lui-même (`https://localhost:47990/`).
+- `moon-server.exe --install-service` / `--uninstall-service` (ce que fait l'installateur).
+
+Compilé depuis Linux : `scripts/build-windows-deps.sh`, `scripts/build-windows.sh`, puis
+`scripts/build-windows-installer.sh <version>` (NSIS, dans un conteneur Debian 12).
+
 ## Client Windows
 
 Archive `2moon-client-<version>-windows-x86_64.zip` : `moon-client.exe` (interface
@@ -185,15 +217,15 @@ et ses DLL (FFmpeg, Opus, SDL3). Rien à installer : extraire et lancer.
 Compilé depuis Linux : `scripts/build-windows-deps.sh` (DLL FFmpeg / Opus / SDL3, MinGW-w64)
 puis `scripts/build-windows.sh` ; `scripts/package-release.sh` produit le zip.
 
-## FFmpeg fourni avec le client
+## FFmpeg fourni
 
-L'archive du client contient son propre FFmpeg (`lib/`), réduit au décodage :
-H.264, HEVC et AV1 (décodeurs FFmpeg et dav1d), avec l'accélération VAAPI. Le client
-n'a donc pas besoin d'un FFmpeg complet sur la machine. Il est compilé par
-`scripts/build-ffmpeg.sh` à partir des archives officielles (sommes SHA-256 figées),
-sous Debian 12, et intégré par `scripts/package-release.sh`. `MOON_FFMPEG=system`
-force l'usage du FFmpeg du système. Le serveur utilise toujours le FFmpeg du système
-(pour NVENC).
+Les archives Linux du client et de l'hôte contiennent leur propre FFmpeg (`lib/`), réduit
+au nécessaire : décodage H.264, HEVC et AV1 (décodeurs FFmpeg et dav1d) avec l'accélération
+VAAPI, et les encodeurs VAAPI de l'hôte (AMD / Intel). Pas besoin d'un FFmpeg complet sur
+la machine. Il est compilé par `scripts/build-ffmpeg.sh` à partir des archives officielles
+(sommes SHA-256 figées), sous Debian 12, et intégré par `scripts/package-release.sh`.
+`MOON_FFMPEG=system` force l'usage du FFmpeg du système. Sous Windows, les DLL FFmpeg
+contiennent en plus les encodeurs NVENC, AMF et Quick Sync (`scripts/build-windows-deps.sh`).
 
 ## Manettes
 
@@ -222,9 +254,12 @@ scripts/e2e.sh                     # 25 vérifications bout en bout client ↔ h
 ## Limites connues
 
 - Capture : KWin, portail XDG ou PipeWire (Wayland). Pas de capture X11/KMS.
-- Hôte Linux uniquement ; client Linux et Windows (pas de macOS).
-- HEVC/AV1 exigent un GPU NVIDIA côté hôte (NVENC). Côté client : NVDEC (NVIDIA),
-  VAAPI (Intel/AMD) ou le processeur.
+- Hôte et client Linux et Windows (pas de macOS).
+- Hôte Windows : capture et conversion des couleurs par le processeur (pas encore de
+  copie zéro), pas de micro du client, pas de 4:4:4 ni de HDR, pas de RFI.
+- Hôte AMD / Intel (VAAPI, AMF, Quick Sync) : pas de RFI, de 4:4:4 ni de HDR (NVENC
+  direct uniquement). HEVC/AV1 selon le GPU. Côté client : NVDEC (NVIDIA), VAAPI
+  (Intel/AMD) ou le processeur.
 - Le micro n'existe qu'entre un client et un hôte 2moon.
 - Pas de 4:4:4 en AV1 (NVENC ne le propose pas) ; pas de HDR combinée au 4:4:4.
 - Le client affiche toujours en SDR (conversion HDR → SDR) : egui/OpenGL ne présente pas de surface HDR.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Cross-compile the Windows client (x86_64-pc-windows-gnu, MinGW-w64) in a
-# Debian 12 container. Output: target/windows/x86_64-pc-windows-gnu/release/moon-client.exe
+# Cross-compile the Windows client and host (x86_64-pc-windows-gnu, MinGW-w64) in a
+# Debian 12 container. Output: target/windows/x86_64-pc-windows-gnu/release/moon-{client,server}.exe
 #   scripts/build-windows.sh [extra cargo args]
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,7 +17,7 @@ docker run --rm -v "$ROOT":/src -w /src -e OWNER="$(id -u):$(id -g)" \
     GCCLIB=$(dirname "$(x86_64-w64-mingw32-g++-posix -print-file-name=libstdc++.a)")
     export RUSTFLAGS="-C target-feature=+crt-static -C link-args=-static -L $GCCLIB"
     status=0
-    cargo build --release --locked --target x86_64-pc-windows-gnu -p moon-client "$@" || status=$?
+    cargo build --release --locked --target x86_64-pc-windows-gnu -p moon-client -p moon-server "$@" || status=$?
     chown -R $OWNER /src/target/windows /src/target/cargo-home
     exit $status
 ' "$@"

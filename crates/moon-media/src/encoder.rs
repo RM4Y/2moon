@@ -32,6 +32,17 @@ impl Codec {
             Codec::Av1 => "av1_nvenc",
         }
     }
+
+    /// FFmpeg encoder name for a hardware family: "nvenc" (NVIDIA), "amf" (AMD),
+    /// "qsv" (Intel Quick Sync), "vaapi" (AMD / Intel on Linux); None for anything else.
+    pub fn hardware(self, family: &str) -> Option<String> {
+        let c = match self {
+            Codec::H264 => "h264",
+            Codec::Hevc => "hevc",
+            Codec::Av1 => "av1",
+        };
+        matches!(family, "nvenc" | "amf" | "qsv" | "vaapi").then(|| format!("{c}_{family}"))
+    }
 }
 
 pub enum VideoEncoder {
@@ -43,14 +54,16 @@ pub enum VideoEncoder {
 }
 
 impl VideoEncoder {
-    /// `choice`: "auto" (hardware if available), "software", "nvenc", or any FFmpeg encoder name.
+    /// `choice`: "auto" (hardware if available), "software", a hardware family ("nvenc",
+    /// "amf", "qsv"), or any FFmpeg encoder name.
     /// HEVC and AV1 always need a hardware encoder.
     pub fn open(choice: &str, codec: Codec, width: usize, height: usize, fps: u32, bitrate_kbps: u32, opts: &crate::ffenc::EncoderOptions) -> Result<Self> {
         let ff_name = match choice {
             "software" | "openh264" if codec == Codec::H264 => None,
             "software" | "openh264" => anyhow::bail!("{codec:?} needs a hardware encoder"),
-            "auto" | "nvenc" => Some(codec.nvenc()),
-            other => Some(other),
+            "auto" => Some(codec.nvenc().to_string()),
+            family @ ("nvenc" | "amf" | "qsv" | "vaapi") => codec.hardware(family),
+            other => Some(other.to_string()),
         };
         let choice = if codec != Codec::H264 && choice == "auto" { "nvenc" } else { choice };
         // "auto" / "nvenc": NVENC directly first (RFI), FFmpeg's NVENC wrapper as fallback.
@@ -79,7 +92,7 @@ impl VideoEncoder {
             return Self::open(choice, codec, width, height, fps, bitrate_kbps, &crate::ffenc::EncoderOptions { yuv444: false, hdr10: false, ..opts.clone() });
         }
         if let Some(name) = ff_name {
-            match FfmpegEncoder::with_options(name, width, height, fps, bitrate_kbps, opts) {
+            match FfmpegEncoder::with_options(&name, width, height, fps, bitrate_kbps, opts) {
                 Ok(e) => return Ok(Self::Ffmpeg(e)),
                 Err(e) if choice == "auto" => warn!("hardware encoder unavailable ({e:#}); using software"),
                 Err(e) => return Err(e),

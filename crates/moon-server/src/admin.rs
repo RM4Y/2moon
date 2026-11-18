@@ -3,8 +3,9 @@
 //! Security model:
 //! * TLS with the host certificate (self-signed, like the GameStream API).
 //! * Username + password stored as salted PBKDF2-HMAC-SHA256.
-//! * The first account can only be created with a one-time setup token that is
-//!   printed in the server log, so nobody else on the LAN can claim the panel.
+//! * The first account can only be created from the host itself (localhost), or
+//!   with a one-time setup token printed in the server log, so nobody else on the
+//!   LAN can claim the panel.
 //! * Session cookie: random 256-bit token, HttpOnly, Secure, SameSite=Strict.
 //! * Every POST must carry `X-2moon: 1` (a custom header cannot be sent
 //!   cross-site without a CORS preflight, which we never allow) => no CSRF.
@@ -96,8 +97,12 @@ impl Admin {
         let tmp = self.path.with_extension("tmp");
         {
             use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create(true).truncate(true);
+            // Owner only. Windows: the installer limits the data folder to SYSTEM and Administrators.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+            let mut f = o.open(&tmp)?;
             f.write_all(serde_json::to_string_pretty(&c)?.as_bytes())?;
         }
         std::fs::rename(&tmp, &self.path)?;
@@ -242,13 +247,15 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
     let configured = admin.creds.lock().unwrap().is_some();
 
     match (method.clone(), path.as_str()) {
-        (Method::GET, "/api/state") => return js(StatusCode::OK, json!({"setup_required": !configured, "logged_in": session.is_some(), "language": admin.host.settings.get().language})),
+        (Method::GET, "/api/state") => return js(StatusCode::OK, json!({"setup_required": !configured, "token_required": !peer.ip().to_canonical().is_loopback(), "logged_in": session.is_some(), "language": admin.host.settings.get().language})),
         (Method::POST, "/api/setup") => {
             if configured {
                 return js(StatusCode::CONFLICT, json!({"error": "déjà configuré"}));
             }
             let Some(b) = body_json(req).await else { return js(StatusCode::BAD_REQUEST, json!({"error": "requête invalide"})) };
-            let token_ok = admin.setup_token.lock().unwrap().as_deref().map(|t| ct_eq(t.as_bytes(), s(&b, "token").trim().as_bytes())).unwrap_or(false);
+            // From the host itself no token is needed: whoever sits there owns it.
+            let local = peer.ip().to_canonical().is_loopback();
+            let token_ok = local || admin.setup_token.lock().unwrap().as_deref().map(|t| ct_eq(t.as_bytes(), s(&b, "token").trim().as_bytes())).unwrap_or(false);
             if !token_ok {
                 admin.throttle_failure().await;
                 return js(StatusCode::UNAUTHORIZED, json!({"error": "jeton de configuration incorrect (voir le journal du serveur)"}));

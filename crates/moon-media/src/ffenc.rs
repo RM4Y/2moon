@@ -52,6 +52,10 @@ struct Api {
     hwdevice_find_type_by_name: unsafe extern "C" fn(*const c_char) -> c_int,
     hwdevice_ctx_create: unsafe extern "C" fn(*mut *mut c_void, c_int, *const c_char, *mut c_void, c_int) -> c_int,
     hwframe_transfer_data: unsafe extern "C" fn(*mut c_void, *const c_void, c_int) -> c_int,
+    hwframe_ctx_alloc: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+    hwframe_ctx_init: unsafe extern "C" fn(*mut c_void) -> c_int,
+    hwframe_get_buffer: unsafe extern "C" fn(*mut c_void, *mut c_void, c_int) -> c_int,
+    avcodec_version: unsafe extern "C" fn() -> std::ffi::c_uint,
 }
 
 fn load() -> std::result::Result<Api, String> {
@@ -137,6 +141,10 @@ fn load() -> std::result::Result<Api, String> {
             hwdevice_find_type_by_name: sym!(avutil, b"av_hwdevice_find_type_by_name\0"),
             hwdevice_ctx_create: sym!(avutil, b"av_hwdevice_ctx_create\0"),
             hwframe_transfer_data: sym!(avutil, b"av_hwframe_transfer_data\0"),
+            hwframe_ctx_alloc: sym!(avutil, b"av_hwframe_ctx_alloc\0"),
+            hwframe_ctx_init: sym!(avutil, b"av_hwframe_ctx_init\0"),
+            hwframe_get_buffer: sym!(avutil, b"av_hwframe_get_buffer\0"),
+            avcodec_version: sym!(avcodec, b"avcodec_version\0"),
             _avutil: avutil,
             _avcodec: avcodec,
         })
@@ -227,6 +235,98 @@ pub struct FfmpegEncoder {
     fps: u32,
     out: Vec<u8>,
     pub codec_name: String,
+    /// Input as NV12 (interleaved chroma) instead of I420: Intel QSV and VAAPI take NV12.
+    nv12: bool,
+    /// VAAPI (AMD / Intel on Linux): pictures are uploaded to GPU surfaces first.
+    hw: Option<HwUpload>,
+}
+
+/// GPU surfaces a VAAPI encoder reads from: each picture is copied into one.
+struct HwUpload {
+    device: *mut c_void,
+    frames: *mut c_void,
+    frame: *mut c_void,
+}
+
+impl Drop for HwUpload {
+    fn drop(&mut self) {
+        if let Ok(a) = api() {
+            self.free(a);
+        }
+    }
+}
+
+impl HwUpload {
+    /// A VAAPI device and NV12 surface pool of `width` x `height` for `ctx`.
+    /// AVCodecContext.hw_frames_ctx and AVHWFramesContext are not reachable through
+    /// AVOptions: their places are those of FFmpeg 8 (checked), the bundled version.
+    unsafe fn new(a: &Api, ctx: *mut c_void, width: usize, height: usize) -> Result<Self> {
+        if (a.avcodec_version)() >> 16 != 62 {
+            bail!("VAAPI encoding needs FFmpeg 8 (libavcodec 62)");
+        }
+        let mut hw = Self { device: std::ptr::null_mut(), frames: std::ptr::null_mut(), frame: std::ptr::null_mut() };
+        unsafe {
+            let k = CString::new("vaapi")?;
+            let ty = (a.hwdevice_find_type_by_name)(k.as_ptr());
+            if ty <= 0 {
+                bail!("FFmpeg has no VAAPI support");
+            }
+            // MOON_VAAPI_DEVICE=/dev/dri/renderD129 picks another GPU.
+            let dev = std::env::var("MOON_VAAPI_DEVICE").ok().map(CString::new).transpose()?;
+            let r = (a.hwdevice_ctx_create)(&mut hw.device, ty, dev.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()), std::ptr::null_mut(), 0);
+            if r < 0 {
+                bail!("cannot open the VAAPI device: {}", err_str(r));
+            }
+            hw.frames = (a.hwframe_ctx_alloc)(hw.device);
+            if hw.frames.is_null() {
+                bail!("av_hwframe_ctx_alloc failed");
+            }
+            // AVBufferRef { buffer, data, size }: data is the AVHWFramesContext, whose
+            // device_ref / device_ctx (2nd and 3rd fields) point at our device.
+            let fc = *((hw.frames as *const u8).add(8) as *const *mut u8);
+            let dev_data = *((hw.device as *const u8).add(8) as *const *mut c_void);
+            if *(fc.add(16) as *const *mut c_void) != dev_data {
+                bail!("unexpected AVHWFramesContext layout");
+            }
+            let pix = |n: &str| CString::new(n).map(|c| (a.get_pix_fmt)(c.as_ptr())).unwrap_or(-1);
+            // initial_pool_size, format, sw_format, width, height.
+            wr_i32(fc.cast(), 56, 8);
+            wr_i32(fc.cast(), 60, pix("vaapi"));
+            wr_i32(fc.cast(), 64, pix("nv12"));
+            wr_i32(fc.cast(), 68, width as i32);
+            wr_i32(fc.cast(), 72, height as i32);
+            let r = (a.hwframe_ctx_init)(hw.frames);
+            if r < 0 {
+                bail!("VAAPI surfaces: {}", err_str(r));
+            }
+            // hw_frames_ctx sits right before hw_device_ctx.
+            let slot = hw_device_ctx_offset(a, ctx)? - 8;
+            if *((ctx as *const u8).add(slot) as *const usize) != 0 {
+                bail!("unexpected AVCodecContext layout");
+            }
+            *((ctx as *mut u8).add(slot) as *mut *mut c_void) = (a.buffer_ref)(hw.frames);
+            hw.frame = (a.frame_alloc)();
+            if hw.frame.is_null() {
+                bail!("av_frame_alloc failed");
+            }
+        }
+        Ok(hw)
+    }
+
+    /// Release everything (idempotent: the pointers are cleared).
+    fn free(&mut self, a: &Api) {
+        unsafe {
+            if !self.frame.is_null() {
+                (a.frame_free)(&mut self.frame);
+            }
+            if !self.frames.is_null() {
+                (a.buffer_unref)(&mut self.frames);
+            }
+            if !self.device.is_null() {
+                (a.buffer_unref)(&mut self.device);
+            }
+        }
+    }
 }
 
 unsafe impl Send for FfmpegEncoder {}
@@ -266,9 +366,22 @@ impl FfmpegEncoder {
                 Ok(())
             };
             let bps = bitrate_kbps as u64 * 1000;
+            let vaapi = codec.contains("vaapi");
+            let nv12 = codec.contains("qsv") || vaapi;
+            let pix_name = if nv12 { "nv12" } else { "yuv420p" };
+            let mut hw = None;
+            if vaapi {
+                match HwUpload::new(a, ctx, width, height) {
+                    Ok(h) => hw = Some(h),
+                    Err(e) => {
+                        (a.free_context)(&mut ctx);
+                        return Err(e);
+                    }
+                }
+            }
             let common: Vec<(&str, String)> = vec![
                 ("video_size", format!("{width}x{height}")),
-                ("pixel_format", "yuv420p".into()),
+                ("pixel_format", if vaapi { "vaapi".into() } else { pix_name.into() }),
                 // NVENC derives its per-frame bit budget from the time base:
                 // it must be 1/fps (pts counted in frames), not a 90 kHz clock.
                 ("time_base", format!("1/{}", fps.max(1))),
@@ -284,6 +397,9 @@ impl FfmpegEncoder {
             for (k, v) in &common {
                 if let Err(e) = set(k, v) {
                     (a.free_context)(&mut ctx);
+                    if let Some(h) = hw.as_mut() {
+                        h.free(a);
+                    }
                     return Err(e);
                 }
             }
@@ -304,6 +420,12 @@ impl FfmpegEncoder {
                 vec![("preset", preset.as_str()), ("tune", "ull"), ("zerolatency", "1"), ("rc", "cbr"), ("delay", "0"), ("forced-idr", "1"), ("aud", "0")]
             } else if codec.contains("vaapi") {
                 vec![("rc_mode", "CBR"), ("async_depth", "1")]
+            } else if codec.contains("amf") {
+                // AMD AMF, as Sunshine: ultra-low-latency usage, speed preset, no look-ahead.
+                vec![("usage", "ultralowlatency"), ("quality", "speed"), ("rc", "cbr"), ("latency", "1"), ("preencode", "0"), ("preanalysis", "0"), ("vbaq", "0"), ("enforce_hrd", "1"), ("frame_skipping", "0"), ("filler_data", "0"), ("aud", "0")]
+            } else if codec.contains("qsv") {
+                // Intel Quick Sync: fastest preset, one frame in flight, no look-ahead.
+                vec![("preset", "veryfast"), ("scenario", "remotegaming"), ("async_depth", "1"), ("look_ahead", "0"), ("low_delay_brc", "1"), ("forced_idr", "1"), ("aud", "0")]
             } else {
                 vec![("preset", "ultrafast"), ("tune", "zerolatency")]
             };
@@ -317,6 +439,9 @@ impl FfmpegEncoder {
             let r = (a.open2)(ctx, c, std::ptr::null_mut());
             if r < 0 {
                 (a.free_context)(&mut ctx);
+                if let Some(h) = hw.as_mut() {
+                    h.free(a);
+                }
                 bail!("cannot open {codec}: {}", err_str(r));
             }
             let frame = (a.frame_alloc)();
@@ -324,7 +449,7 @@ impl FfmpegEncoder {
             if frame.is_null() || pkt.is_null() {
                 bail!("allocation failed");
             }
-            let pix = CString::new("yuv420p")?;
+            let pix = CString::new(pix_name)?;
             wr_i32(frame, layout.width, width as i32);
             wr_i32(frame, layout.height, height as i32);
             wr_i32(frame, layout.format, (a.get_pix_fmt)(pix.as_ptr()));
@@ -333,7 +458,7 @@ impl FfmpegEncoder {
                 bail!("av_frame_get_buffer: {}", err_str(r));
             }
             info!("hardware encoder {codec} ready ({width}x{height}@{fps}, {bitrate_kbps} kbps)");
-            Ok(Self { ctx, frame, pkt, layout, width, height, force_idr: true, pts: -1, fps: fps.max(1), out: Vec::with_capacity(1 << 20), codec_name: codec.to_string() })
+            Ok(Self { ctx, frame, pkt, layout, width, height, force_idr: true, pts: -1, fps: fps.max(1), out: Vec::with_capacity(1 << 20), codec_name: codec.to_string(), nv12, hw })
         }
     }
 
@@ -357,19 +482,50 @@ impl FfmpegEncoder {
             }
             let cw = f.chroma_width();
             let ch = f.chroma_height();
-            for (plane, src, w, h) in [(0usize, &f.y, f.width, f.height), (1, &f.u, cw, ch), (2, &f.v, cw, ch)] {
-                let dst = *((self.frame as *const u8).add(FRAME_DATA + plane * 8) as *const *mut u8);
-                let ls = rd_i32(self.frame, FRAME_LINESIZE + plane * 4) as usize;
-                for row in 0..h {
-                    std::ptr::copy_nonoverlapping(src.as_ptr().add(row * w), dst.add(row * ls), w);
+            let plane_ptr = |plane: usize| (*((self.frame as *const u8).add(FRAME_DATA + plane * 8) as *const *mut u8), rd_i32(self.frame, FRAME_LINESIZE + plane * 4) as usize);
+            let (dst, ls) = plane_ptr(0);
+            for row in 0..f.height {
+                std::ptr::copy_nonoverlapping(f.y.as_ptr().add(row * f.width), dst.add(row * ls), f.width);
+            }
+            if self.nv12 {
+                let (dst, ls) = plane_ptr(1);
+                for row in 0..ch {
+                    let line = std::slice::from_raw_parts_mut(dst.add(row * ls), cw * 2);
+                    for (x, uv) in line.chunks_exact_mut(2).enumerate() {
+                        uv[0] = f.u[row * cw + x];
+                        uv[1] = f.v[row * cw + x];
+                    }
+                }
+            } else {
+                for (plane, src) in [(1usize, &f.u), (2, &f.v)] {
+                    let (dst, ls) = plane_ptr(plane);
+                    for row in 0..ch {
+                        std::ptr::copy_nonoverlapping(src.as_ptr().add(row * cw), dst.add(row * ls), cw);
+                    }
                 }
             }
             let frames = pts90k * self.fps as i64 / 90_000;
             self.pts = frames.max(self.pts + 1);
-            wr_i64(self.frame, self.layout.pts, self.pts);
-            wr_i32(self.frame, self.layout.pict_type, if self.force_idr { AV_PICTURE_TYPE_I } else { AV_PICTURE_TYPE_NONE });
+            // VAAPI: copy the picture into a GPU surface and encode that.
+            let input = match &self.hw {
+                Some(hw) => {
+                    (a.frame_unref)(hw.frame);
+                    let r = (a.hwframe_get_buffer)(hw.frames, hw.frame, 0);
+                    if r < 0 {
+                        bail!("av_hwframe_get_buffer: {}", err_str(r));
+                    }
+                    let r = (a.hwframe_transfer_data)(hw.frame, self.frame, 0);
+                    if r < 0 {
+                        bail!("upload to VAAPI: {}", err_str(r));
+                    }
+                    hw.frame
+                }
+                None => self.frame,
+            };
+            wr_i64(input, self.layout.pts, self.pts);
+            wr_i32(input, self.layout.pict_type, if self.force_idr { AV_PICTURE_TYPE_I } else { AV_PICTURE_TYPE_NONE });
             self.force_idr = false;
-            let r = (a.send_frame)(self.ctx, self.frame);
+            let r = (a.send_frame)(self.ctx, input);
             if r < 0 {
                 bail!("avcodec_send_frame: {}", err_str(r));
             }
@@ -403,6 +559,9 @@ impl Drop for FfmpegEncoder {
                 (a.packet_free)(&mut self.pkt);
                 (a.frame_free)(&mut self.frame);
                 (a.free_context)(&mut self.ctx);
+                if let Some(h) = self.hw.as_mut() {
+                    h.free(a);
+                }
             }
         }
     }
@@ -757,6 +916,33 @@ pub fn probe(codec: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// VAAPI encoding (AMD / Intel on Linux): opens, encodes, decodes back. Skipped
+    /// without a VAAPI driver that can encode H.264.
+    #[test]
+    fn vaapi_encode_roundtrip() {
+        let (w, h) = (640, 360);
+        let mut enc = match FfmpegEncoder::new("h264_vaapi", w, h, 60, 4000) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("no h264_vaapi ({e:#}), skipping");
+                return;
+            }
+        };
+        let mut f = I420Frame::new(w, h);
+        f.y.iter_mut().enumerate().for_each(|(i, v)| *v = (i % 251) as u8);
+        let mut dec = FfmpegDecoder::new(&["h264"]).unwrap();
+        let mut decoded = 0;
+        for i in 0..30 {
+            let e = enc.encode(&f, i * 1500).unwrap();
+            assert!(i > 0 || e.idr, "first frame is an IDR");
+            let data = e.data.to_vec();
+            if !data.is_empty() && dec.decode(&data).unwrap().is_some() {
+                decoded += 1;
+            }
+        }
+        assert!(decoded >= 25, "decoded {decoded} of 30");
+    }
 
     /// FFmpeg decoding through a hardware accelerator (same code path as VAAPI;
     /// CUDA is used here because it exists wherever NVENC does). Skipped without

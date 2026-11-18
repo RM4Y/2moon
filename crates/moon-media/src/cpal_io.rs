@@ -174,6 +174,54 @@ impl CpalInput {
         Ok(Self { _stream: stream, shared })
     }
 
+    /// Capture what the default output device plays (WASAPI loopback), as
+    /// `channels`@`rate`.
+    pub fn open_loopback(rate: u32, channels: u8) -> Result<(Self, String)> {
+        let dev = cpal::default_host().default_output_device().ok_or_else(|| anyhow!("no audio output device"))?;
+        let name = dev.description().map(|d| d.name().to_string()).unwrap_or_default();
+        let def = dev.default_output_config()?;
+        let cfg = def.config();
+        let shared: Shared = Default::default();
+        let conv = Converter::new(cfg.channels as usize, cfg.sample_rate, channels as usize, rate);
+        // An input stream on an output device is a loopback capture with WASAPI.
+        let stream = match def.sample_format() {
+            SampleFormat::I16 => start_in::<i16>(&dev, &cfg, shared.clone(), conv)?,
+            SampleFormat::F32 => start_in::<f32>(&dev, &cfg, shared.clone(), conv)?,
+            f => bail!("unsupported output sample format {f:?}"),
+        };
+        Ok((Self { _stream: stream, shared }, format!("{name} ({} ch, {} Hz)", cfg.channels, cfg.sample_rate)))
+    }
+
+    /// Fill `pcm` with what has been captured, waiting at most `wait` for it and
+    /// padding with silence (a loopback capture gets nothing while nothing plays).
+    pub fn read_or_silence(&mut self, pcm: &mut [i16], wait: Duration) {
+        let (m, cv) = &*self.shared;
+        let mut ring = m.lock().unwrap();
+        let deadline = std::time::Instant::now() + wait;
+        while ring.buf.len() < pcm.len() {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            ring = cv.wait_timeout(ring, deadline - now).unwrap().0;
+        }
+        for p in pcm.iter_mut() {
+            *p = (ring.buf.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0) as i16;
+        }
+    }
+
+    /// Samples waiting to be read.
+    pub fn queued(&self) -> usize {
+        self.shared.0.lock().unwrap().buf.len()
+    }
+
+    /// Drop all but the newest `keep` samples (latency control).
+    pub fn trim(&mut self, keep: usize) {
+        let mut ring = self.shared.0.lock().unwrap();
+        let extra = ring.buf.len().saturating_sub(keep);
+        ring.buf.drain(..extra);
+    }
+
     /// Blocking read filling `pcm` completely.
     pub fn read(&mut self, pcm: &mut [i16]) -> Result<()> {
         let (m, cv) = &*self.shared;

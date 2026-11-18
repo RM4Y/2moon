@@ -3,6 +3,7 @@
 //! command started on launch and stopped when the session is quit.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Child, Command};
 use std::sync::Mutex;
 
@@ -30,7 +31,7 @@ pub struct Apps {
     covers: PathBuf,
     list: Mutex<Vec<AppEntry>>,
     /// The running app command: (app id, process group leader).
-    running: Mutex<Option<(u32, Child)>>,
+    running: Mutex<Option<(u32, AppProcess)>>,
 }
 
 impl Apps {
@@ -160,58 +161,79 @@ impl Apps {
     pub fn start(&self, id: u32) {
         let mut running = self.running.lock().unwrap();
         if let Some((rid, child)) = running.as_mut() {
-            if *rid == id && matches!(child.try_wait(), Ok(None)) {
+            if *rid == id && child.is_running() {
                 return;
             }
         }
         if let Some((_, child)) = running.take() {
-            stop_child(child);
+            child.stop();
         }
         let Some(app) = self.get(id) else { return };
         if app.cmd.is_empty() {
             return;
         }
-        let mut c = Command::new("/bin/sh");
-        c.arg("-c").arg(&app.cmd).stdin(std::process::Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // Own process group, so quitting stops everything the command spawned.
-            c.process_group(0);
-        }
-        match c.spawn() {
+        match AppProcess::spawn(&app.cmd) {
             Ok(child) => {
                 info!("started '{}' (pid {}): {}", app.title, child.id(), app.cmd);
                 *running = Some((id, child));
             }
-            Err(e) => warn!("could not start '{}': {e}", app.title),
+            Err(e) => warn!("could not start '{}': {e:#}", app.title),
         }
     }
 
     /// Stop the running app command, if any.
     pub fn stop(&self) {
         if let Some((_, child)) = self.running.lock().unwrap().take() {
-            stop_child(child);
+            child.stop();
         }
     }
 }
 
-/// SIGTERM the process group, then SIGKILL it if still alive after 3 s (in the background).
-fn stop_child(mut child: Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
+/// An app command started by the host: on Unix a shell in its own process group;
+/// on Windows a `cmd /C` in a job object, as the signed-in user (see `win::session`).
+#[cfg(unix)]
+pub struct AppProcess(Child);
+
+#[cfg(windows)]
+pub use crate::win::session::UserProcess as AppProcess;
+
+#[cfg(unix)]
+impl AppProcess {
+    fn spawn(cmd: &str) -> anyhow::Result<Self> {
+        use std::os::unix::process::CommandExt;
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(cmd).stdin(std::process::Stdio::null());
+        // Own process group, so quitting stops everything the command spawned.
+        c.process_group(0);
+        Ok(Self(c.spawn()?))
     }
-    let pgid = child.id() as i32;
-    info!("stopping app process group {pgid}");
-    unsafe { libc::kill(-pgid, libc::SIGTERM) };
-    std::thread::spawn(move || {
-        for _ in 0..30 {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+
+    fn is_running(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(None))
+    }
+
+    /// SIGTERM the process group, then SIGKILL it if still alive after 3 s (in the background).
+    fn stop(self) {
+        let mut child = self.0;
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
         }
-        unsafe { libc::kill(-pgid, libc::SIGKILL) };
-        let _ = child.wait();
-    });
+        let pgid = child.id() as i32;
+        info!("stopping app process group {pgid}");
+        unsafe { libc::kill(-pgid, libc::SIGTERM) };
+        std::thread::spawn(move || {
+            for _ in 0..30 {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            let _ = child.wait();
+        });
+    }
 }

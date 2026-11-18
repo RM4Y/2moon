@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{oneshot, watch};
 
-use crate::capture::{AudioSource, PulseMonitor, SineSource, TestPattern, VideoSource};
+use crate::capture::{AudioSource, SineSource, TestPattern, VideoSource};
 use crate::stream::{self, StartArgs, StreamHandle, StreamParams, StreamSockets};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +86,8 @@ pub enum VideoSourceKind {
     Pipewire,
     /// KDE Plasma: dedicated KWin screencast of an output (see --output); no dialog, headless.
     Kwin,
+    /// Windows: a display through DXGI Desktop Duplication (see --output).
+    Dxgi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -150,9 +152,11 @@ pub struct Host {
     params: Mutex<StreamParams>,
     stream: Mutex<Option<StreamHandle>>,
     mic_socket: Option<Arc<std::net::UdpSocket>>,
+    #[cfg(target_os = "linux")]
     mic: Mutex<Option<crate::mic::MicReceiver>>,
     sockets: Arc<StreamSockets>,
     pub input_events: AtomicU64,
+    #[cfg(target_os = "linux")]
     pub portal: std::sync::OnceLock<Arc<crate::portal::PortalCapture>>,
     pub live: Arc<Mutex<crate::stream::LiveStats>>,
     /// Pairing requests waiting for a PIN: (device name, address).
@@ -169,6 +173,8 @@ pub struct Host {
 impl Host {
     pub fn load(cfg: Config) -> Result<Arc<Self>> {
         let (cfg_video_port, cfg_audio_port) = (cfg.video_port, cfg.audio_port);
+        // The client microphone needs a virtual microphone (PipeWire, Linux only).
+        #[cfg(target_os = "linux")]
         let mic_socket = match cfg.mic_port.map(crate::mic::bind).transpose() {
             Ok(s) => s.map(Arc::new),
             Err(e) => {
@@ -176,6 +182,8 @@ impl Host {
                 None
             }
         };
+        #[cfg(not(target_os = "linux"))]
+        let mic_socket = None;
         let identity = Identity::load_or_generate(&cfg.state_dir, "host", "2moon GameStream Host")?;
         let path = cfg.state_dir.join("state.json");
         let mut persisted: Persisted = match std::fs::read_to_string(&path) {
@@ -203,9 +211,11 @@ impl Host {
             params: Mutex::new(StreamParams::default()),
             stream: Mutex::new(None),
             mic_socket,
+            #[cfg(target_os = "linux")]
             mic: Mutex::new(None),
             sockets: Arc::new(StreamSockets::bind(cfg_video_port, cfg_audio_port)?),
             input_events: AtomicU64::new(0),
+            #[cfg(target_os = "linux")]
             portal: std::sync::OnceLock::new(),
             live: Arc::new(Mutex::new(Default::default())),
             pending_requests: Mutex::new(Vec::new()),
@@ -310,11 +320,17 @@ impl Host {
         self.stop_stream();
         let video: Box<dyn VideoSource> = match self.cfg.video_source {
             VideoSourceKind::Test => Box::new(TestPattern::new()),
+            #[cfg(target_os = "linux")]
             VideoSourceKind::Kwin => Box::new(crate::portal::PipeWireSource::kwin(self.cfg.kwin_output.clone())),
+            #[cfg(target_os = "linux")]
             VideoSourceKind::Portal | VideoSourceKind::Pipewire => {
                 let cap = self.portal.get().ok_or_else(|| anyhow::anyhow!("screen capture is not initialised"))?;
                 Box::new(crate::portal::PipeWireSource::new(cap.clone()))
             }
+            #[cfg(windows)]
+            VideoSourceKind::Dxgi => Box::new(crate::win::capture::DxgiSource::new(self.cfg.kwin_output.clone())),
+            #[allow(unreachable_patterns)]
+            other => anyhow::bail!("video source {other:?} is not available on this system"),
         };
         let ch = match self.stream_params().audio_channels {
             6 => 6,
@@ -324,7 +340,16 @@ impl Host {
         let audio: Option<Box<dyn AudioSource>> = match self.cfg.audio_source {
             AudioSourceKind::None => None,
             AudioSourceKind::Sine => Some(Box::new(SineSource::new(48000, ch as usize))),
-            AudioSourceKind::Desktop => match PulseMonitor::new(48000, ch) {
+            #[cfg(target_os = "linux")]
+            AudioSourceKind::Desktop => match crate::capture::PulseMonitor::new(48000, ch) {
+                Ok(m) => Some(Box::new(m)),
+                Err(e) => {
+                    tracing::warn!("desktop audio capture unavailable: {e:#}");
+                    None
+                }
+            },
+            #[cfg(windows)]
+            AudioSourceKind::Desktop => match crate::win::audio::LoopbackSource::new(48000, ch) {
                 Ok(m) => Some(Box::new(m)),
                 Err(e) => {
                     tracing::warn!("desktop audio capture unavailable: {e:#}");
@@ -344,6 +369,7 @@ impl Host {
             live: self.live.clone(),
         })?;
         *self.stream.lock().unwrap() = Some(h);
+        #[cfg(target_os = "linux")]
         if let Some(sock) = &self.mic_socket {
             match crate::mic::MicReceiver::start(sock.clone(), session.client_ip, session.rikey, session.rikeyid) {
                 Ok(m) => *self.mic.lock().unwrap() = Some(m),
@@ -371,6 +397,7 @@ impl Host {
 
     pub fn stop_stream(&self) {
         // Removes the virtual microphone and restores the default input.
+        #[cfg(target_os = "linux")]
         drop(self.mic.lock().unwrap().take());
         let h = self.stream.lock().unwrap().take();
         if let Some(h) = h {
@@ -416,12 +443,18 @@ fn uuid_v4() -> String {
 }
 
 /// Bind a TCP listener on all IPv4 and IPv6 addresses.
-pub async fn listen_any(port: u16) -> std::io::Result<tokio::net::TcpListener> {
-    let sock = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
-    sock.set_only_v6(false)?;
-    sock.set_reuse_address(true)?;
-    sock.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
-    sock.listen(128)?;
-    sock.set_nonblocking(true)?;
-    tokio::net::TcpListener::from_std(sock.into())
+pub async fn listen_any(port: u16) -> anyhow::Result<tokio::net::TcpListener> {
+    let bind = || -> std::io::Result<tokio::net::TcpListener> {
+        let sock = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+        sock.set_only_v6(false)?;
+        // Unix: rebind at once after a restart. Not on Windows, where SO_REUSEADDR lets
+        // another program take over a port that is in use.
+        #[cfg(not(windows))]
+        sock.set_reuse_address(true)?;
+        sock.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+        sock.listen(128)?;
+        sock.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(sock.into())
+    };
+    bind().map_err(|e| anyhow::anyhow!("cannot use TCP port {port} ({e}); is another streaming host (Sunshine) running?"))
 }

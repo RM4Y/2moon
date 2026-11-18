@@ -22,6 +22,8 @@ impl Converter {
             (a, b) if a == b => out.extend_from_slice(frame),
             (1, n) => out.extend(std::iter::repeat_n(frame[0], n)),
             (a, 1) => out.push(frame.iter().take(a.min(2)).sum::<f32>() / a.min(2) as f32),
+            // 7.1 to 5.1: the first six channels are the same speakers.
+            (a, b) if a > b && b > 2 => out.extend_from_slice(&frame[..b]),
             (_, n) => {
                 out.push(frame[0]);
                 out.push(frame[1]);

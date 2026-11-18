@@ -118,6 +118,7 @@ impl Settings {
     }
 
     /// XKB (layout, variant) to type client text with.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn keyboard_layout(&self) -> (String, String) {
         let id = self.values.lock().unwrap().keyboard.clone();
         match KEYBOARDS.iter().find(|kb| kb.0 == id) {

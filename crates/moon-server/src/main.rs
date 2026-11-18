@@ -2,19 +2,30 @@ mod admin;
 mod apps;
 mod capture;
 mod control;
+mod gpu;
 mod http;
 mod input;
+#[cfg(target_os = "linux")]
 mod kwin;
 mod logbuf;
 mod mdns;
+#[cfg(target_os = "linux")]
 mod mic;
+#[cfg(target_os = "linux")]
 mod pipewire;
+#[cfg(target_os = "linux")]
 mod portal;
 mod rtsp;
 mod settings;
 mod state;
 mod stream;
+// Typing with an XKB layout: Linux (Windows types Unicode directly).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod text;
+#[cfg(target_os = "linux")]
+mod uinput;
+#[cfg(windows)]
+mod win;
 
 use std::path::PathBuf;
 
@@ -67,7 +78,8 @@ struct Args {
     /// Authorise this executable to use KWin's screencast protocol, then exit.
     #[arg(long)]
     install_kwin_permission: bool,
-    /// Video encoder: auto (NVENC if available), software, nvenc, or an FFmpeg encoder name.
+    /// Video encoder: auto (NVIDIA NVENC; else AMD / Intel: VAAPI on Linux, AMF / Quick
+    /// Sync on Windows), software, nvenc, vaapi, amf, qsv, or an FFmpeg encoder name.
     #[arg(long, default_value = "auto")]
     encoder: String,
     /// Advertise via mDNS on the loopback interface only (tests).
@@ -82,28 +94,51 @@ struct Args {
     /// Measure the KWin capture frame rate for this many seconds, then exit (diagnostics).
     #[arg(long, hide = true)]
     probe_capture: Option<u64>,
+    /// Windows: write the log to this file too (the service's host process has no console).
+    #[arg(long)]
+    log_file: Option<PathBuf>,
+}
+
+fn main() -> Result<()> {
+    // Windows service entry points (run / install / uninstall), before anything else.
+    #[cfg(windows)]
+    if let Some(r) = win::service::from_args() {
+        return r;
+    }
+    run()
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
+    let args = Args::parse();
+    let log_file = args.log_file.as_ref().map(|p| logbuf::open_log_file(p)).transpose()?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with_writer(|| logbuf::TeeWriter)
+        .with_ansi(log_file.is_none())
+        .with_writer(move || logbuf::TeeWriter(log_file.clone()))
         .init();
-    let args = Args::parse();
+    // Without a console (Windows service) errors and panics must reach the log too.
+    std::panic::set_hook(Box::new(|p| tracing::error!("panic: {p}")));
+    let r = serve(args).await;
+    if let Err(e) = &r {
+        tracing::error!("{e:#}");
+    }
+    r
+}
+
+async fn serve(args: Args) -> Result<()> {
+    #[cfg(target_os = "linux")]
     if args.install_kwin_permission {
         let p = kwin::install_desktop_file()?;
         println!("Wrote {} — KWin will now allow screen capture without a dialog (restart moon-server).", p.display());
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
     if let Some(secs) = args.probe_capture {
         return portal::probe_capture(&args.output, secs);
     }
-    let state_dir = args.state_dir.unwrap_or_else(|| {
-        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
-        base.join("2moon-server")
-    });
-    let hostname = args.name.unwrap_or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "2moon".into()));
+    let state_dir = args.state_dir.clone().unwrap_or_else(default_state_dir);
+    let hostname = args.name.clone().unwrap_or_else(system_hostname);
     let mut cfg = state::Config::with_base_port(args.port, state_dir, hostname);
     cfg.preset_pin = args.pin;
     cfg.video_source = args.video;
@@ -111,10 +146,37 @@ async fn main() -> Result<()> {
     cfg.encoder = args.encoder.clone();
     cfg.nvenc_preset = args.nvenc_preset.clone();
     cfg.kwin_output = args.output.clone();
-    if args.no_mic {
+    if args.no_mic || cfg!(not(target_os = "linux")) {
         cfg.mic_port = None;
     }
-    if cfg.encoder != "software" && cfg.encoder != "openh264" {
+    #[cfg(windows)]
+    if cfg.encoder == "auto" {
+        // NVIDIA, AMD or Intel: the first hardware encoder FFmpeg can open.
+        cfg.encoder = win::detect_encoder();
+    }
+    #[cfg(windows)]
+    if let Some(family) = ["nvenc", "amf", "qsv"].into_iter().find(|f| *f == cfg.encoder) {
+        use moon_media::encoder::Codec;
+        let can = |c: Codec| c.hardware(family).is_some_and(|n| moon_media::ffenc::probe(&n).is_ok());
+        cfg.hevc = can(Codec::Hevc);
+        cfg.av1 = can(Codec::Av1);
+    }
+    // Linux without NVIDIA: AMD and Intel GPUs encode through VAAPI.
+    #[cfg(target_os = "linux")]
+    if cfg.encoder == "auto" && !moon_media::nvenc::available(moon_media::encoder::Codec::H264) && moon_media::ffenc::probe("h264_nvenc").is_err() {
+        match moon_media::ffenc::probe("h264_vaapi") {
+            Ok(()) => {
+                info!("video encoder: VAAPI (AMD / Intel)");
+                cfg.encoder = "vaapi".into();
+            }
+            Err(e) => info!("no NVENC; VAAPI: {e:#}"),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if cfg.encoder == "vaapi" {
+        cfg.hevc = moon_media::ffenc::probe("hevc_vaapi").is_ok();
+        cfg.av1 = moon_media::ffenc::probe("av1_vaapi").is_ok();
+    } else if cfg.encoder != "software" && cfg.encoder != "openh264" {
         cfg.hevc = moon_media::ffenc::probe("hevc_nvenc").is_ok();
         cfg.av1 = moon_media::ffenc::probe("av1_nvenc").is_ok();
         cfg.rfi = matches!(cfg.encoder.as_str(), "auto" | "nvenc") && moon_media::nvenc::available(moon_media::encoder::Codec::Hevc);
@@ -139,15 +201,18 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
     if host.cfg.video_source == state::VideoSourceKind::Portal {
         let cap = portal::PortalCapture::open(&host.cfg.state_dir, 60).await?;
         let _ = host.portal.set(cap);
     }
+    #[cfg(target_os = "linux")]
     if host.cfg.video_source == state::VideoSourceKind::Kwin {
         // Checked now so a missing permission shows at startup; each stream then
         // opens its own screencast (see PipeWireSource::kwin).
         drop(kwin::KwinScreencast::start(&args.output)?);
     }
+    #[cfg(target_os = "linux")]
     if host.cfg.video_source == state::VideoSourceKind::Pipewire {
         let cap = portal::PortalCapture::from_node(&args.pw_node, 60)?;
         let _ = host.portal.set(cap);
@@ -161,7 +226,14 @@ async fn main() -> Result<()> {
                 return Box::new(input::LogInjector::default());
             }
             let h = input_host.clone();
-            match input::UinputInjector::new(Box::new(move || h.settings.keyboard_layout())) {
+            #[cfg(target_os = "linux")]
+            let injector = uinput::UinputInjector::new(Box::new(move || h.settings.keyboard_layout()));
+            #[cfg(windows)]
+            let injector = {
+                drop(h);
+                win::input::SendInputInjector::new()
+            };
+            match injector {
                 Ok(u) => Box::new(u),
                 Err(e) => {
                     tracing::warn!("input injection disabled: {e:#}");
@@ -252,4 +324,24 @@ async fn main() -> Result<()> {
     });
 
     http::run(host).await
+}
+
+/// Where the host keeps its identity, paired clients and settings.
+fn default_state_dir() -> PathBuf {
+    if cfg!(windows) {
+        // Shared by the service (SYSTEM) and the admin panel: C:\\ProgramData\\2moon.
+        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("2moon")
+    } else {
+        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
+        base.join("2moon-server")
+    }
+}
+
+fn system_hostname() -> String {
+    let name = if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()
+    } else {
+        std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).ok()
+    };
+    name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "2moon".into())
 }

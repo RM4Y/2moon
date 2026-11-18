@@ -273,7 +273,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   <form id="auth-form" autocomplete="on">
     <span class="eyebrow" id="auth-eyebrow">Administration de l'hôte</span>
     <h2 id="auth-title">Connexion</h2>
-    <p class="hidden" id="setup-help">Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (<code>journalctl --user -u 2moon-server</code>).</p>
+    <p class="hidden" id="setup-help">Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (<code>journalctl --user -u 2moon-server</code>, ou <code>C:\ProgramData\2moon\logs\host.log</code> sous Windows). Pas de jeton depuis l'ordinateur hôte lui-même.</p>
     <label class="sr" for="f-token">Jeton de configuration</label>
     <input id="f-token" class="hidden" placeholder="Jeton de configuration" autocomplete="off">
     <label class="sr" for="f-user">Identifiant</label>
@@ -454,6 +454,7 @@ let LANG = "fr";
 const EN = {
   "Hôte": "Host", "Déconnexion": "Log out", "Administration de l'hôte": "Host administration", "Connexion": "Log in",
   "Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (": "First use: create the administrator account. The setup token is printed in the server log (",
+  "), ou": "), or", "sous Windows). Pas de jeton depuis l'ordinateur hôte lui-même.": "on Windows). No token needed on the host computer itself.",
   "Jeton de configuration": "Setup token", "Identifiant": "Username", "Mot de passe": "Password", "Se connecter": "Log in",
   "Créez le compte administrateur": "Create the administrator account", "Configuration initiale": "Initial setup", "Créer le compte": "Create account",
   "Sections": "Sections", "Session": "Session", "Appairage": "Pairing", "Appareils": "Devices", "Applications": "Applications", "Hôte et journal": "Host and log", "Paramètres": "Settings",
@@ -546,7 +547,7 @@ async function api(path, body) {
 
 function toast(msg) { $("toast-text").textContent = t(msg); const t = $("toast"); t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2500); }
 
-let setupMode = false, timers = [];
+let setupMode = false, tokenRequired = true, timers = [];
 function showAuth(setup) {
   timers.forEach(clearInterval); timers = [];
   if (setup !== undefined) setupMode = setup;
@@ -556,7 +557,7 @@ function showAuth(setup) {
   $("auth-eyebrow").textContent = t(setupMode ? "Configuration initiale" : "Administration de l'hôte");
   $("auth-btn").textContent = t(setupMode ? "Créer le compte" : "Se connecter");
   $("setup-help").classList.toggle("hidden", !setupMode);
-  $("f-token").classList.toggle("hidden", !setupMode);
+  $("f-token").classList.toggle("hidden", !setupMode || !tokenRequired);
   $("f-pass").autocomplete = setupMode ? "new-password" : "current-password";
 }
 
@@ -888,7 +889,7 @@ $("set-autoquit").addEventListener("change", (e) => saveSetting({ auto_quit_min:
 $("set-mdns").addEventListener("change", (e) => saveSetting({ mdns: e.target.checked }));
 
 (async () => {
-  try { const s = await api("/api/state"); if (s.language) LANG = s.language; applyLang(); if (s.logged_in) showApp(); else showAuth(s.setup_required); }
+  try { const s = await api("/api/state"); if (s.language) LANG = s.language; applyLang(); tokenRequired = s.token_required !== false; if (s.logged_in) showApp(); else showAuth(s.setup_required); }
   catch (e) { showAuth(false); }
 })();
 </script>

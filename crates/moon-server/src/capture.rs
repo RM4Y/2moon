@@ -4,7 +4,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use moon_media::frame::I420Frame;
-use moon_media::glconv::DmabufFrame;
+#[cfg(target_os = "linux")]
+pub use moon_media::glconv::DmabufFrame;
+/// A DMA-BUF picture (Linux only).
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+pub struct DmabufFrame;
 use moon_media::hdr::P010Frame;
 
 pub trait VideoSource: Send {
@@ -57,6 +62,7 @@ pub trait VideoSource: Send {
     }
 
     /// Pass the newest DMA-BUF picture, if new, and its buffer generation to `f`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn with_dmabuf(&mut self, _f: &mut dyn FnMut(&DmabufFrame, u64) -> Result<()>) -> Option<Result<()>> {
         None
     }
@@ -168,14 +174,17 @@ impl AudioSource for SineSource {
 }
 
 /// What the host is playing, captured from the default sink's monitor.
+#[cfg(target_os = "linux")]
 pub struct PulseMonitor(moon_media::pulse::PulseStream);
 
+#[cfg(target_os = "linux")]
 impl PulseMonitor {
     pub fn new(rate: u32, channels: u8) -> Result<Self> {
         Ok(Self(moon_media::pulse::PulseStream::record(Some("@DEFAULT_MONITOR@"), rate, channels, 5)?))
     }
 }
 
+#[cfg(target_os = "linux")]
 impl AudioSource for PulseMonitor {
     fn read(&mut self, pcm: &mut [i16]) -> Result<()> {
         self.0.read(pcm)
