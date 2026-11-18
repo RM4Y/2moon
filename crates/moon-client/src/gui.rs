@@ -1417,7 +1417,7 @@ impl GuiApp {
                 toggle_row(ui, false, "Plein écran au démarrage", "Le stream s'ouvre directement en plein écran.", &mut s.fullscreen);
                 toggle_row(ui, false, "Statistiques pendant le stream", "Affichées en surimpression · Ctrl+Alt+Maj+S pour basculer.", &mut s.show_stats);
                 toggle_row(ui, false, "Capturer les raccourcis système", "Touche Windows, Alt+Tab, Alt+F4… vont à l'hôte quand le stream a le focus.", &mut s.capture_shortcuts);
-                toggle_row(ui, false, "Latence minimale", "Sans frame pacing : chaque image s'affiche dès qu'elle est décodée · peut saccader en Wi-Fi.", &mut s.min_latency);
+                toggle_row(ui, false, "Latence minimale", "Sans frame pacing ni attente du compositeur : chaque image s'affiche dès qu'elle est décodée · peut saccader en Wi-Fi.", &mut s.min_latency);
                 toggle_row(ui, true, "Synchro verticale (V-Sync)", "Pas de déchirement, mais plus de latence · appliqué au prochain démarrage.", &mut s.vsync);
             });
             section(ui, 3, SECTIONS[3], tops, jump, |ui| {

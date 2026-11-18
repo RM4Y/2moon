@@ -107,6 +107,9 @@ impl VideoView {
     pub fn reset(&self, fps: u32, pacing: bool) -> u64 {
         let mut ex = self.ex.lock().unwrap();
         ex.pacing = pacing;
+        // Minimum latency: on Wayland, draw each frame as soon as it is decoded instead
+        // of waiting for the compositor's next frame callback (half a refresh on average).
+        eframe::WAYLAND_NO_FRAME_CALLBACK.store(!pacing, Ordering::Relaxed);
         ex.interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
         ex.generation += 1;
         ex.queue.clear();
