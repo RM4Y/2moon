@@ -113,8 +113,8 @@ Options de `stream` : `--codec auto|h264|hevc|av1`, `--software-decode`,
 `--audio-channels 2|6|8`, `--app <id>`, `--quit-on-exit`, `--headless --seconds N`
 (sans fenêtre, affiche des statistiques).
 
-Raccourcis dans la fenêtre : **Ctrl+Alt+Shift+Q** revenir à l'accueil, **+Z** capturer
-la souris (mode relatif, pour les jeux), **+F** plein écran, **+S** statistiques,
+Raccourcis dans la fenêtre : **Ctrl+Alt+Shift+Q** revenir à l'accueil, **+Z** libérer / recapturer
+la souris (capturée par défaut : mode relatif, pour les jeux), **+F** plein écran, **+S** statistiques,
 **+M** couper le micro. Les lettres sont celles inscrites sur les touches (AZERTY
 compris) ; les touches envoyées à l'hôte gardent leur position physique.
 

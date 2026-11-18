@@ -132,6 +132,9 @@ enum Screen {
 struct Stream {
     session: Session,
     host: HostRef,
+    /// Relative mouse wanted (like Moonlight, on by default; Ctrl+Alt+Shift+Z toggles it).
+    want_capture: bool,
+    /// Relative mouse in effect: wanted and the window focused.
     captured: bool,
     fullscreen: bool,
     pressed: HashSet<u16>,
@@ -507,6 +510,7 @@ impl GuiApp {
                         self.stream = Some(Stream {
                             session,
                             host: h,
+                            want_capture: true,
                             captured: false,
                             fullscreen,
                             pressed: HashSet::new(),
@@ -913,7 +917,7 @@ impl GuiApp {
                         }
                         ui.label(RichText::new("+").font(th::body(13.0)).color(th::MUTED));
                     });
-                    for (k, what) in [("Q", "accueil"), ("Z", "capturer la souris"), ("F", "plein écran"), ("S", "statistiques"), ("M", "couper le micro")] {
+                    for (k, what) in [("Q", "accueil"), ("Z", "libérer / capturer la souris"), ("F", "plein écran"), ("S", "statistiques"), ("M", "couper le micro")] {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             th::kbd(ui, k, false);
@@ -1240,7 +1244,7 @@ impl GuiApp {
             // Keyboard shortcuts.
             let keys: [(&[&str], &str); 5] = [
                 (&["Ctrl", "Alt", "Maj", "Q"], "Revenir à l'accueil"),
-                (&["…", "Z"], "Capturer la souris"),
+                (&["…", "Z"], "Libérer / capturer la souris"),
                 (&["…", "F"], "Plein écran"),
                 (&["…", "S"], "Statistiques"),
                 (&["…", "M"], "Couper le micro"),
@@ -1526,12 +1530,15 @@ impl GuiApp {
             g.set(focused && self.settings.capture_shortcuts, Some(&ctl));
         }
         let mut exit = false;
-        if !focused && (!st.pressed.is_empty() || st.captured) {
+        if !focused && !st.pressed.is_empty() {
             release_all(st, &ctl);
-            if st.captured {
-                st.captured = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
-            }
+        }
+        // Relative mouse (what games need) whenever the stream window has the focus,
+        // released when it loses it and taken again when it comes back.
+        let capture = st.want_capture && focused;
+        if capture != st.captured {
+            st.captured = capture;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if capture { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
         }
         for ev in events {
             match ev {
@@ -1549,7 +1556,8 @@ impl GuiApp {
                             }
                             Key::Z => {
                                 release_all(st, &ctl);
-                                st.captured = !st.captured;
+                                st.want_capture = !st.want_capture;
+                                st.captured = st.want_capture;
                                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if st.captured { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
                                 continue;
                             }

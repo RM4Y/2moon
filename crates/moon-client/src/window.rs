@@ -100,6 +100,9 @@ pub struct App {
     current: Option<Picture>,
     mods: ModifiersState,
     pressed: HashSet<u16>,
+    /// Relative mouse wanted (like Moonlight, on by default; Ctrl+Alt+Shift+Z toggles it).
+    want_capture: bool,
+    /// Relative mouse in effect: wanted and the window focused.
     captured: bool,
     show_stats: bool,
     cursor: Option<PhysicalPosition<f64>>,
@@ -121,6 +124,7 @@ impl App {
             current: None,
             mods: ModifiersState::empty(),
             pressed: HashSet::new(),
+            want_capture: true,
             captured: false,
             show_stats: false,
             cursor: None,
@@ -294,6 +298,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.set_capture(false);
                 }
             }
+            WindowEvent::Focused(true) if self.want_capture && !self.captured => self.set_capture(true),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
@@ -308,7 +313,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         KeyCode::KeyZ => {
                             self.release_all();
-                            self.set_capture(!self.captured);
+                            self.want_capture = !self.want_capture;
+                            self.set_capture(self.want_capture);
                             return;
                         }
                         KeyCode::KeyF => {
