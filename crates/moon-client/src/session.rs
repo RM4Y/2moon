@@ -114,6 +114,8 @@ pub struct Session {
     pub mic_active: bool,
     /// Mute switch for the microphone.
     pub mic_muted: Arc<AtomicBool>,
+    /// Game controllers are forwarded while this is true (the stream window has focus).
+    pub input_focus: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -183,8 +185,15 @@ impl Session {
             use std::net::ToSocketAddrs;
             (gs.host.as_str(), port).to_socket_addrs()?.next().context("cannot resolve host")
         };
-        let ctrl = control::connect(resolve(neg.control_port)?, neg.control_connect_data.unwrap_or(0), rikey, true)?;
+        let (rumble_tx, rumble_rx) = mpsc::channel();
+        let ctrl = control::connect(resolve(neg.control_port)?, neg.control_connect_data.unwrap_or(0), rikey, true, rumble_tx)?;
         let stop = Arc::new(AtomicBool::new(false));
+        // Game controllers -> host (and rumble back), while the stream has focus.
+        let input_focus = Arc::new(AtomicBool::new(true));
+        {
+            let (ctl, stop, focus) = (ctrl.sender.clone(), stop.clone(), input_focus.clone());
+            std::thread::Builder::new().name("gamepads".into()).spawn(move || crate::gamepad::run(ctl, stop, focus, rumble_rx))?;
+        }
         let stats = Arc::new(Stats::default());
         let mut threads = Vec::new();
 
@@ -258,7 +267,7 @@ impl Session {
             }
         }
 
-        Ok(Session { control: ctrl.sender, control_events: ctrl.events, stats, negotiated: neg, width: s.width, height: s.height, codec, mic_active, mic_muted, stop, threads })
+        Ok(Session { control: ctrl.sender, control_events: ctrl.events, stats, negotiated: neg, width: s.width, height: s.height, codec, mic_active, mic_muted, input_focus, stop, threads })
     }
 
     pub fn stop(mut self) {

@@ -1,10 +1,12 @@
 //! Input injection: virtual keyboard, mice and gamepads through uinput.
 
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use evdev::uinput::VirtualDevice;
-use evdev::{AbsInfo, AbsoluteAxisCode, AttributeSet, InputEvent, KeyCode, RelativeAxisCode, UinputAbsSetup};
+use evdev::{AbsInfo, AbsoluteAxisCode, AttributeSet, EventSummary, FFEffectCode, FFEffectKind, InputEvent, KeyCode, RelativeAxisCode, UInputCode, UinputAbsSetup};
 use moon_proto::control::input::{pad, Event, Gamepad};
 use tracing::{debug, info, warn};
 
@@ -25,6 +27,22 @@ pub trait Injector: Send {
     fn handle(&mut self, ev: &Event);
     /// Release every key/button still held (on disconnect).
     fn reset(&mut self) {}
+    /// Rumble changes asked by games on the virtual gamepads since the last call:
+    /// (controller, low-frequency / strong motor, high-frequency / weak motor).
+    fn rumble(&mut self) -> Vec<(u16, u16, u16)> {
+        Vec::new()
+    }
+}
+
+/// Force feedback state of one virtual gamepad.
+#[derive(Default)]
+struct PadFf {
+    /// Uploaded rumble effects: id -> (strong, weak, length).
+    effects: HashMap<i16, (u16, u16, Duration)>,
+    /// Effects playing, with when they end (None: until stopped).
+    playing: HashMap<i16, Option<Instant>>,
+    /// Last (strong, weak) sent to the client.
+    sent: (u16, u16),
 }
 
 /// Records events without touching the system (tests, `--no-input`).
@@ -45,6 +63,7 @@ pub struct UinputInjector {
     mouse: VirtualDevice,
     tablet: VirtualDevice,
     pads: HashMap<u16, (VirtualDevice, Gamepad)>,
+    ff: HashMap<u16, PadFf>,
     held_keys: Vec<u16>,
     held_buttons: Vec<u16>,
     typer: Option<crate::text::TextTyper>,
@@ -115,7 +134,7 @@ impl UinputInjector {
         info!("uinput devices created (keyboard, mouse, absolute pointer)");
         let typer_layout = layout_fn();
         let typer = make_typer(&typer_layout);
-        Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), held_keys: vec![], held_buttons: vec![], typer, typer_layout, layout_fn })
+        Ok(Self { keyboard, mouse, tablet, pads: HashMap::new(), ff: HashMap::new(), held_keys: vec![], held_buttons: vec![], typer, typer_layout, layout_fn })
     }
 
     fn gamepad(index: u16) -> Result<VirtualDevice> {
@@ -139,7 +158,15 @@ impl UinputInjector {
         let trig = AbsInfo::new(0, 0, 255, 0, 0, 0);
         let hat = AbsInfo::new(0, -1, 1, 0, 0, 0);
         let name = format!("2moon virtual gamepad {index}");
-        let mut b = VirtualDevice::builder()?.name(name.as_bytes()).input_id(evdev::InputId::new(evdev::BusType::BUS_USB, 0x045e, 0x028e, 0x110)).with_keys(&keys)?;
+        // Rumble, like a real Xbox 360 pad: games upload effects, we forward them.
+        let mut ff = AttributeSet::<FFEffectCode>::new();
+        ff.insert(FFEffectCode::FF_RUMBLE);
+        let mut b = VirtualDevice::builder()?
+            .name(name.as_bytes())
+            .input_id(evdev::InputId::new(evdev::BusType::BUS_USB, 0x045e, 0x028e, 0x110))
+            .with_keys(&keys)?
+            .with_ff(&ff)?
+            .with_ff_effects_max(16);
         for (a, i) in [
             (AbsoluteAxisCode::ABS_X, stick),
             (AbsoluteAxisCode::ABS_Y, stick),
@@ -152,13 +179,20 @@ impl UinputInjector {
         ] {
             b = b.with_absolute_axis(&UinputAbsSetup::new(a, i))?;
         }
-        Ok(b.build()?)
+        let dev = b.build()?;
+        // Polled for force feedback requests from the control loop: never block.
+        unsafe {
+            let fd = dev.as_raw_fd();
+            libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
+        }
+        Ok(dev)
     }
 
     fn pad_event(&mut self, g: &Gamepad) {
         if g.active_mask & (1 << g.index) == 0 {
             // Controller unplugged on the client.
             self.pads.remove(&g.index);
+            self.ff.remove(&g.index);
             return;
         }
         if !self.pads.contains_key(&g.index) {
@@ -224,6 +258,62 @@ fn button_code(b: u8) -> Option<u16> {
 }
 
 impl Injector for UinputInjector {
+    fn rumble(&mut self) -> Vec<(u16, u16, u16)> {
+        let mut out = Vec::new();
+        let now = Instant::now();
+        for (index, (dev, _)) in self.pads.iter_mut() {
+            let st = self.ff.entry(*index).or_default();
+            let evs: Vec<InputEvent> = match dev.fetch_events() {
+                Ok(it) => it.collect(),
+                Err(_) => Vec::new(), // WouldBlock: nothing new
+            };
+            for e in evs {
+                match e.destructure() {
+                    EventSummary::UInput(u, UInputCode::UI_FF_UPLOAD, _) => {
+                        if let Ok(up) = dev.process_ff_upload(u) {
+                            let fx = up.effect();
+                            if let FFEffectKind::Rumble { strong_magnitude, weak_magnitude } = fx.kind {
+                                st.effects.insert(up.effect_id(), (strong_magnitude, weak_magnitude, Duration::from_millis(fx.replay.length as u64)));
+                            }
+                            // Dropping `up` completes the upload.
+                        }
+                    }
+                    EventSummary::UInput(u, UInputCode::UI_FF_ERASE, _) => {
+                        if let Ok(er) = dev.process_ff_erase(u) {
+                            let id = er.effect_id() as i16;
+                            st.effects.remove(&id);
+                            st.playing.remove(&id);
+                        }
+                    }
+                    EventSummary::ForceFeedback(_, code, value) => {
+                        let id = code.0 as i16;
+                        if value > 0 {
+                            let len = st.effects.get(&id).map(|e| e.2).unwrap_or_default();
+                            st.playing.insert(id, (!len.is_zero()).then(|| now + len));
+                        } else {
+                            st.playing.remove(&id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Effects whose length has run out stop by themselves.
+            st.playing.retain(|_, end| end.is_none_or(|t| t > now));
+            let (mut strong, mut weak) = (0u16, 0u16);
+            for id in st.playing.keys() {
+                if let Some((s, w, _)) = st.effects.get(id) {
+                    strong = strong.max(*s);
+                    weak = weak.max(*w);
+                }
+            }
+            if (strong, weak) != st.sent {
+                st.sent = (strong, weak);
+                out.push((*index, strong, weak));
+            }
+        }
+        out
+    }
+
     fn handle(&mut self, e: &Event) {
         match e {
             Event::Key { down, vk, .. } => {

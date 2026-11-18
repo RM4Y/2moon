@@ -105,6 +105,19 @@ fn run(host: Arc<Host>, sock: std::net::UdpSocket, make_injector: Box<dyn Fn() -
             }
         }
 
+        // Rumble asked by games on the virtual gamepads -> client (GameStream message:
+        // 4 unused bytes, then controller, low- and high-frequency motor, little-endian).
+        if let (Some(c), Some(inj)) = (client.as_mut(), injector.as_mut()) {
+            for (index, low, high) in inj.rumble() {
+                debug!("rumble controller {index}: {low} / {high}");
+                let mut p = vec![0u8; 4];
+                for v in [index, low, high] {
+                    p.extend_from_slice(&v.to_le_bytes());
+                }
+                let pkt = c.cipher.seal(msg::RUMBLE, &p);
+                let _ = enet_host.peer_mut(c.peer).send(0, &enet::Packet::reliable(pkt.as_slice()));
+            }
+        }
         if let Some(c) = client.as_mut() {
             let gen = *gen_rx.borrow();
             let ended = gen != c.session_gen && host.current_session().is_none();

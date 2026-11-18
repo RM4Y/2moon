@@ -14,9 +14,13 @@ if [ "${NATIVE:-0}" = 1 ]; then
     cargo build --release --manifest-path "$ROOT/Cargo.toml"
     BIN="$ROOT/target/release"
 else
+    # Rust image + libudev headers (game controllers: gilrs links libudev.so.1,
+    # present on every systemd distribution).
+    IMAGE=2moon-build:1.97-bookworm
+    docker image inspect "$IMAGE" >/dev/null 2>&1 || printf 'FROM rust:1.97-bookworm\nRUN apt-get update -qq && apt-get install -y -qq libudev-dev >/dev/null && rm -rf /var/lib/apt/lists/*\n' | docker build -q -t "$IMAGE" - >/dev/null
     docker run --rm -u "$(id -u):$(id -g)" -v "$ROOT":/src -w /src \
         -e CARGO_HOME=/src/target/cargo-home -e CARGO_TARGET_DIR=/src/target/bookworm \
-        rust:1.97-bookworm cargo build --release --locked
+        "$IMAGE" cargo build --release --locked
     BIN="$ROOT/target/bookworm/release"
 fi
 mkdir -p "$OUT"

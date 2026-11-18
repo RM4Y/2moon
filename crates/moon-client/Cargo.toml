@@ -31,3 +31,13 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 winit = "0.30.13"
+raw-window-handle = "0.6.2"
+gilrs = "0.11.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31.15"
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

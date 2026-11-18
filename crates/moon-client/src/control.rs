@@ -83,14 +83,15 @@ pub struct ControlClient {
     pub events: Receiver<ControlEvent>,
 }
 
-pub fn connect(addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool) -> Result<ControlClient> {
+/// `rumble`: where to send the host's controller rumble requests.
+pub fn connect(addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool, rumble: Sender<crate::gamepad::Rumble>) -> Result<ControlClient> {
     let bind: SocketAddr = if addr.is_ipv6() { "[::]:0".parse()? } else { "0.0.0.0:0".parse()? };
     let socket = UdpSocket::bind(bind)?;
     socket.set_nonblocking(true)?;
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     let (ev_tx, ev_rx) = mpsc::channel::<ControlEvent>();
     std::thread::Builder::new().name("control".into()).spawn(move || {
-        if let Err(e) = run(socket, addr, connect_data, key, v2, cmd_rx, ev_tx.clone()) {
+        if let Err(e) = run(socket, addr, connect_data, key, v2, cmd_rx, ev_tx.clone(), rumble) {
             warn!("control stream error: {e:#}");
         }
         let _ = ev_tx.send(ControlEvent::Disconnected);
@@ -98,7 +99,8 @@ pub fn connect(addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool) -> 
     Ok(ControlClient { sender: ControlSender(cmd_tx), events: ev_rx })
 }
 
-fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool, cmds: Receiver<Cmd>, events: Sender<ControlEvent>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool, cmds: Receiver<Cmd>, events: Sender<ControlEvent>, rumble: Sender<crate::gamepad::Rumble>) -> Result<()> {
     let mut host = enet::Host::new(socket, enet::HostSettings { peer_limit: 1, channel_limit: CHANNEL_COUNT, ..Default::default() })
         .map_err(|e| anyhow::anyhow!("enet host: {e:?}"))?;
     let peer_id = host.connect(addr, CHANNEL_COUNT, connect_data).map_err(|e| anyhow::anyhow!("enet connect: {e:?}"))?.id();
@@ -126,6 +128,10 @@ fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2
                         if t == msg::TERMINATION {
                             let code = payload.get(..4).map(|b| u32::from_be_bytes(b.try_into().unwrap())).unwrap_or(0);
                             let _ = events.send(ControlEvent::Terminated(code));
+                        } else if t == msg::RUMBLE {
+                            if let Some(r) = crate::gamepad::parse_rumble(&payload) {
+                                let _ = rumble.send(r);
+                            }
                         } else {
                             let _ = events.send(ControlEvent::Message(t, payload));
                         }

@@ -33,7 +33,7 @@ pub async fn run(c: &GsClient, out: &Path, seconds: u64) -> Result<()> {
     println!("{neg:#?}");
 
     let ctrl_addr: std::net::SocketAddr = tokio::net::lookup_host((c.host.as_str(), neg.control_port)).await?.next().unwrap();
-    let ctrl = crate::control::connect(ctrl_addr, neg.control_connect_data.unwrap_or(0), rikey, neg.encryption_requested & 1 != 0 || cfg.encryption_requested & 1 != 0 || true)?;
+    let ctrl = crate::control::connect(ctrl_addr, neg.control_connect_data.unwrap_or(0), rikey, neg.encryption_requested & 1 != 0 || cfg.encryption_requested & 1 != 0 || true, std::sync::mpsc::channel().0)?;
     let v = UdpSocket::bind("0.0.0.0:0").await?;
     let a = UdpSocket::bind("0.0.0.0:0").await?;
     v.connect((c.host.as_str(), neg.video_port)).await?;

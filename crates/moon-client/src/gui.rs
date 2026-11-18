@@ -48,11 +48,14 @@ pub struct Settings {
     pub yuv444: bool,
     /// Accept HDR (10-bit) streams, tone-mapped to this SDR window.
     pub hdr: bool,
+    /// While the stream has focus, the system's shortcuts (Windows/Super key,
+    /// Alt+Tab, Alt+F4…) go to the host instead of this computer.
+    pub capture_shortcuts: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, mic_device: None, yuv444: false, hdr: false }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, mic_device: None, yuv444: false, hdr: false, capture_shortcuts: true }
     }
 }
 
@@ -169,6 +172,9 @@ pub struct GuiApp {
     confirm_forget: Option<HostRef>,
     /// App box art by `cover_key`: None = the host has none.
     covers: HashMap<String, Option<egui::TextureHandle>>,
+    /// System shortcut capture for this window (None: not possible here / not set up yet).
+    keygrab: Option<crate::keygrab::KeyGrab>,
+    keygrab_tried: bool,
 }
 
 fn cover_key(h: &HostRef, app_id: u32) -> String {
@@ -235,6 +241,8 @@ impl GuiApp {
             mics: None,
             confirm_forget: None,
             covers: HashMap::new(),
+            keygrab: None,
+            keygrab_tried: false,
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -431,6 +439,9 @@ impl GuiApp {
     }
 
     fn end_stream(&mut self, ctx: &egui::Context, why: Option<String>) {
+        if let Some(g) = self.keygrab.as_mut() {
+            g.set(false, None);
+        }
         if let Some(st) = self.stream.take() {
             for vk in st.pressed.iter() {
                 st.session.control.input(&In::Key { down: false, vk: *vk, modifiers: 0 });
@@ -533,7 +544,7 @@ impl eframe::App for GuiApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_messages(&ctx);
         // Keep the host poller's target list current (not while streaming: this runs every frame).
@@ -550,6 +561,13 @@ impl eframe::App for GuiApp {
         }
 
         if matches!(self.screen, Screen::Streaming) {
+            if !self.keygrab_tried {
+                self.keygrab_tried = true;
+                use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+                if let (Ok(d), Ok(w)) = (frame.display_handle(), frame.window_handle()) {
+                    self.keygrab = crate::keygrab::KeyGrab::new(d.as_raw(), w.as_raw());
+                }
+            }
             self.stream_ui(ui, &ctx);
             return;
         }
@@ -1214,6 +1232,7 @@ impl GuiApp {
             section(ui, 2, SECTIONS[2], tops, jump, |ui| {
                 toggle_row(ui, false, "Plein écran au démarrage", "Le stream s'ouvre directement en plein écran.", &mut s.fullscreen);
                 toggle_row(ui, false, "Statistiques pendant le stream", "Affichées en surimpression · Ctrl+Alt+Maj+S pour basculer.", &mut s.show_stats);
+                toggle_row(ui, false, "Capturer les raccourcis système", "Touche Windows, Alt+Tab, Alt+F4… vont à l'hôte quand le stream a le focus.", &mut s.capture_shortcuts);
                 toggle_row(ui, true, "Synchro verticale (V-Sync)", "Pas de déchirement, mais plus de latence · appliqué au prochain démarrage.", &mut s.vsync);
             });
             section(ui, 3, SECTIONS[3], tops, jump, |ui| {
@@ -1504,6 +1523,10 @@ impl GuiApp {
         // Input forwarding.
         let (events, focused) = ctx.input(|i| (i.events.clone(), i.viewport().focused.unwrap_or(true)));
         let ctl = st.session.control.clone();
+        st.session.input_focus.store(focused, Ordering::Relaxed);
+        if let Some(g) = self.keygrab.as_mut() {
+            g.set(focused && self.settings.capture_shortcuts, Some(&ctl));
+        }
         let mut exit = false;
         if !focused && (!st.pressed.is_empty() || st.captured) {
             release_all(st, &ctl);
@@ -1697,6 +1720,8 @@ fn egui_key_to_vk(k: Key) -> Option<u16> {
         Backslash | Pipe => 0xDC,
         CloseBracket | CloseCurlyBracket => 0xDD,
         Quote => 0xDE,
+        SuperLeft => 0x5B,
+        SuperRight => 0x5C,
         _ => return None,
     })
 }
