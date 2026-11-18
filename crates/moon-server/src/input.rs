@@ -221,8 +221,10 @@ impl UinputInjector {
         for (flag, key) in [
             (pad::A, KeyCode::BTN_SOUTH),
             (pad::B, KeyCode::BTN_EAST),
-            (pad::X, KeyCode::BTN_WEST),
-            (pad::Y, KeyCode::BTN_NORTH),
+            // As the xpad driver: X is BTN_X (0x133, the code named BTN_NORTH) and
+            // Y is BTN_Y (0x134, BTN_WEST). SDL's and games' Xbox 360 mappings expect that.
+            (pad::X, KeyCode::BTN_NORTH),
+            (pad::Y, KeyCode::BTN_WEST),
             (pad::LB, KeyCode::BTN_TL),
             (pad::RB, KeyCode::BTN_TR),
             (pad::BACK, KeyCode::BTN_SELECT),

@@ -22,8 +22,19 @@ fn main() -> anyhow::Result<()> {
                 let path = unsafe { sdl::cstr((api.gamepad_path)(p)) };
                 println!("pad {}: {name} {:04x}:{:04x} type={kind} {path}", ev.which(), unsafe { (api.gamepad_vendor)(p) }, unsafe { (api.gamepad_product)(p) });
                 pads.push(p);
+            } else if secs > 0 && ev.kind() == sdl::EVENT_GAMEPAD_AXIS_MOTION {
+                let (a, v) = (ev.0[20], i16::from_ne_bytes([ev.0[24], ev.0[25]]));
+                if (a == 4 || a == 5) && (v == 0 || v == 32767) {
+                    println!("{} {v} on {}", if a == 4 { "lefttrigger" } else { "righttrigger" }, ev.which());
+                }
             } else if secs > 0 && ev.kind() == sdl::EVENT_GAMEPAD_BUTTON_DOWN {
-                println!("button {} on {}", ev.0[20], ev.which());
+                const NAMES: [&str; 26] = [
+                    "A/south", "B/east", "X/west", "Y/north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
+                    "rightshoulder", "dpup", "dpdown", "dpleft", "dpright", "misc1", "paddle1", "paddle2", "paddle3", "paddle4",
+                    "touchpad", "misc2", "misc3", "misc4", "misc5", "misc6",
+                ];
+                let b = ev.0[20] as usize;
+                println!("button {} on {}", NAMES.get(b).copied().unwrap_or("?"), ev.which());
             }
         }
     }
