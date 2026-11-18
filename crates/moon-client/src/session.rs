@@ -46,6 +46,83 @@ pub struct Stats {
     pub frames_skipped: AtomicU64,
     /// Decoder in use (set once the session starts).
     pub decoder: Mutex<String>,
+    /// Host-to-display latency of the frames shown.
+    pub latency: Latency,
+}
+
+/// Latency of a shown frame, in parts: host (picture arrival to encoded, reported by the
+/// host in the frame header), network (half the control stream's round trip), and this
+/// client (first packet received to picture shown: rest of the frame's packets, decoding,
+/// waiting for the display). No clock synchronisation needed.
+#[derive(Default)]
+pub struct Latency(Mutex<LatencyState>);
+
+#[derive(Default)]
+struct LatencyState {
+    /// Frames received but not shown yet: (index, first packet, host latency in µs).
+    recent: std::collections::VecDeque<(u32, Instant, u32)>,
+    /// Current one-second window and the whole session: (frames, host µs, client µs).
+    window: (u64, u64, u64),
+    window_start: Option<Instant>,
+    total: (u64, u64, u64),
+    last: Option<LatencyAvg>,
+}
+
+/// Average latency over a period, in milliseconds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LatencyAvg {
+    pub host_ms: f64,
+    pub client_ms: f64,
+    /// Frames the averages are over.
+    pub frames: u64,
+}
+
+impl LatencyAvg {
+    fn of((n, host, client): (u64, u64, u64)) -> Option<Self> {
+        (n > 0).then(|| Self { host_ms: host as f64 / n as f64 / 1000.0, client_ms: client as f64 / n as f64 / 1000.0, frames: n })
+    }
+}
+
+impl Latency {
+    /// A complete frame came in (network thread).
+    pub fn received(&self, index: u32, first_packet: Instant, host_us: u32) {
+        let mut st = self.0.lock().unwrap();
+        st.recent.push_back((index, first_packet, host_us));
+        while st.recent.len() > 32 {
+            st.recent.pop_front();
+        }
+    }
+
+    /// Frame `index` was put on screen at `at`.
+    pub fn shown(&self, index: u32, at: Instant) {
+        let mut g = self.0.lock().unwrap();
+        let st = &mut *g;
+        let Some(pos) = st.recent.iter().position(|r| r.0 == index) else { return };
+        let (_, first, host) = st.recent[pos];
+        st.recent.drain(..=pos);
+        let client = at.saturating_duration_since(first).as_micros() as u64;
+        for w in [&mut st.window, &mut st.total] {
+            w.0 += 1;
+            w.1 += host as u64;
+            w.2 += client;
+        }
+        let start = *st.window_start.get_or_insert(at);
+        if at.saturating_duration_since(start) >= Duration::from_secs(1) {
+            st.last = LatencyAvg::of(st.window);
+            st.window = (0, 0, 0);
+            st.window_start = Some(at);
+        }
+    }
+
+    /// Average over the last second.
+    pub fn last(&self) -> Option<LatencyAvg> {
+        self.0.lock().unwrap().last
+    }
+
+    /// Average over the whole session.
+    pub fn overall(&self) -> Option<LatencyAvg> {
+        LatencyAvg::of(self.0.lock().unwrap().total)
+    }
 }
 
 impl Stats {
@@ -397,6 +474,7 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
             match ev {
                 Event::Frame(f) => {
                     stats.frames_received.fetch_add(1, Ordering::Relaxed);
+                    stats.latency.received(f.index, f.first_packet_at, f.host_latency_us);
                     stats.shards_recovered.store(r.stats.shards_recovered, Ordering::Relaxed);
                     let usable = match recovery {
                         Recovery::None => true,

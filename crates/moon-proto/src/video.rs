@@ -15,6 +15,7 @@
 //! `01 00 00 <frameType> <lastPayloadLen u16 LE> 00 00`.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::fec::ReedSolomon;
 
@@ -273,6 +274,10 @@ pub struct Frame {
     pub data: Vec<u8>,
     /// Number of data shards that had to be rebuilt with FEC.
     pub recovered_shards: usize,
+    /// Host processing latency from the frame header (microseconds; 0: not reported).
+    pub host_latency_us: u32,
+    /// When the first packet of this frame was received.
+    pub first_packet_at: Instant,
 }
 
 impl Frame {
@@ -292,6 +297,7 @@ struct Block {
 }
 
 struct PendingFrame {
+    first_at: Instant,
     timestamp: u32,
     ltr: bool,
     last_block: usize,
@@ -354,7 +360,7 @@ impl Reassembler {
         if data_n == 0 || shard >= MAX_SHARDS || block_idx > h.last_block_index() || payload.len() <= NV_HEADER_LEN {
             return;
         }
-        let pf = self.pending.entry(frame).or_insert_with(|| PendingFrame { timestamp: h.timestamp, ltr: h.extra_flags & EXTRA_FLAG_LTR_FRAME != 0, last_block: h.last_block_index(), blocks: (0..=h.last_block_index()).map(|_| None).collect() });
+        let pf = self.pending.entry(frame).or_insert_with(|| PendingFrame { first_at: Instant::now(), timestamp: h.timestamp, ltr: h.extra_flags & EXTRA_FLAG_LTR_FRAME != 0, last_block: h.last_block_index(), blocks: (0..=h.last_block_index()).map(|_| None).collect() });
         let Some(slot) = pf.blocks.get_mut(block_idx) else { return };
         let blk = slot.get_or_insert_with(|| Block { data_shards: data_n, total: total.max(data_n), shards: vec![None; MAX_SHARDS], received: 0, recovered: 0, done: false });
         if blk.done || shard >= blk.shards.len() || blk.shards[shard].is_some() {
@@ -405,6 +411,7 @@ impl Reassembler {
             return None;
         }
         let shard_len = pf.blocks[0].as_ref().unwrap().shards[0].as_ref().unwrap().len() - NV_HEADER_LEN;
+        let host_latency_us = u16::from_le_bytes([data[1], data[2]]) as u32 * 100;
         let frame_type = data[3];
         let idr = frame_type == FRAME_TYPE_IDR;
         let last_len = u16::from_le_bytes([data[4], data[5]]) as usize;
@@ -413,7 +420,7 @@ impl Reassembler {
             data.truncate(trimmed);
         }
         data.drain(..FRAME_HEADER_LEN);
-        Some(Frame { index, timestamp: pf.timestamp, idr, frame_type, ltr: pf.ltr, data, recovered_shards: recovered })
+        Some(Frame { index, timestamp: pf.timestamp, idr, frame_type, ltr: pf.ltr, data, recovered_shards: recovered, host_latency_us, first_packet_at: pf.first_at })
     }
 
     fn drain(&mut self, newest: u32, out: &mut Vec<Event>) {

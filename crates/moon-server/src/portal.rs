@@ -209,6 +209,17 @@ impl VideoSource for PipeWireSource {
         }
     }
 
+    fn pending_arrival(&mut self) -> Option<Instant> {
+        self.cap().ok()?.pw.lock().unwrap().pending_arrival()
+    }
+
+    fn wait_arrival_after(&mut self, after: Instant, deadline: Instant) -> bool {
+        match self.cap() {
+            Ok(c) => c.pw.lock().unwrap().wait_arrival_after(after, deadline),
+            Err(_) => false,
+        }
+    }
+
     fn source_fps(&self) -> Option<f64> {
         let f = self.cap().ok()?.pw.lock().unwrap().format()?;
         let (n, d) = f.max_framerate;

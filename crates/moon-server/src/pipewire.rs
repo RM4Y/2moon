@@ -771,6 +771,45 @@ impl PwCapture {
         Some(f(c))
     }
 
+    /// When the newest picture not used yet arrived (None: nothing new).
+    pub fn pending_arrival(&self) -> Option<Instant> {
+        if self.is_dmabuf() {
+            let g = self.shared.dma.lock().unwrap();
+            if g.seq > self.last_dma_seq && g.frame.is_some() { g.at } else { None }
+        } else {
+            let g = self.shared.latest.lock().unwrap();
+            g.as_ref().filter(|c| c.seq > self.last_seq).map(|c| c.at)
+        }
+    }
+
+    /// Wait until a picture not used yet that arrived at or after `after` is there,
+    /// at the latest until `deadline`; true if there is one.
+    pub fn wait_arrival_after(&self, after: Instant, deadline: Instant) -> bool {
+        loop {
+            if self.pending_arrival().is_some_and(|at| at >= after) {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let left = (deadline - now).min(Duration::from_millis(50));
+            if self.is_dmabuf() {
+                let g = self.shared.dma.lock().unwrap();
+                if g.at.is_some_and(|at| at >= after) && g.seq > self.last_dma_seq {
+                    continue;
+                }
+                drop(self.shared.dma_cond.wait_timeout(g, left).unwrap());
+            } else {
+                let g = self.shared.latest.lock().unwrap();
+                if g.as_ref().is_some_and(|c| c.at >= after && c.seq > self.last_seq) {
+                    continue;
+                }
+                drop(self.shared.cond.wait_timeout(g, left).unwrap());
+            }
+        }
+    }
+
     /// Arrival times of new pictures, for diagnostics.
     pub fn next_arrival(&mut self, timeout: Duration) -> Option<Instant> {
         if !self.wait_new(Instant::now() + timeout) {

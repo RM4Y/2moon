@@ -56,6 +56,10 @@ struct Exchange {
     size: [usize; 2],
     /// Frames uploaded to the GPU (= frames presented).
     presented: u64,
+    /// Frame index of each queued frame (same order as `queue`).
+    queue_index: VecDeque<u32>,
+    /// Frames put on screen since the last `take_shown`: (index, when).
+    shown: Vec<(u32, Instant)>,
 }
 
 /// Frames kept waiting for display at most.
@@ -92,6 +96,8 @@ impl VideoView {
         ex.interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
         ex.generation += 1;
         ex.queue.clear();
+        ex.queue_index.clear();
+        ex.shown.clear();
         ex.size = [0, 0];
         ex.presented = 0;
         ex.replaced = 0;
@@ -114,7 +120,7 @@ impl VideoView {
     }
 
     /// Called on the decode thread for every decoded picture.
-    pub fn put(&self, generation: u64, d: Decoded<'_>) {
+    pub fn put(&self, generation: u64, d: Decoded<'_>, index: u32) {
         let (pending, size) = match d {
             Decoded::Cpu(f) => {
                 let mut buf = {
@@ -153,10 +159,12 @@ impl VideoView {
         }
         ex.size = size;
         ex.queue.push_back(pending);
+        ex.queue_index.push_back(index);
         // More than two waiting: the display is really behind, drop the oldest
         // (bounded latency: at most one extra frame interval).
         while ex.queue.len() > MAX_QUEUED {
             ex.replaced += 1;
+            ex.queue_index.pop_front();
             match ex.queue.pop_front() {
                 Some(Pending::Cpu(old)) => ex.spare = Some(old),
                 Some(Pending::Cpu16(old)) => ex.spare16 = Some(old),
@@ -195,8 +203,19 @@ impl VideoView {
             return None;
         }
         let f = ex.queue.pop_front()?;
-        ex.last_present = Some(Instant::now());
+        let now = Instant::now();
+        ex.last_present = Some(now);
+        if let Some(i) = ex.queue_index.pop_front() {
+            if ex.shown.len() < 64 {
+                ex.shown.push((i, now));
+            }
+        }
         Some(f)
+    }
+
+    /// Frames put on screen since the last call: (frame index, when).
+    pub fn take_shown(&self) -> Vec<(u32, Instant)> {
+        std::mem::take(&mut self.ex.lock().unwrap().shown)
     }
 
     pub fn size(&self) -> [usize; 2] {
@@ -877,8 +896,8 @@ mod pacing_tests {
         let v = VideoView::default();
         let g = v.reset(60);
         let f = I420Frame::new(16, 16);
-        v.put(g, Decoded::Cpu(&f));
-        v.put(g, Decoded::Cpu(&f));
+        v.put(g, Decoded::Cpu(&f), 1);
+        v.put(g, Decoded::Cpu(&f), 2);
         assert!(v.take_due().is_some(), "first frame shown at once");
         assert!(v.take_due().is_none(), "second frame waits for its turn");
         let wait = v.next_due().expect("a frame is waiting");
@@ -888,7 +907,7 @@ mod pacing_tests {
         assert_eq!(v.replaced(), 0);
         // A real backlog stays bounded.
         for _ in 0..5 {
-            v.put(g, Decoded::Cpu(&f));
+            v.put(g, Decoded::Cpu(&f), 0);
         }
         assert_eq!(v.replaced(), 3);
     }

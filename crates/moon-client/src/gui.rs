@@ -593,8 +593,8 @@ impl GuiApp {
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
         let generation = self.video.reset(s.fps);
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
-        let sink = Box::new(move |f: crate::session::Decoded<'_>, _index: u32| {
-            view.put(generation, f);
+        let sink = Box::new(move |f: crate::session::Decoded<'_>, index: u32| {
+            view.put(generation, f, index);
             sink_ctx.request_repaint();
         });
         let c = client_for(&self.store, &h);
@@ -627,6 +627,10 @@ impl GuiApp {
             let c = client_for(&self.store, &st.host);
             let summary = st.session.stats.summary();
             tracing::info!("stream ended: {summary}");
+            if let Some(l) = st.session.stats.latency.overall() {
+                let net = st.session.control.rtt_ms() as f64 / 2.0;
+                tracing::info!("latency: {:.1} ms on average over {} frames = host {:.1} + network {:.1} + client {:.1}", l.host_ms + net + l.client_ms, l.frames, l.host_ms, net, l.client_ms);
+            }
             std::thread::spawn(move || st.session.stop());
             self.video.reset(60);
             if quit {
@@ -1682,6 +1686,11 @@ impl GuiApp {
             let fmt = |font, color| egui::TextFormat { font_id: font, color, ..Default::default() };
             job.append(&format!("{:.0} fps", st.fps_window.2), 0.0, fmt(th::mono_bold(13.0), th::ACCENT));
             job.append(&format!(" affichées · {} · non affichées {}{mic}", short_stats(&st.session.stats), self.video.replaced()), 0.0, fmt(th::mono(13.0), th::TEXT));
+            if let Some(l) = st.session.stats.latency.last() {
+                let net = st.session.control.rtt_ms() as f64 / 2.0;
+                job.append(&format!("\nlatence {:.1} ms", l.host_ms + net + l.client_ms), 0.0, fmt(th::mono_bold(13.0), th::ACCENT));
+                job.append(&format!(" = hôte {:.1} + réseau {:.1} + client {:.1} (réception, décodage, affichage)", l.host_ms, net, l.client_ms), 0.0, fmt(th::mono(13.0), th::TEXT));
+            }
             let p = ui.painter();
             let g = p.layout_job(job);
             let bg = Rect::from_min_size(rect.left_top() + vec2(12.0, 12.0), g.size() + vec2(28.0, 20.0));
@@ -1695,6 +1704,10 @@ impl GuiApp {
         let over_video = ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| video.contains(p));
         if st.captured || (over_video && size[0] > 0) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+
+        for (index, at) in self.video.take_shown() {
+            st.session.stats.latency.shown(index, at);
         }
 
         // Input forwarding.

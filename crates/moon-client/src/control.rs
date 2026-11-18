@@ -3,7 +3,9 @@
 //! receiving host events (termination, rumble, HDR...).
 
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -36,7 +38,7 @@ enum Cmd {
 }
 
 #[derive(Clone)]
-pub struct ControlSender(Sender<Cmd>);
+pub struct ControlSender(Sender<Cmd>, Arc<AtomicU32>);
 
 impl ControlSender {
     pub fn send(&self, msg_type: u16, payload: Vec<u8>) {
@@ -61,6 +63,11 @@ impl ControlSender {
         let mut p = vec![0u8; 8];
         p[0..4].copy_from_slice(&index.to_le_bytes());
         let _ = self.0.send(Cmd::Send { channel: CHANNEL_URGENT, msg_type: msg::LTR_FRAME_ACK, payload: p, reliable: true });
+    }
+
+    /// Round trip time to the host as ENet measures it (milliseconds, 0: unknown yet).
+    pub fn rtt_ms(&self) -> u32 {
+        self.1.load(Ordering::Relaxed)
     }
 
     pub fn input(&self, ev: &input::Event) {
@@ -96,17 +103,19 @@ pub fn connect(addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool, rum
     socket.set_nonblocking(true)?;
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     let (ev_tx, ev_rx) = mpsc::channel::<ControlEvent>();
+    let rtt = Arc::new(AtomicU32::new(0));
+    let rtt2 = rtt.clone();
     std::thread::Builder::new().name("control".into()).spawn(move || {
-        if let Err(e) = run(socket, addr, connect_data, key, v2, cmd_rx, ev_tx.clone(), rumble) {
+        if let Err(e) = run(socket, addr, connect_data, key, v2, cmd_rx, ev_tx.clone(), rumble, rtt2) {
             warn!("control stream error: {e:#}");
         }
         let _ = ev_tx.send(ControlEvent::Disconnected);
     })?;
-    Ok(ControlClient { sender: ControlSender(cmd_tx), events: ev_rx })
+    Ok(ControlClient { sender: ControlSender(cmd_tx, rtt), events: ev_rx })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool, cmds: Receiver<Cmd>, events: Sender<ControlEvent>, rumble: Sender<crate::gamepad::Rumble>) -> Result<()> {
+fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2: bool, cmds: Receiver<Cmd>, events: Sender<ControlEvent>, rumble: Sender<crate::gamepad::Rumble>, rtt: Arc<AtomicU32>) -> Result<()> {
     let mut host = enet::Host::new(socket, enet::HostSettings { peer_limit: 1, channel_limit: CHANNEL_COUNT, ..Default::default() })
         .map_err(|e| anyhow::anyhow!("enet host: {e:?}"))?;
     let peer_id = host.connect(addr, CHANNEL_COUNT, connect_data).map_err(|e| anyhow::anyhow!("enet connect: {e:?}"))?.id();
@@ -153,6 +162,7 @@ fn run(socket: UdpSocket, addr: SocketAddr, connect_data: u32, key: [u8; 16], v2
             let ping = cipher.seal(msg::PERIODIC_PING, &[0x04, 0, 0, 0, 0, 0, 0, 0]);
             let _ = host.peer_mut(peer_id).send(CHANNEL_GENERIC, &enet::Packet::unreliable(ping.as_slice()));
             last_ping = Instant::now();
+            rtt.store(host.peer_mut(peer_id).round_trip_time().as_millis() as u32, Ordering::Relaxed);
         }
         host.flush();
         // Wait for the next input (sent as soon as it arrives) or ~1 ms to service ENet.

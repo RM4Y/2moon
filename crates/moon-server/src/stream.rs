@@ -267,7 +267,8 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     let (tx, rx) = std::sync::mpsc::sync_channel::<(SocketAddr, Vec<Vec<u8>>)>(2);
     let sender = {
         let sock = sock.try_clone()?;
-        std::thread::Builder::new().name("video-pacer".into()).spawn(move || pacer(sock, rx, period))?
+        let kbps = p.bitrate_kbps;
+        std::thread::Builder::new().name("video-pacer".into()).spawn(move || pacer(sock, rx, period, kbps))?
     };
     // GPU path, as Sunshine: DMA-BUF capture -> OpenGL conversion -> NVENC CUDA input.
     // Declared after `enc` so it is dropped first (it uses the encoder's CUDA context).
@@ -290,33 +291,39 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     let start = Instant::now();
     let mut index: u32 = 0;
     info!("video: {}x{}@{} {} kbps {} from {} ({path}) via {}", p.width, p.height, fps, p.bitrate_kbps, if enc.hdr10() { "10-bit HDR10" } else if enc.yuv444() { "4:4:4" } else { "4:2:0" }, src.name(), enc.name());
-    // Like Sunshine: when the compositor may send pictures faster than the client's
-    // rate (KWin's virtual output at 120 Hz for a 60 fps stream), sample the newest
-    // one on a steady clock; otherwise encode each new picture as soon as it
-    // arrives (no duplicated or skipped frames). A static screen is re-sent a few
-    // times a second so losses still get repaired.
-    let paced = src.source_fps().is_some_and(|r| r == 0.0 || r > fps as f64 * 1.05);
-    info!("video pacing: {}", if paced { format!("steady {fps} fps clock, newest picture (compositor up to {:.0} fps)", src.source_fps().unwrap_or(0.0)) } else { "each picture as it arrives".into() });
+    // Each new picture is encoded as soon as it arrives (Sunshine samples on a steady
+    // clock instead, which makes a picture wait half a frame interval on average).
+    // When the compositor may send pictures faster than the client's rate (KWin's
+    // virtual output at 120 Hz for a 60 fps stream), at most `fps` pictures a second
+    // are encoded: one that comes too soon after the last encode waits for the next.
+    // A static screen is re-sent a few times a second so losses still get repaired.
+    let fast_source = src.source_fps().is_some_and(|r| r == 0.0 || r > fps as f64 * 1.05);
+    info!("video pacing: each picture as it arrives{}", if fast_source { format!(", at most {fps} per second (compositor up to {:.0} fps)", src.source_fps().unwrap_or(0.0)) } else { String::new() });
     let idle_repeat = Duration::from_millis(100).max(period);
-    let mut next = Instant::now();
     let mut last_encode = Instant::now() - period;
     let mut have_picture = false;
     let mut generation = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
-        let new = if paced {
-            next += period;
+        let new = if fast_source {
+            // Never more than ~fps encodes a second (a little slack for arrival jitter).
+            let earliest = last_encode + period.mul_f64(0.95);
             let now = Instant::now();
-            if now > next + period * 4 {
-                next = now + period; // fell far behind: resync instead of bursting
+            if earliest > now {
+                std::thread::sleep(earliest - now);
             }
-            if next > now {
-                std::thread::sleep(next - now);
+            // A picture from the first part of the interval is the compositor's extra
+            // one: prefer the next, fresher picture if it comes within the interval.
+            let fresh = last_encode + period.mul_f64(0.6);
+            if src.wait_arrival_after(fresh, last_encode + period.mul_f64(1.25)) || src.pending_arrival().is_some() {
+                true
+            } else {
+                // Nothing new: wait for the next picture, re-sending the last one now and then.
+                let new = src.wait_frame(last_encode + idle_repeat, last_encode + idle_repeat);
+                if !new && have_picture && last_encode.elapsed() < idle_repeat {
+                    continue;
+                }
+                new
             }
-            let new = src.wait_frame(next, next);
-            if !new && have_picture && last_encode.elapsed() < idle_repeat {
-                continue;
-            }
-            new
         } else {
             let earliest = last_encode + period.mul_f64(0.75);
             let now = Instant::now();
@@ -331,6 +338,8 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         last_encode = Instant::now();
         let Some(dest) = peer.get() else { continue };
         let t0 = Instant::now();
+        // Host latency reported to the client: from the picture's arrival, not just the encode.
+        let arrival = if new { src.pending_arrival().filter(|a| *a <= t0) } else { None }.unwrap_or(t0);
         let use_gpu = gpu.is_some() && src.is_dmabuf();
         if use_gpu {
             if new {
@@ -392,7 +401,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         }
         index = index.wrapping_add(1);
         let elapsed = t0.elapsed();
-        pk.processing_latency = (elapsed.as_micros() / 100).min(u16::MAX as u128) as u16;
+        pk.processing_latency = (arrival.elapsed().as_micros() / 100).min(u16::MAX as u128) as u16;
         let is_idr = e.idr;
         let ftype = if is_idr { FRAME_TYPE_IDR } else { frame_type.unwrap_or(FRAME_TYPE_P) };
         let pkts = pk.packetize_typed(index, ts, ftype, e.data);
@@ -440,18 +449,26 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
     Ok(())
 }
 
-/// Packet pacer: spreads each frame's packets over a fraction of the frame
-/// interval instead of bursting them, which avoids overflowing switch / Wi-Fi /
-/// client socket buffers at high bitrates and frame rates.
-fn pacer(sock: UdpSocket, rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<Vec<u8>>)>, period: Duration) {
+/// Packet pacer: sends each frame at a steady rate well above the stream's bitrate
+/// instead of in one burst, which avoids overflowing switch / Wi-Fi / client socket
+/// buffers, without holding the frame back: the client can only decode it once the
+/// last packet is in. (Spreading every frame over a fixed share of the frame interval
+/// delayed a 40 KB frame by ~10 ms at 60 fps where 1 ms is enough.)
+fn pacer(sock: UdpSocket, rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<Vec<u8>>)>, period: Duration, bitrate_kbps: u32) {
     const BATCH: usize = 8;
-    // Small frames go out at once; larger ones are spread over 60% of the interval.
+    // Never spread a frame over more than 60% of the interval (huge IDR frames).
     let window = period.mul_f64(0.6);
+    // Sending rate: 300 Mbit/s, or 3x the stream's bitrate if higher (MOON_PACING_MBPS overrides).
+    let mbps = std::env::var("MOON_PACING_MBPS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0).unwrap_or_else(|| (bitrate_kbps as f64 * 3.0 / 1000.0).max(300.0));
+    let bytes_per_sec = mbps * 1e6 / 8.0;
+    info!("video packet pacing: {mbps:.0} Mbit/s, at most {:.1} ms per frame", window.as_secs_f64() * 1000.0);
     while let Ok((dest, pkts)) = rx.recv() {
         let n = pkts.len();
         let start = Instant::now();
+        let mut bytes = 0usize;
         for (i, chunk) in pkts.chunks(BATCH).enumerate() {
             for pkt in chunk {
+                bytes += pkt.len();
                 if let Err(e) = sock.send_to(pkt, dest) {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
                         debug!("video send: {e}");
@@ -460,7 +477,8 @@ fn pacer(sock: UdpSocket, rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<Vec<u8>
             }
             let sent = ((i + 1) * BATCH).min(n);
             if n > BATCH * 2 && sent < n {
-                let due = start + window.mul_f64(sent as f64 / n as f64);
+                let at_rate = Duration::from_secs_f64(bytes as f64 / bytes_per_sec);
+                let due = start + at_rate.min(window.mul_f64(sent as f64 / n as f64));
                 let now = Instant::now();
                 if due > now + Duration::from_micros(100) {
                     std::thread::sleep(due - now);

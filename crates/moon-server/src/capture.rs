@@ -30,6 +30,17 @@ pub trait VideoSource: Send {
         true
     }
 
+    /// When the newest picture not used yet arrived (None: nothing new, or not known).
+    fn pending_arrival(&mut self) -> Option<Instant> {
+        None
+    }
+
+    /// Wait for a picture not used yet that arrived at or after `after`, at the latest
+    /// until `deadline`; true if there is one. Sources without arrival times: like `wait_frame`.
+    fn wait_arrival_after(&mut self, _after: Instant, deadline: Instant) -> bool {
+        self.wait_frame(deadline, deadline)
+    }
+
     /// Highest frame rate the source may deliver (`Some(0.0)`: variable, unknown).
     fn source_fps(&self) -> Option<f64> {
         None
