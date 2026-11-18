@@ -33,6 +33,17 @@ use tracing::{info, warn};
 use crate::state::Host;
 
 const PAGE: &str = include_str!("admin.html");
+
+/// Static files of the admin page (same look as the client): fonts, moon, stars.
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    ("moon.webp", "image/webp", include_bytes!("../assets/moon.webp")),
+    ("stars.webp", "image/webp", include_bytes!("../assets/stars.webp")),
+    ("inter.ttf", "font/ttf", include_bytes!("../../moon-client/assets/fonts/Inter-Regular.ttf")),
+    ("inter-semibold.ttf", "font/ttf", include_bytes!("../../moon-client/assets/fonts/Inter-SemiBold.ttf")),
+    ("space-grotesk-bold.ttf", "font/ttf", include_bytes!("../../moon-client/assets/fonts/SpaceGrotesk-Bold.ttf")),
+    ("jetbrains-mono.ttf", "font/ttf", include_bytes!("../../moon-client/assets/fonts/JetBrainsMono-Regular.ttf")),
+    ("jetbrains-mono-bold.ttf", "font/ttf", include_bytes!("../../moon-client/assets/fonts/JetBrainsMono-Bold.ttf")),
+];
 const COOKIE: &str = "moon_admin";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 const PBKDF2_ROUNDS: u32 = 200_000;
@@ -205,6 +216,16 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
     let method = req.method().clone();
     if method == Method::GET && (path == "/" || path == "/index.html") {
         return resp(StatusCode::OK, "text/html; charset=utf-8", PAGE);
+    }
+    if let Some(name) = path.strip_prefix("/assets/").filter(|_| method == Method::GET) {
+        return match ASSETS.iter().find(|a| a.0 == name) {
+            Some((_, ctype, bytes)) => {
+                let mut r = resp(StatusCode::OK, ctype, Bytes::from_static(bytes));
+                r.headers_mut().insert(hyper::header::CACHE_CONTROL, "public, max-age=86400".parse().unwrap());
+                r
+            }
+            None => resp(StatusCode::NOT_FOUND, "text/plain", "not found"),
+        };
     }
     if !path.starts_with("/api/") {
         return resp(StatusCode::NOT_FOUND, "text/plain", "not found");
