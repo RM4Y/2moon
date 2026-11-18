@@ -135,7 +135,6 @@ struct Stream {
     captured: bool,
     fullscreen: bool,
     pressed: HashSet<u16>,
-    mods: egui::Modifiers,
     /// When the microphone was last (un)muted, to show a short notice.
     mic_toast: Option<Instant>,
     /// (window start, frames presented at start, fps over the last window)
@@ -163,7 +162,7 @@ pub struct GuiApp {
     show_add: bool,
     /// Settings: section to scroll to, and where each section was last frame.
     settings_jump: Option<usize>,
-    section_tops: [f32; 5],
+    section_tops: [f32; 4],
     /// Height of the pairing / connecting dialog last frame (to place it).
     dialog_h: f32,
     /// Microphones of this machine, listed when the settings open.
@@ -175,8 +174,6 @@ pub struct GuiApp {
     /// System shortcut capture for this window (None: not possible here / not set up yet).
     keygrab: Option<crate::keygrab::KeyGrab>,
     keygrab_tried: bool,
-    /// Controllers and their setup, while the settings are open.
-    pads: Option<crate::padmap::Service>,
 }
 
 fn cover_key(h: &HostRef, app_id: u32) -> String {
@@ -238,14 +235,13 @@ impl GuiApp {
             look,
             show_add: false,
             settings_jump: None,
-            section_tops: [f32::MAX; 5],
+            section_tops: [f32::MAX; 4],
             dialog_h: 520.0,
             mics: None,
             confirm_forget: None,
             covers: HashMap::new(),
             keygrab: None,
             keygrab_tried: false,
-            pads: None,
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -514,7 +510,6 @@ impl GuiApp {
                             captured: false,
                             fullscreen,
                             pressed: HashSet::new(),
-                            mods: egui::Modifiers::NONE,
                             mic_toast: None,
                             fps_window: (Instant::now(), 0, 0.0),
                         });
@@ -563,15 +558,6 @@ impl eframe::App for GuiApp {
             *self.targets.lock().unwrap() = list;
         }
 
-        // Controllers are read here only while the settings are open (a stream reads its own).
-        if matches!(self.screen, Screen::Settings) {
-            if self.pads.is_none() {
-                let c = ctx.clone();
-                self.pads = Some(crate::padmap::Service::start(move || c.request_repaint()));
-            }
-        } else {
-            self.pads = None;
-        }
         if matches!(self.screen, Screen::Streaming) {
             if !self.keygrab_tried {
                 self.keygrab_tried = true;
@@ -747,7 +733,7 @@ fn toggle_row(ui: &mut egui::Ui, last: bool, label: &str, desc: &str, value: &mu
 }
 
 /// A settings section: panel with a phase glyph + title header. Records where it is for the side nav.
-fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 5], jump: &mut Option<usize>, add: impl FnOnce(&mut egui::Ui)) {
+fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 4], jump: &mut Option<usize>, add: impl FnOnce(&mut egui::Ui)) {
     let r = th::panel()
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -773,9 +759,7 @@ fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 5], jump
     ui.add_space(32.0);
 }
 
-const SECTIONS: [&str; 5] = ["Vidéo", "Audio et micro", "Affichage", "Manettes", "Session"];
-/// Moon phase of each section in the side navigation, new moon to full moon.
-const PHASES: [u8; 5] = [0, 1, 2, 4, 3];
+const SECTIONS: [&str; 4] = ["Vidéo", "Audio et micro", "Affichage", "Session"];
 
 impl GuiApp {
     fn header_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
@@ -1200,7 +1184,7 @@ impl GuiApp {
                 } else if resp.hovered() {
                     p.rect_filled(r, 10.0, th::white(0.04));
                 }
-                th::paint_phase(p, pos2(r.left() + 20.0, r.center().y), 6.5, PHASES[i], if on { th::ACCENT } else { th::FAINT });
+                th::paint_phase(p, pos2(r.left() + 20.0, r.center().y), 6.5, i as u8, if on { th::ACCENT } else { th::FAINT });
                 let col = if on || resp.hovered() { th::TEXT } else { th::MUTED };
                 p.text(pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, *label, th::body(15.0), col);
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -1217,8 +1201,6 @@ impl GuiApp {
         let scroll = Rect::from_min_max(pos2(main_left, body.top()), body.max);
         let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(scroll).layout(Layout::top_down(Align::Min)));
         let mics = self.mics.get_or_insert_with(moon_media::audio_io::input_devices).clone();
-        let pads_view = self.pads.as_ref().map(|p| p.view.lock().unwrap().clone()).unwrap_or_default();
-        let mut pad_cmds: Vec<crate::padmap::Cmd> = Vec::new();
         let (s, tops, jump) = (&mut self.settings, &mut self.section_tops, &mut self.settings_jump);
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(&mut sui, |ui| {
             ui.set_width(main_w);
@@ -1251,8 +1233,7 @@ impl GuiApp {
                 toggle_row(ui, false, "Capturer les raccourcis système", "Touche Windows, Alt+Tab, Alt+F4… vont à l'hôte quand le stream a le focus.", &mut s.capture_shortcuts);
                 toggle_row(ui, true, "Synchro verticale (V-Sync)", "Pas de déchirement, mais plus de latence · appliqué au prochain démarrage.", &mut s.vsync);
             });
-            section(ui, 3, SECTIONS[3], tops, jump, |ui| controllers_ui(ui, &pads_view, &mut pad_cmds));
-            section(ui, 4, SECTIONS[4], tops, jump, |ui| {
+            section(ui, 3, SECTIONS[3], tops, jump, |ui| {
                 toggle_row(ui, true, "Quitter l'application sur l'hôte", "En fermant le stream, l'application lancée sur l'hôte est fermée aussi.", &mut s.quit_app_on_exit);
             });
 
@@ -1279,11 +1260,6 @@ impl GuiApp {
             });
             ui.add_space(48.0);
         });
-        if let Some(p) = self.pads.as_ref() {
-            for c in pad_cmds {
-                p.send(c);
-            }
-        }
         if format!("{:?}", before) != format!("{:?}", self.settings) {
             self.settings.save(&self.store);
         }
@@ -1391,82 +1367,6 @@ fn mic_choice(ui: &mut egui::Ui, s: &mut Settings, mics: &[moon_media::audio_io:
         if on {
             s.mic_device = dev;
         }
-    }
-}
-
-/// Controllers: what is plugged in, how it is understood, live view, guided setup.
-fn controllers_ui(ui: &mut egui::Ui, v: &crate::padmap::View, cmds: &mut Vec<crate::padmap::Cmd>) {
-    use crate::padmap::{Cmd, Known, STEPS};
-    if let Some(w) = &v.wizard {
-        let name = v.pads.iter().find(|p| p.id == w.pad).map(|p| p.name.as_str()).unwrap_or("Manette");
-        row(ui, false, |ui| {
-            th::eyebrow(ui, &format!("Configuration · {name} · étape {} sur {}", (w.step + 1).min(STEPS.len()), STEPS.len()), th::ACCENT);
-            ui.add_space(6.0);
-            let prompt = STEPS.get(w.step).map(|s| s.1).unwrap_or("Enregistrement…");
-            th::text(ui, prompt, th::semibold(20.0), th::TEXT);
-            ui.add_space(6.0);
-            th::text(ui, "Une action à la fois : appuie, puis relâche. Rien ne se passe ? Appuie plus franchement, ou « Passer » si ta manette n'a pas ce contrôle.", th::body(14.0), th::MUTED);
-            ui.add_space(14.0);
-            // Progress.
-            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(520.0), 6.0), Sense::hover());
-            ui.painter().rect_filled(r, 3.0, th::SURFACE2);
-            let done = Rect::from_min_size(r.min, vec2(r.width() * w.step as f32 / STEPS.len() as f32, r.height()));
-            ui.painter().rect_filled(done, 3.0, th::ACCENT);
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                if th::button(ui, th::Btn::Outline, None, "Passer", None, true).clicked() {
-                    cmds.push(Cmd::Skip);
-                }
-                if th::button(ui, th::Btn::Light, None, "Annuler", None, true).clicked() {
-                    cmds.push(Cmd::Cancel);
-                }
-            });
-        });
-    }
-    if v.pads.is_empty() {
-        row(ui, v.message.is_none(), |ui| {
-            th::text(ui, "Aucune manette détectée", th::semibold(16.0), th::TEXT);
-            th::text(ui, "Branche-la en USB ou connecte-la en Bluetooth : elle apparaît ici. Xbox, PlayStation, 8BitDo, Switch Pro… toutes sont envoyées à l'hôte comme une manette Xbox 360.", th::body(14.0), th::MUTED);
-        });
-    }
-    let n = v.pads.len();
-    for (i, p) in v.pads.iter().enumerate() {
-        let last = i + 1 == n && v.message.is_none();
-        row(ui, last, |ui| {
-            let (status, col) = match p.known {
-                Known::Profile => ("Configurée par toi", th::ACCENT),
-                Known::Sdl => ("Reconnue automatiquement", th::TEXT2),
-                Known::Guessed => ("Inconnue : disposition standard supposée", th::WARN),
-            };
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    th::text(ui, &p.name, th::semibold(16.0), th::TEXT);
-                    th::text(ui, status, th::body(13.0), col);
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let busy = v.wizard.is_some();
-                    if p.known == Known::Profile && th::button(ui, th::Btn::Outline, None, "Réglage d'origine", None, !busy).clicked() {
-                        cmds.push(Cmd::Reset(p.id));
-                    }
-                    if th::button(ui, th::Btn::Accent, None, "Configurer", None, !busy).clicked() {
-                        cmds.push(Cmd::Configure(p.id));
-                    }
-                });
-            });
-            ui.add_space(12.0);
-            // During the setup, the control to use pulses on the drawing.
-            let ask = v.wizard.as_ref().filter(|w| w.pad == p.id).and_then(|w| STEPS.get(w.step)).map(|s| s.0);
-            if ask.is_some() {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
-            }
-            let t = ui.input(|i| i.time);
-            crate::padview::paint(ui, &p.state, ask, t);
-        });
-    }
-    if let Some(m) = &v.message {
-        row(ui, true, |ui| {
-            th::text(ui, m, th::body(14.0), th::TEXT2);
-        });
     }
 }
 
@@ -1671,7 +1571,9 @@ impl GuiApp {
                             _ => {}
                         }
                     }
-                    sync_modifiers(st, &ctl, modifiers);
+                    // Like Moonlight: every key by its physical position, modifiers
+                    // included (left / right Shift, Ctrl, Alt, AltGr, Windows), and no
+                    // auto-repeat (the host repeats held keys itself).
                     if repeat {
                         continue;
                     }
@@ -1684,7 +1586,6 @@ impl GuiApp {
                         ctl.input(&In::Key { down: pressed, vk, modifiers: mod_bits(modifiers) });
                     }
                 }
-                egui::Event::ModifiersChanged(m) => sync_modifiers(st, &ctl, m),
                 egui::Event::PointerMoved(pos) if !st.captured && size[0] > 0 => {
                     if video.contains(pos) {
                         let x = ((pos.x - video.min.x) / video.width() * size[0] as f32) as i16;
@@ -1754,26 +1655,10 @@ fn mod_bits(m: egui::Modifiers) -> u8 {
     (m.shift as u8) * inp::MOD_SHIFT | (m.ctrl as u8) * inp::MOD_CTRL | (m.alt as u8) * inp::MOD_ALT | (m.mac_cmd as u8) * inp::MOD_META
 }
 
-/// egui does not emit key events for modifier keys: synthesize them from modifier changes.
-fn sync_modifiers(st: &mut Stream, ctl: &ControlSender, m: egui::Modifiers) {
-    for (was, now, vk) in [(st.mods.shift, m.shift, 0xA0u16), (st.mods.ctrl, m.ctrl, 0xA2), (st.mods.alt, m.alt, 0xA4)] {
-        if was != now {
-            if now {
-                st.pressed.insert(vk);
-            } else {
-                st.pressed.remove(&vk);
-            }
-            ctl.input(&In::Key { down: now, vk, modifiers: mod_bits(m) });
-        }
-    }
-    st.mods = m;
-}
-
 fn release_all(st: &mut Stream, ctl: &ControlSender) {
     for vk in st.pressed.drain() {
         ctl.input(&In::Key { down: false, vk, modifiers: 0 });
     }
-    st.mods = egui::Modifiers::NONE;
 }
 
 /// Map an egui key (physical position when available) to a Windows virtual-key code.
@@ -1787,7 +1672,7 @@ fn egui_key_to_vk(k: Key) -> Option<u16> {
     if let Some(i) = digits.iter().position(|&c| c == k) {
         return Some(0x30 + i as u16);
     }
-    let fkeys = [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18, F19, F20];
+    let fkeys = [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18, F19, F20, F21, F22, F23, F24];
     if let Some(i) = fkeys.iter().position(|&c| c == k) {
         return Some(0x70 + i as u16);
     }
@@ -1818,8 +1703,25 @@ fn egui_key_to_vk(k: Key) -> Option<u16> {
         Backslash | Pipe => 0xDC,
         CloseBracket | CloseCurlyBracket => 0xDD,
         Quote => 0xDE,
+        // Modifiers, left and right apart (AltGr is the right Alt).
+        ShiftLeft => 0xA0,
+        ShiftRight => 0xA1,
+        ControlLeft => 0xA2,
+        ControlRight => 0xA3,
+        AltLeft => 0xA4,
+        AltRight => 0xA5,
         SuperLeft => 0x5B,
         SuperRight => 0x5C,
+        Menu => 0x5D,
+        // Lock and system keys.
+        CapsLock => 0x14,
+        NumLock => 0x90,
+        ScrollLock => 0x91,
+        PrintScreen => 0x2C,
+        Pause => 0x13,
+        Clear => 0x0C,
+        // `<>` left of W on AZERTY / ISO keyboards.
+        IntlBackslash => 0xE2,
         _ => return None,
     })
 }
@@ -1827,6 +1729,20 @@ fn egui_key_to_vk(k: Key) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::Settings;
+
+    #[test]
+    fn keys_like_moonlight() {
+        use super::egui_key_to_vk as vk;
+        use eframe::egui::Key;
+        assert_eq!(vk(Key::AltRight), Some(0xA5)); // AltGr
+        assert_eq!(vk(Key::AltLeft), Some(0xA4));
+        assert_eq!(vk(Key::ShiftRight), Some(0xA1));
+        assert_eq!(vk(Key::ControlRight), Some(0xA3));
+        assert_eq!(vk(Key::IntlBackslash), Some(0xE2)); // < > on AZERTY
+        assert_eq!(vk(Key::CapsLock), Some(0x14));
+        assert_eq!(vk(Key::F24), Some(0x87));
+        assert_eq!(vk(Key::Q), Some(0x51));
+    }
 
     #[test]
     fn suggested_bitrate_follows_options() {

@@ -104,16 +104,17 @@ fn ignored(p: &Pad<'_>) -> bool {
 
 /// Steam Input's virtual pad: a mirror of a physical controller while Steam runs.
 fn is_steam_virtual(p: &Pad<'_>) -> bool {
-    p.name().contains("Steam Virtual") || p.os_name().contains("Steam Virtual")
+    (p.vendor_id() == Some(0x28de) && p.product_id() == Some(0x11ff)) || p.name().contains("Steam Virtual") || p.os_name().contains("Steam Virtual")
 }
 
-/// Controllers to forward: real ones; Steam's virtual pads only when there is
-/// no real controller (the client was started from Steam with Steam Input on),
-/// otherwise each controller would reach the host twice.
+/// Controllers to forward, like SDL (and so Moonlight): Steam Input's virtual
+/// pads are ignored unless Steam launched us and asks for them
+/// (`SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1`). Otherwise, with Steam
+/// open on this computer, the host would get a controller nobody is holding,
+/// and games switch to controller mode and ignore the keyboard.
 fn forwarded(gilrs: &Gilrs) -> Vec<GamepadId> {
-    let pads: Vec<(GamepadId, bool)> = gilrs.gamepads().filter(|(_, p)| !ignored(p)).map(|(id, p)| (id, is_steam_virtual(&p))).collect();
-    let has_real = pads.iter().any(|(_, steam)| !steam);
-    pads.into_iter().filter(|(_, steam)| !(has_real && *steam)).map(|(id, _)| id).collect()
+    let steam_ok = std::env::var("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD").is_ok_and(|v| v == "1");
+    gilrs.gamepads().filter(|(_, p)| !ignored(p) && (steam_ok || !is_steam_virtual(p))).map(|(id, _)| id).collect()
 }
 
 impl Slots {
@@ -152,8 +153,6 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
             return;
         }
     };
-    // Profiles made with the setup in the settings (any controller, any mode).
-    let profiles = crate::padmap::Profiles::load();
     let mut slots = Slots::default();
     let mut sent: HashMap<u16, Gamepad> = HashMap::new();
     let mut effects: HashMap<u16, gilrs::ff::Effect> = HashMap::new();
@@ -161,7 +160,7 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
     for id in forwarded(&gilrs) {
         if let Some(i) = slots.assign(id) {
             let p = gilrs.gamepad(id);
-            info!("controller {}: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p, &profiles));
+            info!("controller {}: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p));
         }
     }
     while !stop.load(Ordering::Relaxed) {
@@ -174,7 +173,7 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
                     if forwarded(&gilrs).contains(&ev.id) {
                         if let Some(i) = slots.assign(ev.id) {
                             let p = gilrs.gamepad(ev.id);
-                            info!("controller {} connected: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p, &profiles));
+                            info!("controller {} connected: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p));
                         }
                     }
                 }
@@ -225,7 +224,7 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
         for id in keep {
             let p = gilrs.gamepad(id);
             let Some(i) = slots.assign(id) else { continue };
-            let mut g = crate::padmap::state(&p, &profiles);
+            let mut g = state_of(&p);
             g.index = i;
             g.active_mask = mask | 1 << i;
             if sent.get(&i) != Some(&g) {
@@ -241,13 +240,11 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
 }
 
 /// How a controller is mapped, for the logs.
-fn describe(p: &Pad<'_>, profiles: &crate::padmap::Profiles) -> String {
-    if profiles.get(p).is_some() {
-        "profile from the setup".into()
-    } else if p.mapping_source() == gilrs::MappingSource::SdlMappings {
+fn describe(p: &Pad<'_>) -> String {
+    if p.mapping_source() == gilrs::MappingSource::SdlMappings {
         "SDL mapping".into()
     } else {
-        format!("no mapping, standard layout assumed, id {}", crate::padmap::uuid_of(p))
+        "no SDL mapping, standard layout assumed".into()
     }
 }
 
