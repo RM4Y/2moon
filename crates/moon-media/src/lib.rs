@@ -5,6 +5,8 @@ pub mod decoder;
 pub mod encoder;
 pub mod ffenc;
 pub mod frame;
+#[cfg(target_os = "linux")]
+pub mod glconv;
 pub mod hdr;
 pub mod nvdec;
 #[cfg(target_os = "linux")]

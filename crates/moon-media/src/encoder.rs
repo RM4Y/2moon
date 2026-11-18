@@ -89,6 +89,16 @@ impl VideoEncoder {
         Ok(Self::Software(H264Encoder::new(fps, bitrate_kbps)?))
     }
 
+    /// The direct NVENC encoder, if that is what was opened (GPU input path).
+    #[cfg(target_os = "linux")]
+    pub fn nvenc_mut(&mut self) -> Option<&mut crate::nvenc::NvencEncoder> {
+        match self {
+            Self::Nvenc(e) => Some(e),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Software(_) => "openh264",

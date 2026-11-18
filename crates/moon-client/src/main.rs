@@ -218,10 +218,21 @@ async fn main() -> Result<()> {
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();
+                // Debug: MOON_DUMP_FRAME=file.ppm saves the 120th decoded picture (with --software-decode).
+                let dump = std::env::var_os("MOON_DUMP_FRAME");
+                let mut count = 0u32;
                 let session = Session::start(&c, opts, Box::new(move |d: moon_client::session::Decoded<'_>, _| {
                     match d {
                         moon_client::session::Decoded::Cpu(p) => {
                             f2.lock().unwrap().get_or_insert((p.width, p.height, p.y[p.y.len() / 2] as u32));
+                            count += 1;
+                            if let (Some(path), 120) = (&dump, count) {
+                                let mut rgb = vec![0u32; p.width * p.height];
+                                p.to_xrgb(&mut rgb);
+                                let mut out = format!("P6\n{} {}\n255\n", p.width, p.height).into_bytes();
+                                out.extend(rgb.iter().flat_map(|px| [(px >> 16) as u8, (px >> 8) as u8, *px as u8]));
+                                let _ = std::fs::write(path, out);
+                            }
                         }
                         moon_client::session::Decoded::Cpu16(p) => {
                             f2.lock().unwrap().get_or_insert((p.width, p.height, (p.y[p.y.len() / 2] >> 6) as u32));

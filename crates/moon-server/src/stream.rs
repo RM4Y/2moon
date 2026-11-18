@@ -11,6 +11,8 @@ use anyhow::Result;
 use moon_media::ffenc::EncoderOptions;
 use moon_media::frame::{Csc, I420Frame};
 use moon_media::encoder::{Codec, VideoEncoder};
+use moon_media::glconv::{GpuConverter, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888};
+use moon_media::nvenc::CudaInput;
 use moon_media::opus::{OpusEncoder, StreamLayout};
 use moon_proto::audio::{AudioCipher, AudioPacketizer};
 use moon_proto::video::{Packetizer, FRAME_TYPE_IDR, FRAME_TYPE_P, FRAME_TYPE_RFI_RECOVERY};
@@ -260,31 +262,109 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
         ..Default::default()
     };
     let mut windows = 0u64;
-    let (mut win_start, mut win_frames, mut win_bytes, mut win_idr) = (Instant::now(), 0u64, 0u64, 0u64);
+    let (mut win_start, mut win_frames, mut win_bytes, mut win_idr, mut win_new) = (Instant::now(), 0u64, 0u64, 0u64, 0u64);
     let period = Duration::from_secs_f64(1.0 / fps as f64);
     let (tx, rx) = std::sync::mpsc::sync_channel::<(SocketAddr, Vec<Vec<u8>>)>(2);
     let sender = {
         let sock = sock.try_clone()?;
         std::thread::Builder::new().name("video-pacer".into()).spawn(move || pacer(sock, rx, period))?
     };
+    // GPU path, as Sunshine: DMA-BUF capture -> OpenGL conversion -> NVENC CUDA input.
+    // Declared after `enc` so it is dropped first (it uses the encoder's CUDA context).
+    let mut gpu: Option<(GpuConverter, CudaInput)> = None;
+    let mut dmabuf_formats = Vec::new();
+    // MOON_CPU_CONVERT=1 forces the former path (memory buffers, CPU conversion).
+    if frame10.is_none() && std::env::var_os("MOON_CPU_CONVERT").is_none() {
+        if let Some(nv) = enc.nvenc_mut() {
+            match nv.cuda_input().and_then(|input| GpuConverter::new().map(|c| (c, input))) {
+                Ok((c, input)) => {
+                    dmabuf_formats = [DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888].into_iter().map(|f| (f, c.modifiers(f))).filter(|(_, m)| !m.is_empty()).collect();
+                    gpu = Some((c, input));
+                }
+                Err(e) => warn!("GPU conversion unavailable, converting on the CPU: {e:#}"),
+            }
+        }
+    }
+    src.start(fps, &dmabuf_formats)?;
+    let path = if gpu.is_some() && src.is_dmabuf() { "DMA-BUF, GPU conversion" } else { "memory copies, CPU conversion" };
     let start = Instant::now();
-    let mut next = start;
     let mut index: u32 = 0;
-    info!("video: {}x{}@{} {} kbps {} from {} via {}", p.width, p.height, fps, p.bitrate_kbps, if enc.hdr10() { "10-bit HDR10" } else if enc.yuv444() { "4:4:4" } else { "4:2:0" }, src.name(), enc.name());
+    info!("video: {}x{}@{} {} kbps {} from {} ({path}) via {}", p.width, p.height, fps, p.bitrate_kbps, if enc.hdr10() { "10-bit HDR10" } else if enc.yuv444() { "4:4:4" } else { "4:2:0" }, src.name(), enc.name());
+    // Like Sunshine: when the compositor may send pictures faster than the client's
+    // rate (KWin's virtual output at 120 Hz for a 60 fps stream), sample the newest
+    // one on a steady clock; otherwise encode each new picture as soon as it
+    // arrives (no duplicated or skipped frames). A static screen is re-sent a few
+    // times a second so losses still get repaired.
+    let paced = src.source_fps().is_some_and(|r| r == 0.0 || r > fps as f64 * 1.05);
+    info!("video pacing: {}", if paced { format!("steady {fps} fps clock, newest picture (compositor up to {:.0} fps)", src.source_fps().unwrap_or(0.0)) } else { "each picture as it arrives".into() });
+    let idle_repeat = Duration::from_millis(100).max(period);
+    let mut next = Instant::now();
+    let mut last_encode = Instant::now() - period;
+    let mut have_picture = false;
+    let mut generation = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
-        let now = Instant::now();
-        if now < next {
-            std::thread::sleep(next - now);
+        let new = if paced {
+            next += period;
+            let now = Instant::now();
+            if now > next + period * 4 {
+                next = now + period; // fell far behind: resync instead of bursting
+            }
+            if next > now {
+                std::thread::sleep(next - now);
+            }
+            let new = src.wait_frame(next, next);
+            if !new && have_picture && last_encode.elapsed() < idle_repeat {
+                continue;
+            }
+            new
+        } else {
+            let earliest = last_encode + period.mul_f64(0.75);
+            let now = Instant::now();
+            if earliest > now {
+                std::thread::sleep(earliest - now);
+            }
+            src.wait_frame(last_encode + period, last_encode + idle_repeat)
+        };
+        if !new && !have_picture {
+            continue;
         }
-        next += period;
-        if Instant::now() > next + period * 4 {
-            next = Instant::now() + period; // fell far behind: resync instead of bursting
-        }
+        last_encode = Instant::now();
         let Some(dest) = peer.get() else { continue };
         let t0 = Instant::now();
-        match frame10.as_mut() {
-            Some(f) => src.grab_hdr10(f, p.width as usize, p.height as usize)?,
-            None => src.grab(&mut frame, p.width as usize, p.height as usize)?,
+        let use_gpu = gpu.is_some() && src.is_dmabuf();
+        if use_gpu {
+            if new {
+                let (conv, input) = gpu.as_mut().unwrap();
+                let csc = frame.csc;
+                let r = src.with_dmabuf(&mut |f, g| {
+                    if g != generation {
+                        conv.forget_buffers();
+                        generation = g;
+                    }
+                    conv.convert(f, input, csc)
+                });
+                match r {
+                    Some(Ok(())) => have_picture = true,
+                    Some(Err(e)) => {
+                        // Cannot read this kind of buffer: capture into memory instead.
+                        warn!("GPU conversion failed, switching to CPU conversion: {e:#}");
+                        gpu = None;
+                        have_picture = false;
+                        src.start(fps, &[])?;
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            if !have_picture {
+                continue;
+            }
+        } else {
+            match frame10.as_mut() {
+                Some(f) => src.grab_hdr10(f, p.width as usize, p.height as usize)?,
+                None => src.grab(&mut frame, p.width as usize, p.height as usize)?,
+            }
+            have_picture = true;
         }
         if idr.swap(false, Ordering::Relaxed) {
             enc.request_idr();
@@ -302,9 +382,10 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
             }
         }
         let ts = (start.elapsed().as_micros() * 90 / 1000) as u32;
-        let e = match frame10.as_ref() {
-            Some(f) => enc.encode_p010(f, index.wrapping_add(1))?,
-            None => enc.encode(&frame, ts as i64, index.wrapping_add(1))?,
+        let e = match (use_gpu, frame10.as_ref()) {
+            (true, _) => enc.nvenc_mut().expect("GPU path needs direct NVENC").encode_cuda(index.wrapping_add(1) as u64)?,
+            (false, Some(f)) => enc.encode_p010(f, index.wrapping_add(1))?,
+            (false, None) => enc.encode(&frame, ts as i64, index.wrapping_add(1))?,
         };
         if e.data.is_empty() {
             continue;
@@ -321,6 +402,7 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
             stats.idr_frames.fetch_add(1, Ordering::Relaxed);
         }
         win_frames += 1;
+        win_new += new as u64;
         win_idr += is_idr as u64;
         win_bytes += pkts.iter().map(|p| p.len() as u64).sum::<u64>();
         if win_start.elapsed() >= Duration::from_secs(1) {
@@ -336,13 +418,14 @@ fn video_loop(p: StreamParams, mut src: Box<dyn VideoSource>, sock: UdpSocket, p
             }
             windows += 1;
             if windows % 5 == 0 { info!(
-                "video: {:.1} fps, {:.1} Mbit/s, {} IDR, encode avg {:.2} ms",
+                "video: {:.1} fps ({:.1} new pictures/s), {:.1} Mbit/s, {} IDR, encode avg {:.2} ms",
                 win_frames as f64 / secs,
+                win_new as f64 / secs,
                 win_bytes as f64 * 8.0 / secs / 1e6,
                 win_idr,
                 stats.encode_us.load(Ordering::Relaxed) as f64 / stats.frames.load(Ordering::Relaxed).max(1) as f64 / 1000.0
             ); }
-            (win_start, win_frames, win_bytes, win_idr) = (Instant::now(), 0, 0, 0);
+            (win_start, win_frames, win_bytes, win_idr, win_new) = (Instant::now(), 0, 0, 0, 0);
         }
         stats.bytes.fetch_add(pkts.iter().map(|p| p.len() as u64).sum::<u64>(), Ordering::Relaxed);
         // Hand the frame to the pacing thread (bounded queue: if the network is

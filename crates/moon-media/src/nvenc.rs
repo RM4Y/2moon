@@ -59,9 +59,26 @@ extern "C" {
         err: *mut c_char,
         errlen: c_int,
     ) -> c_int;
+    fn moon_nvenc_cuda_input(e: *mut c_void, ctx: *mut *mut c_void, dev: *mut u64, pitch: *mut usize, err: *mut c_char, errlen: c_int) -> c_int;
+    fn moon_nvenc_encode_cuda(e: *mut c_void, ts: u64, force_idr: c_int, out: *mut *const u8, out_len: *mut u32, is_idr: *mut c_int, err: *mut c_char, errlen: c_int) -> c_int;
     fn moon_nvenc_invalidate(e: *mut c_void, ts: u64) -> c_int;
     fn moon_nvenc_close(e: *mut c_void);
 }
+
+/// The encoder's GPU input buffer: `rows` rows of `width` bytes, `pitch` bytes
+/// apart, in CUDA memory of `ctx` (NV12: luma then interleaved chroma; 4:4:4:
+/// Y, U and V planes one after the other).
+#[derive(Clone, Copy, Debug)]
+pub struct CudaInput {
+    pub ctx: *mut c_void,
+    pub dev: u64,
+    pub pitch: usize,
+    pub width: usize,
+    pub height: usize,
+    pub yuv444: bool,
+}
+
+unsafe impl Send for CudaInput {}
 
 /// Reference frames kept when the client uses RFI: enough to cover the loss
 /// detection + request round trip (~130 ms at 60 fps).
@@ -159,6 +176,29 @@ impl NvencEncoder {
         let mut err = [0 as c_char; 256];
         let uvs = (f.width.div_ceil(2) * 2) as c_int;
         let r = unsafe { moon_nvenc_encode_p010(self.e, f.y.as_ptr(), f.uv.as_ptr(), f.width as c_int, uvs, ts, self.force_idr as c_int, &mut out, &mut len, &mut idr, err.as_mut_ptr(), err.len() as c_int) };
+        if r != 0 {
+            bail!("{}", err_msg(&err));
+        }
+        self.force_idr = false;
+        let data = if out.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(out, len as usize) } };
+        Ok(EncodedFrame { data, idr: idr != 0 })
+    }
+
+    /// Allocate (once) and return the GPU input buffer (8-bit encoders only).
+    pub fn cuda_input(&mut self) -> Result<CudaInput> {
+        let (mut ctx, mut dev, mut pitch) = (std::ptr::null_mut(), 0u64, 0usize);
+        let mut err = [0 as c_char; 256];
+        if unsafe { moon_nvenc_cuda_input(self.e, &mut ctx, &mut dev, &mut pitch, err.as_mut_ptr(), err.len() as c_int) } != 0 {
+            bail!("NVENC: {}", err_msg(&err));
+        }
+        Ok(CudaInput { ctx, dev, pitch, width: self.width, height: self.height, yuv444: self.yuv444 })
+    }
+
+    /// Encode what the GPU input buffer currently holds.
+    pub fn encode_cuda(&mut self, ts: u64) -> Result<EncodedFrame<'_>> {
+        let (mut out, mut len, mut idr) = (std::ptr::null(), 0u32, 0);
+        let mut err = [0 as c_char; 256];
+        let r = unsafe { moon_nvenc_encode_cuda(self.e, ts, self.force_idr as c_int, &mut out, &mut len, &mut idr, err.as_mut_ptr(), err.len() as c_int) };
         if r != 0 {
             bail!("{}", err_msg(&err));
         }

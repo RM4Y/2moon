@@ -11,11 +11,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use libloading::Library;
+use moon_media::glconv::{DmabufFrame, DmabufPlane};
 use tracing::{debug, info, warn};
 
 // ---- SPA constants -------------------------------------------------------
 const SPA_TYPE_ID: u32 = 3;
 const SPA_TYPE_INT: u32 = 4;
+const SPA_TYPE_LONG: u32 = 5;
 const SPA_TYPE_RECTANGLE: u32 = 10;
 const SPA_TYPE_FRACTION: u32 = 11;
 const SPA_TYPE_OBJECT: u32 = 15;
@@ -28,8 +30,12 @@ const SPA_PARAM_BUFFERS: u32 = 5;
 const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
 const SPA_FORMAT_MEDIA_SUBTYPE: u32 = 2;
 const SPA_FORMAT_VIDEO_FORMAT: u32 = 0x20001;
+const SPA_FORMAT_VIDEO_MODIFIER: u32 = 0x20002;
 const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
 const SPA_FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
+const SPA_FORMAT_VIDEO_MAX_FRAMERATE: u32 = 0x20005;
+const SPA_POD_PROP_FLAG_MANDATORY: u32 = 1 << 3;
+const SPA_POD_PROP_FLAG_DONT_FIXATE: u32 = 1 << 4;
 const SPA_MEDIA_TYPE_VIDEO: u32 = 2;
 const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
 const SPA_CHOICE_RANGE: u32 = 1;
@@ -96,12 +102,38 @@ impl Pod {
         self.pad();
     }
     fn prop(&mut self, key: u32) {
+        self.prop_flags(key, 0);
+    }
+    fn prop_flags(&mut self, key: u32, flags: u32) {
         self.u32(key);
+        self.u32(flags);
+    }
+    fn fraction(&mut self, num: u32, den: u32) {
+        self.u32(8);
+        self.u32(SPA_TYPE_FRACTION);
+        self.u32(num);
+        self.u32(den);
+    }
+    /// An enum choice of 64-bit values (the first is the default).
+    fn choice_long(&mut self, values: &[u64]) {
+        let s = self.begin(SPA_TYPE_CHOICE);
+        self.u32(SPA_CHOICE_ENUM);
         self.u32(0);
+        self.u32(8);
+        self.u32(SPA_TYPE_LONG);
+        self.0.extend_from_slice(&values[0].to_ne_bytes());
+        for v in values {
+            self.0.extend_from_slice(&v.to_ne_bytes());
+        }
+        self.header_at(s);
+        self.pad();
     }
 
-    /// EnumFormat: raw video in common 32-bit RGB layouts, any size, up to 240 fps.
-    pub fn enum_format(fps: u32) -> Self {
+    /// EnumFormat for raw video. With `modifiers`, a DMA-BUF format (one SPA format,
+    /// those DRM modifiers); without, any common 32-bit RGB layout in memory.
+    /// Like Sunshine, ask for a variable frame rate capped at the client's `fps`, so
+    /// the compositor sends each new picture as soon as it is rendered.
+    fn video_format(format: Option<u32>, modifiers: &[u64], fps: u32) -> Self {
         let mut p = Pod::default();
         let s = p.begin(SPA_TYPE_OBJECT);
         p.u32(SPA_TYPE_OBJECT_FORMAT);
@@ -111,11 +143,46 @@ impl Pod {
         p.prop(SPA_FORMAT_MEDIA_SUBTYPE);
         p.id(SPA_MEDIA_SUBTYPE_RAW);
         p.prop(SPA_FORMAT_VIDEO_FORMAT);
-        p.choice(SPA_CHOICE_ENUM, 4, SPA_TYPE_ID, &[SPA_VIDEO_FORMAT_BGRX, SPA_VIDEO_FORMAT_BGRX, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBX, SPA_VIDEO_FORMAT_RGBA]);
+        match format {
+            Some(f) => p.id(f),
+            None => p.choice(SPA_CHOICE_ENUM, 4, SPA_TYPE_ID, &[SPA_VIDEO_FORMAT_BGRX, SPA_VIDEO_FORMAT_BGRX, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBX, SPA_VIDEO_FORMAT_RGBA]),
+        }
+        if !modifiers.is_empty() {
+            p.prop_flags(SPA_FORMAT_VIDEO_MODIFIER, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+            p.choice_long(modifiers);
+        }
         p.prop(SPA_FORMAT_VIDEO_SIZE);
         p.choice(SPA_CHOICE_RANGE, 8, SPA_TYPE_RECTANGLE, &[1920, 1080, 1, 1, 8192, 8192]);
         p.prop(SPA_FORMAT_VIDEO_FRAMERATE);
-        p.choice(SPA_CHOICE_RANGE, 8, SPA_TYPE_FRACTION, &[fps, 1, 0, 1, 240, 1]);
+        p.fraction(0, 1);
+        // Prefer every picture the compositor renders: KWin's own rate limiter is
+        // coarse (whole milliseconds on a Qt timer) and turns 120 Hz into ~57 fps
+        // for a 60 fps cap; the encoder loop paces to the client's rate instead.
+        let _ = fps;
+        p.prop(SPA_FORMAT_VIDEO_MAX_FRAMERATE);
+        p.choice(SPA_CHOICE_RANGE, 8, SPA_TYPE_FRACTION, &[1000, 1, 0, 1, 1000, 1]);
+        p.header_at(s);
+        p
+    }
+
+    /// EnumFormat for memory buffers (CPU copies).
+    pub fn enum_format(fps: u32) -> Self {
+        Self::video_format(None, &[], fps)
+    }
+
+    /// EnumFormat for DMA-BUFs of one format with the given DRM modifiers.
+    pub fn enum_format_dmabuf(format: u32, modifiers: &[u64], fps: u32) -> Self {
+        Self::video_format(Some(format), modifiers, fps)
+    }
+
+    /// Buffers param asking for DMA-BUFs.
+    pub fn dmabuf_buffers() -> Self {
+        let mut p = Pod::default();
+        let s = p.begin(SPA_TYPE_OBJECT);
+        p.u32(SPA_TYPE_OBJECT_PARAM_BUFFERS);
+        p.u32(SPA_PARAM_BUFFERS);
+        p.prop(SPA_PARAM_BUFFERS_DATATYPE);
+        p.choice(SPA_CHOICE_FLAGS, 4, SPA_TYPE_INT, &[1 << SPA_DATA_DMABUF]);
         p.header_at(s);
         p
     }
@@ -142,6 +209,22 @@ pub struct VideoFormat {
     pub format: u32,
     pub width: u32,
     pub height: u32,
+    /// DRM modifier: present when the buffers are DMA-BUFs.
+    pub modifier: Option<u64>,
+    /// Negotiated maximum frame rate (num, den).
+    pub max_framerate: (u32, u32),
+}
+
+/// DRM fourcc matching an SPA RGB format (the byte orders are named the other way round).
+pub fn drm_fourcc(spa: u32) -> Option<u32> {
+    use moon_media::glconv::*;
+    Some(match spa {
+        SPA_VIDEO_FORMAT_BGRX => DRM_FORMAT_XRGB8888,
+        SPA_VIDEO_FORMAT_BGRA => DRM_FORMAT_ARGB8888,
+        SPA_VIDEO_FORMAT_RGBX => DRM_FORMAT_XBGR8888,
+        SPA_VIDEO_FORMAT_RGBA => DRM_FORMAT_ABGR8888,
+        _ => return None,
+    })
 }
 
 /// Parse a negotiated `Format` object pod.
@@ -167,6 +250,8 @@ pub fn parse_format(pod: &[u8]) -> Option<VideoFormat> {
                 f.width = rd(vbody)?;
                 f.height = rd(vbody + 4)?;
             }
+            (SPA_FORMAT_VIDEO_MODIFIER, SPA_TYPE_LONG) => f.modifier = Some(rd(vbody)? as u64 | (rd(vbody + 4)? as u64) << 32),
+            (SPA_FORMAT_VIDEO_MAX_FRAMERATE, SPA_TYPE_FRACTION) => f.max_framerate = (rd(vbody)?, rd(vbody + 4)?),
             _ => {}
         }
         o = body + vsize.div_ceil(8) * 8;
@@ -291,7 +376,7 @@ fn api() -> Result<&'static Api> {
     .map_err(|e| anyhow!("{e}"))
 }
 
-/// The most recent frame delivered by PipeWire.
+/// The most recent frame delivered by PipeWire in memory buffers.
 pub struct Captured {
     pub format: VideoFormat,
     pub stride: usize,
@@ -300,11 +385,28 @@ pub struct Captured {
     pub at: Instant,
 }
 
+/// DMA-BUF buffers: the newest one is kept (not handed back to the compositor)
+/// until a newer one arrives, and the one being converted is never handed back
+/// before the conversion has finished reading it.
+struct DmaState {
+    current: *mut PwBuffer,
+    frame: Option<DmabufFrame>,
+    busy: *mut PwBuffer,
+    /// The busy buffer was removed by PipeWire meanwhile: do not queue it back.
+    busy_removed: bool,
+    seq: u64,
+    at: Option<Instant>,
+    /// Bumped when buffers are renegotiated (imported buffers must be forgotten).
+    generation: u64,
+}
+
 struct Shared {
     stream: *mut c_void,
     format: Mutex<Option<VideoFormat>>,
     latest: Mutex<Option<Captured>>,
     cond: Condvar,
+    dma: Mutex<DmaState>,
+    dma_cond: Condvar,
     state: Mutex<String>,
     frames: std::sync::atomic::AtomicU64,
 }
@@ -336,15 +438,45 @@ unsafe extern "C" fn on_param(data: *mut c_void, id: u32, param: *const c_void) 
     let bytes = std::slice::from_raw_parts(param as *const u8, size);
     match parse_format(bytes) {
         Some(f) => {
-            info!("pipewire format negotiated: {}x{} (spa format {})", f.width, f.height, f.format);
+            let (n, d) = f.max_framerate;
+            info!(
+                "pipewire format negotiated: {}x{} (spa format {}), {}, max {} fps",
+                f.width,
+                f.height,
+                f.format,
+                match f.modifier {
+                    Some(m) => format!("DMA-BUF modifier 0x{m:x}"),
+                    None => "memory buffers".into(),
+                },
+                if d > 0 { format!("{:.0}", n as f64 / d as f64) } else { "?".into() }
+            );
             *s.format.lock().unwrap() = Some(f);
+            {
+                let mut dma = s.dma.lock().unwrap();
+                dma.current = std::ptr::null_mut();
+                dma.frame = None;
+                dma.generation += 1;
+            }
             if let Ok(a) = api() {
-                let b = Pod::shm_buffers();
+                let b = if f.modifier.is_some() { Pod::dmabuf_buffers() } else { Pod::shm_buffers() };
                 let mut params = [b.bytes().as_ptr() as *const c_void];
                 (a.stream_update_params)(s.stream, params.as_mut_ptr(), 1);
             }
         }
         None => warn!("could not parse negotiated pipewire format"),
+    }
+}
+
+unsafe extern "C" fn on_remove_buffer(data: *mut c_void, b: *mut c_void) {
+    let s = &*(data as *const Shared);
+    let b = b as *mut PwBuffer;
+    let mut dma = s.dma.lock().unwrap();
+    if dma.current == b {
+        dma.current = std::ptr::null_mut();
+        dma.frame = None;
+    }
+    if dma.busy == b {
+        dma.busy_removed = true;
     }
 }
 
@@ -367,59 +499,85 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
         return;
     }
     let buf = &*(*newest).buffer;
-    if buf.n_datas > 0 && !buf.datas.is_null() {
-        let d = &*buf.datas;
-        let chunk = &*d.chunk;
-        let fmt = *s.format.lock().unwrap();
-        if let Some(fmt) = fmt {
-            let stride = if chunk.stride > 0 { chunk.stride as usize } else { fmt.width as usize * 4 };
-            let len = stride * fmt.height as usize;
-            let mut mapped: *mut c_void = std::ptr::null_mut();
-            let base = if !d.data.is_null() {
-                d.data as *const u8
-            } else if d.type_ == SPA_DATA_DMABUF && d.fd >= 0 {
-                // Linear dma-bufs can be mapped directly.
-                mapped = libc::mmap(std::ptr::null_mut(), d.maxsize as usize + d.mapoffset as usize, libc::PROT_READ, libc::MAP_SHARED, d.fd as c_int, 0);
-                if mapped == libc::MAP_FAILED {
-                    mapped = std::ptr::null_mut();
-                    std::ptr::null()
-                } else {
-                    (mapped as *const u8).add(d.mapoffset as usize)
-                }
-            } else {
-                std::ptr::null()
-            };
-            let off = chunk.offset as usize % (d.maxsize.max(1) as usize);
-            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                info!("pipewire buffers: data type {} ({}), mapped by pipewire: {}, stride {stride}", d.type_, match d.type_ { 1 => "MemPtr", 2 => "MemFd", 3 => "DmaBuf", _ => "?" }, !d.data.is_null());
+    if buf.n_datas == 0 || buf.datas.is_null() {
+        (a.stream_queue_buffer)(s.stream, newest);
+        return;
+    }
+    let d = &*buf.datas;
+    let chunk = &*d.chunk;
+    let fmt = *s.format.lock().unwrap();
+    let Some(fmt) = fmt else {
+        (a.stream_queue_buffer)(s.stream, newest);
+        return;
+    };
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        info!("pipewire buffers: data type {} ({}), {} plane(s), stride {}", d.type_, match d.type_ { 1 => "MemPtr", 2 => "MemFd", 3 => "DmaBuf", _ => "?" }, buf.n_datas, chunk.stride);
+    }
+    if chunk.flags & SPA_CHUNK_FLAG_CORRUPTED != 0 {
+        (a.stream_queue_buffer)(s.stream, newest);
+        return;
+    }
+
+    // GPU path: keep the buffer, the encoder thread imports it.
+    if d.type_ == SPA_DATA_DMABUF {
+        if let (Some(modifier), Some(fourcc)) = (fmt.modifier, drm_fourcc(fmt.format)) {
+            let datas = std::slice::from_raw_parts(buf.datas, (buf.n_datas as usize).min(4));
+            let planes = datas.iter().map(|p| DmabufPlane { fd: p.fd as i32, offset: (*p.chunk).offset, stride: (*p.chunk).stride.max(0) as u32 }).collect();
+            let mut dma = s.dma.lock().unwrap();
+            let frame = DmabufFrame { width: fmt.width, height: fmt.height, fourcc, modifier, planes, key: (newest as usize) ^ ((dma.generation as usize) << 48) };
+            let old = std::mem::replace(&mut dma.current, newest);
+            if !old.is_null() && old != dma.busy && old != newest {
+                (a.stream_queue_buffer)(s.stream, old);
             }
-            if !base.is_null() && chunk.flags & SPA_CHUNK_FLAG_CORRUPTED == 0 && chunk.size > 0 && off + len <= d.maxsize as usize {
-                let t0 = Instant::now();
-                let src = std::slice::from_raw_parts(base.add(off), len);
-                let mut g = s.latest.lock().unwrap();
-                let seq = s.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                match g.as_mut() {
-                    Some(c) if c.data.len() == len => {
-                        c.data.copy_from_slice(src);
-                        c.format = fmt;
-                        c.stride = stride;
-                        c.seq = seq;
-                        c.at = Instant::now();
-                    }
-                    _ => *g = Some(Captured { format: fmt, stride, data: src.to_vec(), seq, at: Instant::now() }),
-                }
-                drop(g);
-                s.cond.notify_all();
-                let n = s.frames.load(std::sync::atomic::Ordering::Relaxed);
-                if n % 10 == 1 {
-                    info!("pipewire frame {n}: copy took {:?}", t0.elapsed());
-                }
-            }
-            if !mapped.is_null() {
-                libc::munmap(mapped, d.maxsize as usize + d.mapoffset as usize);
-            }
+            dma.frame = Some(frame);
+            dma.seq += 1;
+            dma.at = Some(Instant::now());
+            drop(dma);
+            s.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            s.dma_cond.notify_all();
+            return;
         }
+    }
+
+    // CPU path: copy the picture out and hand the buffer back at once.
+    let stride = if chunk.stride > 0 { chunk.stride as usize } else { fmt.width as usize * 4 };
+    let len = stride * fmt.height as usize;
+    let mut mapped: *mut c_void = std::ptr::null_mut();
+    let base = if !d.data.is_null() {
+        d.data as *const u8
+    } else if d.type_ == SPA_DATA_DMABUF && d.fd >= 0 {
+        // Linear dma-bufs can be mapped directly.
+        mapped = libc::mmap(std::ptr::null_mut(), d.maxsize as usize + d.mapoffset as usize, libc::PROT_READ, libc::MAP_SHARED, d.fd as c_int, 0);
+        if mapped == libc::MAP_FAILED {
+            mapped = std::ptr::null_mut();
+            std::ptr::null()
+        } else {
+            (mapped as *const u8).add(d.mapoffset as usize)
+        }
+    } else {
+        std::ptr::null()
+    };
+    let off = chunk.offset as usize % (d.maxsize.max(1) as usize);
+    if !base.is_null() && chunk.size > 0 && off + len <= d.maxsize as usize {
+        let src = std::slice::from_raw_parts(base.add(off), len);
+        let mut g = s.latest.lock().unwrap();
+        let seq = s.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        match g.as_mut() {
+            Some(c) if c.data.len() == len => {
+                c.data.copy_from_slice(src);
+                c.format = fmt;
+                c.stride = stride;
+                c.seq = seq;
+                c.at = Instant::now();
+            }
+            _ => *g = Some(Captured { format: fmt, stride, data: src.to_vec(), seq, at: Instant::now() }),
+        }
+        drop(g);
+        s.cond.notify_all();
+    }
+    if !mapped.is_null() {
+        libc::munmap(mapped, d.maxsize as usize + d.mapoffset as usize);
     }
     (a.stream_queue_buffer)(s.stream, newest);
 }
@@ -432,7 +590,7 @@ static EVENTS: StreamEvents = StreamEvents {
     io_changed: None,
     param_changed: Some(on_param),
     add_buffer: None,
-    remove_buffer: None,
+    remove_buffer: Some(on_remove_buffer),
     process: Some(on_process),
     drained: None,
     command: None,
@@ -445,6 +603,7 @@ pub struct PwCapture {
     shared: Arc<Shared>,
     _hook: Box<SpaHook>,
     last_seq: u64,
+    last_dma_seq: u64,
 }
 
 unsafe impl Send for PwCapture {}
@@ -452,8 +611,9 @@ unsafe impl Sync for PwCapture {}
 
 impl PwCapture {
     /// Connect to node `node_id`. `fd` is the portal's PipeWire remote; `None`
-    /// connects to the default daemon.
-    pub fn connect(fd: Option<OwnedFd>, node_id: Option<u32>, fps: u32) -> Result<Self> {
+    /// connects to the default daemon. `dmabuf` lists (SPA format, DRM modifiers)
+    /// the GPU path can import; they are preferred over memory buffers.
+    pub fn connect(fd: Option<OwnedFd>, node_id: Option<u32>, fps: u32, dmabuf: &[(u32, Vec<u64>)]) -> Result<Self> {
         let a = api()?;
         unsafe {
             let name = CString::new("2moon-capture")?;
@@ -494,20 +654,23 @@ impl PwCapture {
                 format: Mutex::new(None),
                 latest: Mutex::new(None),
                 cond: Condvar::new(),
+                dma: Mutex::new(DmaState { current: std::ptr::null_mut(), frame: None, busy: std::ptr::null_mut(), busy_removed: false, seq: 0, at: None, generation: 0 }),
+                dma_cond: Condvar::new(),
                 state: Mutex::new("unconnected".into()),
                 frames: Default::default(),
             });
             let mut hook = Box::new(SpaHook { _p: [std::ptr::null_mut(); 8] });
             (a.stream_add_listener)(stream, &mut *hook, &EVENTS, Arc::as_ptr(&shared) as *mut c_void);
-            let fmt = Pod::enum_format(fps);
-            let mut params = [fmt.bytes().as_ptr() as *const c_void];
-            let r = (a.stream_connect)(stream, PW_DIRECTION_INPUT, node_id.unwrap_or(PW_ID_ANY), PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params.as_mut_ptr(), 1);
+            let mut pods: Vec<Pod> = dmabuf.iter().filter(|(_, m)| !m.is_empty()).map(|(f, m)| Pod::enum_format_dmabuf(*f, m, fps)).collect();
+            pods.push(Pod::enum_format(fps));
+            let mut params: Vec<*const c_void> = pods.iter().map(|p| p.bytes().as_ptr() as *const c_void).collect();
+            let r = (a.stream_connect)(stream, PW_DIRECTION_INPUT, node_id.unwrap_or(PW_ID_ANY), PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params.as_mut_ptr(), params.len() as u32);
             (a.thread_loop_unlock)(tloop);
             if r < 0 {
                 bail!("pw_stream_connect failed ({r})");
             }
             debug!("pipewire stream connecting to node {node_id:?}");
-            Ok(Self { tloop, shared, _hook: hook, last_seq: 0 })
+            Ok(Self { tloop, shared, _hook: hook, last_seq: 0, last_dma_seq: 0 })
         }
     }
 
@@ -518,6 +681,77 @@ impl PwCapture {
     #[allow(dead_code)]
     pub fn frames(&self) -> u64 {
         self.shared.frames.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The negotiated format, once known.
+    pub fn format(&self) -> Option<VideoFormat> {
+        *self.shared.format.lock().unwrap()
+    }
+
+    /// Frames come as DMA-BUFs (GPU path).
+    pub fn is_dmabuf(&self) -> bool {
+        self.format().is_some_and(|f| f.modifier.is_some())
+    }
+
+    /// Wait until `deadline` for a picture newer than the last one used; true if there is one.
+    pub fn wait_new(&self, deadline: Instant) -> bool {
+        if self.is_dmabuf() {
+            let mut g = self.shared.dma.lock().unwrap();
+            while g.seq <= self.last_dma_seq || g.frame.is_none() {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                g = self.shared.dma_cond.wait_timeout(g, deadline - now).unwrap().0;
+            }
+            true
+        } else {
+            let mut g = self.shared.latest.lock().unwrap();
+            while g.as_ref().map(|c| c.seq <= self.last_seq).unwrap_or(true) {
+                let now = Instant::now();
+                if now >= deadline {
+                    // The negotiation may have switched to DMA-BUFs meanwhile.
+                    return false;
+                }
+                g = self.shared.cond.wait_timeout(g, (deadline - now).min(Duration::from_millis(50))).unwrap().0;
+                if self.is_dmabuf() {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
+    /// Run `f` on the newest DMA-BUF picture if it is newer than the last one used.
+    /// The buffer stays out of the compositor's hands while `f` runs. The second
+    /// value of `f`'s argument is the buffer generation (changes on renegotiation).
+    pub fn with_dmabuf<R>(&mut self, f: impl FnOnce(&DmabufFrame, u64) -> R) -> Option<R> {
+        let (buf, frame, generation) = {
+            let mut g = self.shared.dma.lock().unwrap();
+            if g.seq <= self.last_dma_seq || g.current.is_null() {
+                return None;
+            }
+            let frame = g.frame.clone()?;
+            self.last_dma_seq = g.seq;
+            g.busy = g.current;
+            g.busy_removed = false;
+            (g.current, frame, g.generation)
+        };
+        let r = f(&frame, generation);
+        let Ok(a) = api() else { return Some(r) };
+        unsafe {
+            (a.thread_loop_lock)(self.tloop);
+            let mut g = self.shared.dma.lock().unwrap();
+            if g.busy == buf {
+                g.busy = std::ptr::null_mut();
+                if buf != g.current && !g.busy_removed {
+                    (a.stream_queue_buffer)(self.shared.stream, buf);
+                }
+            }
+            drop(g);
+            (a.thread_loop_unlock)(self.tloop);
+        }
+        Some(r)
     }
 
     /// Wait up to `timeout` for a frame newer than the last one returned and pass it to `f`.
@@ -535,6 +769,34 @@ impl PwCapture {
         let c = g.as_ref().filter(|c| c.seq > self.last_seq)?;
         self.last_seq = c.seq;
         Some(f(c))
+    }
+
+    /// Arrival times of new pictures, for diagnostics.
+    pub fn next_arrival(&mut self, timeout: Duration) -> Option<Instant> {
+        if !self.wait_new(Instant::now() + timeout) {
+            return None;
+        }
+        if self.is_dmabuf() {
+            let mut g = self.shared.dma.lock().unwrap();
+            self.last_dma_seq = g.seq;
+            let at = g.at;
+            // Diagnostics only: hand the buffer back at once.
+            if !g.current.is_null() && g.busy.is_null() {
+                if let Ok(a) = api() {
+                    let b = std::mem::replace(&mut g.current, std::ptr::null_mut());
+                    g.frame = None;
+                    drop(g);
+                    unsafe {
+                        (a.thread_loop_lock)(self.tloop);
+                        (a.stream_queue_buffer)(self.shared.stream, b);
+                        (a.thread_loop_unlock)(self.tloop);
+                    }
+                }
+            }
+            at
+        } else {
+            self.with_frame(Duration::ZERO, |c| c.at)
+        }
     }
 }
 
@@ -576,7 +838,7 @@ mod tests {
         f.u32(2560);
         f.u32(1440);
         f.header_at(s);
-        assert_eq!(parse_format(f.bytes()), Some(VideoFormat { format: SPA_VIDEO_FORMAT_BGRX, width: 2560, height: 1440 }));
+        assert_eq!(parse_format(f.bytes()), Some(VideoFormat { format: SPA_VIDEO_FORMAT_BGRX, width: 2560, height: 1440, ..Default::default() }));
         // Choice-wrapped size in the EnumFormat parses to its default.
         assert_eq!(parse_format(b).map(|f| (f.width, f.height)), Some((1920, 1080)));
     }
@@ -592,7 +854,7 @@ mod live_tests {
     #[ignore]
     fn capture_from_live_node() {
         let node: u32 = std::env::var("MOON_PW_NODE").expect("MOON_PW_NODE").parse().unwrap();
-        let mut cap = PwCapture::connect(None, Some(node), 30).unwrap();
+        let mut cap = PwCapture::connect(None, Some(node), 30, &[]).unwrap();
         let mut got = 0;
         let start = Instant::now();
         while got < 20 && start.elapsed() < Duration::from_secs(10) {

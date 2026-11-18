@@ -71,10 +71,18 @@ impl Settings {
             _ => None,
         }
     }
-    /// Reasonable default bitrate for a resolution / frame rate.
+    /// Reasonable default bitrate: 20 Mbit/s for 1080p60, scaled with the resolution and
+    /// frame rate, plus 50 % for 4:4:4 (twice the colour samples) and 25 % for HDR (10-bit).
     fn suggested_bitrate(&self) -> u32 {
         let px = (self.width * self.height) as f64 / (1920.0 * 1080.0);
-        ((20_000.0 * px * (self.fps as f64 / 60.0).sqrt()) / 1000.0).round() as u32 * 1000
+        let mut f = px * (self.fps as f64 / 60.0).sqrt();
+        if self.yuv444 {
+            f *= 1.5;
+        }
+        if self.hdr {
+            f *= 1.25;
+        }
+        ((20_000.0 * f) / 1000.0).round() as u32 * 1000
     }
 }
 
@@ -399,7 +407,7 @@ impl GuiApp {
         };
         let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, mic_device: s.mic_device.clone(), yuv444: s.yuv444, hdr: s.hdr, zero_copy: Some(self.video.zero_copy_flag()) };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
-        let generation = self.video.reset();
+        let generation = self.video.reset(s.fps);
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
         let sink = Box::new(move |f: crate::session::Decoded<'_>, _index: u32| {
             view.put(generation, f);
@@ -432,7 +440,7 @@ impl GuiApp {
             let summary = st.session.stats.summary();
             tracing::info!("stream ended: {summary}");
             std::thread::spawn(move || st.session.stop());
-            self.video.reset();
+            self.video.reset(60);
             if quit {
                 self.rt().spawn(async move {
                     let _ = c.cancel().await;
@@ -1348,7 +1356,7 @@ fn mic_choice(ui: &mut egui::Ui, s: &mut Settings, mics: &[moon_media::audio_io:
 /// Bitrate: big value, "advised" chip, log slider.
 fn bitrate_row(ui: &mut egui::Ui, s: &mut Settings) {
     let w = ui.available_width();
-    let left = |ui: &mut egui::Ui| label_desc(ui, "Débit vidéo", Some("Plus haut = plus net, plus de bande passante."));
+    let left = |ui: &mut egui::Ui| label_desc(ui, "Débit vidéo", Some("Plus haut = plus net, plus de bande passante. Le conseil suit la résolution, les images/s, le 4:4:4 et le HDR."));
     let mut right = |ui: &mut egui::Ui| {
         ui.spacing_mut().item_spacing.y = 10.0;
         let mbps = s.bitrate_kbps / 1000;
@@ -1449,6 +1457,10 @@ impl GuiApp {
             let ppp = ctx.pixels_per_point();
             let snap = |p: egui::Pos2| egui::pos2((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
             self.video.paint(ui.painter(), egui::Rect::from_min_max(snap(video.min), snap(video.max)));
+            // Frame pacing: a frame of a burst still waits, show it on time.
+            if let Some(d) = self.video.next_due() {
+                ctx.request_repaint_after(d);
+            }
         } else {
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "En attente de la première image…", th::body(18.0), th::MUTED);
         }
@@ -1473,7 +1485,7 @@ impl GuiApp {
             job.wrap.max_width = (rect.width() - 56.0).max(200.0);
             let fmt = |font, color| egui::TextFormat { font_id: font, color, ..Default::default() };
             job.append(&format!("{:.0} fps", st.fps_window.2), 0.0, fmt(th::mono_bold(13.0), th::ACCENT));
-            job.append(&format!(" affichées · {}{mic}", short_stats(&st.session.stats)), 0.0, fmt(th::mono(13.0), th::TEXT));
+            job.append(&format!(" affichées · {} · non affichées {}{mic}", short_stats(&st.session.stats), self.video.replaced()), 0.0, fmt(th::mono(13.0), th::TEXT));
             let p = ui.painter();
             let g = p.layout_job(job);
             let bg = Rect::from_min_size(rect.left_top() + vec2(12.0, 12.0), g.size() + vec2(28.0, 20.0));
@@ -1687,4 +1699,23 @@ fn egui_key_to_vk(k: Key) -> Option<u16> {
         Quote => 0xDE,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn suggested_bitrate_follows_options() {
+        let mut s = Settings::default();
+        assert_eq!(s.suggested_bitrate(), 20_000);
+        s.yuv444 = true;
+        assert_eq!(s.suggested_bitrate(), 30_000);
+        s.hdr = true;
+        assert_eq!(s.suggested_bitrate(), 38_000);
+        s.yuv444 = false;
+        assert_eq!(s.suggested_bitrate(), 25_000);
+        (s.width, s.height, s.fps, s.hdr) = (3840, 2160, 60, false);
+        assert_eq!(s.suggested_bitrate(), 80_000);
+    }
 }

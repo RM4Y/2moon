@@ -440,6 +440,8 @@ fn video_rx(addr: SocketAddr, ping: Option<String>, frames: mpsc::SyncSender<moo
 /// Smaller bursts (Wi-Fi often delivers several frames at once) are decoded in a row instead,
 /// showing only the newest: much faster than throwing them away and waiting for an IDR.
 const MAX_DECODE_BACKLOG: usize = 24;
+/// Decoded frames are not shown while at least this many newer ones are waiting.
+const CATCH_UP_BACKLOG: usize = 3;
 /// While catching up, still show a picture at least this often.
 const CATCH_UP_SHOW_EVERY: Duration = Duration::from_millis(50);
 
@@ -502,7 +504,9 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: Fram
                 while let Ok(f) = frames.try_recv() {
                     backlog.push_back(f);
                 }
-                if backlog.is_empty() || last_shown.elapsed() >= CATCH_UP_SHOW_EVERY {
+                // Two frames arriving together (Wi-Fi bursts) are both shown, paced by
+                // the display; only a real backlog skips pictures.
+                if backlog.len() < CATCH_UP_BACKLOG || last_shown.elapsed() >= CATCH_UP_SHOW_EVERY {
                     sink(pic, f.index);
                     last_shown = Instant::now();
                 } else {

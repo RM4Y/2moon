@@ -10,9 +10,11 @@
 //!   unsupported format), zero-copy is switched off for good and the decoder
 //!   falls back to copying pictures to system memory.
 
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use eframe::egui_glow;
@@ -36,8 +38,15 @@ enum Pending {
 struct Exchange {
     /// Stream generation: frames from an older stream are ignored.
     generation: u64,
-    /// Newest decoded frame not yet presented (latest wins).
-    pending: Option<Pending>,
+    /// Decoded frames not yet presented, oldest first. Like Moonlight's frame
+    /// pacing: Wi-Fi often delivers two frames at once, and showing only the
+    /// newest would halve the frame rate; they are shown one per frame interval.
+    queue: VecDeque<Pending>,
+    /// Frame interval of the stream, and when the last frame was presented.
+    interval: Duration,
+    last_present: Option<Instant>,
+    /// Frames dropped from the queue before being shown (display too slow).
+    replaced: u64,
     /// A CPU buffer to recycle for the next copy.
     spare: Option<I420Frame>,
     spare16: Option<Yuv16Frame>,
@@ -48,6 +57,12 @@ struct Exchange {
     /// Frames uploaded to the GPU (= frames presented).
     presented: u64,
 }
+
+/// Frames kept waiting for display at most.
+const MAX_QUEUED: usize = 2;
+/// A queued frame is shown once this fraction of the frame interval has passed
+/// since the previous one (a little early, to absorb timer and vsync slack).
+const PACE: f64 = 0.85;
 
 #[derive(Clone)]
 pub struct VideoView {
@@ -71,13 +86,16 @@ fn zero_copy_allowed() -> bool {
 static ZERO_COPY_BROKEN: AtomicBool = AtomicBool::new(false);
 
 impl VideoView {
-    /// Start a new stream: drop previous frames, return the sink generation.
-    pub fn reset(&self) -> u64 {
+    /// Start a new stream at `fps`: drop previous frames, return the sink generation.
+    pub fn reset(&self, fps: u32) -> u64 {
         let mut ex = self.ex.lock().unwrap();
+        ex.interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
         ex.generation += 1;
-        ex.pending = None;
+        ex.queue.clear();
         ex.size = [0, 0];
         ex.presented = 0;
+        ex.replaced = 0;
+        ex.last_present = None;
         ex.hdr_peak = 1000.0 / moon_media::hdr::SDR_WHITE_NITS;
         self.zero_copy.store(zero_copy_allowed(), Ordering::Relaxed);
         ex.generation
@@ -134,12 +152,51 @@ impl VideoView {
             return;
         }
         ex.size = size;
-        // A frame never shown is skipped: the display is behind.
-        match ex.pending.replace(pending) {
-            Some(Pending::Cpu(old)) => ex.spare = Some(old),
-            Some(Pending::Cpu16(old)) => ex.spare16 = Some(old),
-            _ => {}
+        ex.queue.push_back(pending);
+        // More than two waiting: the display is really behind, drop the oldest
+        // (bounded latency: at most one extra frame interval).
+        while ex.queue.len() > MAX_QUEUED {
+            ex.replaced += 1;
+            match ex.queue.pop_front() {
+                Some(Pending::Cpu(old)) => ex.spare = Some(old),
+                Some(Pending::Cpu16(old)) => ex.spare16 = Some(old),
+                _ => {}
+            }
         }
+    }
+
+    /// Frames dropped before being shown because the display could not keep up.
+    pub fn replaced(&self) -> u64 {
+        self.ex.lock().unwrap().replaced
+    }
+
+    /// If frames are waiting, how long until the next one is due (ask for a repaint then).
+    pub fn next_due(&self) -> Option<Duration> {
+        let ex = self.ex.lock().unwrap();
+        if ex.queue.is_empty() {
+            return None;
+        }
+        Some(match ex.last_present {
+            Some(t) => (t + ex.interval.mul_f64(PACE)).saturating_duration_since(Instant::now()),
+            None => Duration::ZERO,
+        })
+    }
+
+    /// The next frame to present, if one is due.
+    fn take_due(&self) -> Option<Pending> {
+        let mut ex = self.ex.lock().unwrap();
+        let due = match ex.last_present {
+            None => true,
+            // A frame that arrives on time is shown at once (no added latency);
+            // the second frame of a burst waits for its turn.
+            Some(t) => t.elapsed() >= ex.interval.mul_f64(PACE) || ex.queue.len() >= MAX_QUEUED,
+        };
+        if !due {
+            return None;
+        }
+        let f = ex.queue.pop_front()?;
+        ex.last_present = Some(Instant::now());
+        Some(f)
     }
 
     pub fn size(&self) -> [usize; 2] {
@@ -170,7 +227,7 @@ impl VideoView {
             }
         }
         let r = r.as_mut().unwrap();
-        let frame = self.ex.lock().unwrap().pending.take();
+        let frame = self.take_due();
         match frame {
             Some(Pending::Cpu(f)) => {
                 unsafe { r.upload(gl, &f) };
@@ -807,5 +864,32 @@ mod tests {
                 assert!(max_err <= 4, "HDR shader differs from the CPU conversion ({max_err})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    /// Two frames arriving together (a Wi-Fi burst) are both shown, one interval apart.
+    #[test]
+    fn burst_frames_are_paced_not_dropped() {
+        let v = VideoView::default();
+        let g = v.reset(60);
+        let f = I420Frame::new(16, 16);
+        v.put(g, Decoded::Cpu(&f));
+        v.put(g, Decoded::Cpu(&f));
+        assert!(v.take_due().is_some(), "first frame shown at once");
+        assert!(v.take_due().is_none(), "second frame waits for its turn");
+        let wait = v.next_due().expect("a frame is waiting");
+        assert!(wait > Duration::from_millis(10) && wait <= Duration::from_millis(15), "{wait:?}");
+        std::thread::sleep(wait);
+        assert!(v.take_due().is_some(), "second frame shown one interval later");
+        assert_eq!(v.replaced(), 0);
+        // A real backlog stays bounded.
+        for _ in 0..5 {
+            v.put(g, Decoded::Cpu(&f));
+        }
+        assert_eq!(v.replaced(), 3);
     }
 }

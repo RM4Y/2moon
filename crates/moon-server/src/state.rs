@@ -61,6 +61,8 @@ pub struct Config {
     pub audio_source: AudioSourceKind,
     pub encoder: String,
     pub nvenc_preset: String,
+    /// Output captured with --video kwin (name substring; empty = first).
+    pub kwin_output: String,
     /// Codecs the host can encode (filled at startup by probing).
     pub hevc: bool,
     pub av1: bool,
@@ -116,6 +118,7 @@ impl Config {
             audio_source: AudioSourceKind::Sine,
             encoder: "auto".into(),
             nvenc_preset: "p4".into(),
+            kwin_output: String::new(),
             hevc: false,
             av1: false,
             rfi: false,
@@ -307,7 +310,8 @@ impl Host {
         self.stop_stream();
         let video: Box<dyn VideoSource> = match self.cfg.video_source {
             VideoSourceKind::Test => Box::new(TestPattern::new()),
-            VideoSourceKind::Portal | VideoSourceKind::Pipewire | VideoSourceKind::Kwin => {
+            VideoSourceKind::Kwin => Box::new(crate::portal::PipeWireSource::kwin(self.cfg.kwin_output.clone())),
+            VideoSourceKind::Portal | VideoSourceKind::Pipewire => {
                 let cap = self.portal.get().ok_or_else(|| anyhow::anyhow!("screen capture is not initialised"))?;
                 Box::new(crate::portal::PipeWireSource::new(cap.clone()))
             }

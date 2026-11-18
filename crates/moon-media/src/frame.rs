@@ -70,6 +70,21 @@ impl Csc {
         (y, f(2.0 * (1.0 - kr) * c), f(-2.0 * (1.0 - kb) * kb / kg * c), f(-2.0 * (1.0 - kr) * kr / kg * c), f(2.0 * (1.0 - kb) * c), yo)
     }
 
+    /// RGB -> YUV for normalised (0..1) samples, for GPU shaders: rows Y, U, V,
+    /// each `[r, g, b, offset]` (`out = dot(rgb, row.rgb) + row.a`).
+    pub fn yuv_rows(&self) -> [[f32; 4]; 3] {
+        let (kr, kb) = self.kr_kb();
+        let kg = 1.0 - kr - kb;
+        let (ys, cs, yo) = if self.full_range { (255.0, 255.0, 0.0) } else { (219.0, 224.0, 16.0) };
+        let (ys, cs) = (ys / 255.0, cs / 255.0);
+        let half = 128.0 / 255.0;
+        [
+            [(kr * ys) as f32, (kg * ys) as f32, (kb * ys) as f32, (yo / 255.0) as f32],
+            [(-kr / (2.0 * (1.0 - kb)) * cs) as f32, (-kg / (2.0 * (1.0 - kb)) * cs) as f32, (0.5 * cs) as f32, half as f32],
+            [(0.5 * cs) as f32, (-kg / (2.0 * (1.0 - kr)) * cs) as f32, (-kb / (2.0 * (1.0 - kr)) * cs) as f32, half as f32],
+        ]
+    }
+
     /// YUV -> RGB for normalised (0..1) samples, for GPU shaders:
     /// `rgb = M * (yuv - offset)`, `M` given column-major (GLSL `mat3` order).
     pub fn rgb_matrix(&self) -> ([f32; 9], [f32; 3]) {

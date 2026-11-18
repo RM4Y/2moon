@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use moon_media::frame::I420Frame;
+use moon_media::glconv::DmabufFrame;
 use moon_media::hdr::P010Frame;
 
 pub trait VideoSource: Send {
@@ -12,6 +13,37 @@ pub trait VideoSource: Send {
     /// Same, as 10-bit HDR10 (SDR content with white at 203 nits).
     fn grab_hdr10(&mut self, out: &mut P010Frame, width: usize, height: usize) -> Result<()>;
     fn name(&self) -> &'static str;
+
+    /// Start capturing for a stream at `fps`. `dmabuf` lists the (DRM fourcc, modifiers)
+    /// the GPU path can import; empty means CPU copies only.
+    fn start(&mut self, _fps: u32, _dmabuf: &[(u32, Vec<u64>)]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Wait for a picture newer than the last one used, at the latest until `deadline`;
+    /// true if there is one. Sources that just render on demand pace themselves to `due`.
+    fn wait_frame(&mut self, due: Instant, _deadline: Instant) -> bool {
+        let now = Instant::now();
+        if due > now {
+            std::thread::sleep(due - now);
+        }
+        true
+    }
+
+    /// Highest frame rate the source may deliver (`Some(0.0)`: variable, unknown).
+    fn source_fps(&self) -> Option<f64> {
+        None
+    }
+
+    /// Frames come as DMA-BUFs: use [`Self::with_dmabuf`] instead of `grab`.
+    fn is_dmabuf(&self) -> bool {
+        false
+    }
+
+    /// Pass the newest DMA-BUF picture, if new, and its buffer generation to `f`.
+    fn with_dmabuf(&mut self, _f: &mut dyn FnMut(&DmabufFrame, u64) -> Result<()>) -> Option<Result<()>> {
+        None
+    }
 }
 
 /// Animated synthetic pattern rendered directly in I420 (no colour conversion).

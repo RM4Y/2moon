@@ -79,6 +79,9 @@ struct Args {
     /// Do not accept the client's microphone (no virtual microphone on this host).
     #[arg(long)]
     no_mic: bool,
+    /// Measure the KWin capture frame rate for this many seconds, then exit (diagnostics).
+    #[arg(long, hide = true)]
+    probe_capture: Option<u64>,
 }
 
 #[tokio::main]
@@ -93,6 +96,9 @@ async fn main() -> Result<()> {
         println!("Wrote {} — KWin will now allow screen capture without a dialog (restart moon-server).", p.display());
         return Ok(());
     }
+    if let Some(secs) = args.probe_capture {
+        return portal::probe_capture(&args.output, secs);
+    }
     let state_dir = args.state_dir.unwrap_or_else(|| {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
         base.join("2moon-server")
@@ -104,6 +110,7 @@ async fn main() -> Result<()> {
     cfg.audio_source = args.audio;
     cfg.encoder = args.encoder.clone();
     cfg.nvenc_preset = args.nvenc_preset.clone();
+    cfg.kwin_output = args.output.clone();
     if args.no_mic {
         cfg.mic_port = None;
     }
@@ -137,8 +144,9 @@ async fn main() -> Result<()> {
         let _ = host.portal.set(cap);
     }
     if host.cfg.video_source == state::VideoSourceKind::Kwin {
-        let cap = portal::PortalCapture::from_kwin(&args.output, 60)?;
-        let _ = host.portal.set(cap);
+        // Checked now so a missing permission shows at startup; each stream then
+        // opens its own screencast (see PipeWireSource::kwin).
+        drop(kwin::KwinScreencast::start(&args.output)?);
     }
     if host.cfg.video_source == state::VideoSourceKind::Pipewire {
         let cap = portal::PortalCapture::from_node(&args.pw_node, 60)?;

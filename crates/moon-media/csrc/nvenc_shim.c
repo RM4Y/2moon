@@ -8,6 +8,7 @@
  * Synchronous use from one thread: open, then encode / invalidate, then close.
  */
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,7 @@
 typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
+typedef unsigned long long CUdeviceptr;
 
 typedef struct MoonNvencConfig {
     int codec;          /* 0 H.264, 1 HEVC, 2 AV1 */
@@ -43,9 +45,16 @@ typedef struct MoonNvenc {
     int width, height, yuv444, hdr10;
     unsigned char *out;
     size_t out_cap;
+    /* GPU input (see moon_nvenc_cuda_input): a CUDA buffer registered with NVENC. */
+    CUdeviceptr dev;
+    size_t dev_pitch;
+    NV_ENC_REGISTERED_PTR reg;
+    CUresult (*cuMemFree)(CUdeviceptr);
+    CUresult (*cuCtxPushCurrent)(CUcontext);
+    CUresult (*cuCtxPopCurrent)(CUcontext *);
 } MoonNvenc;
 
-static int submit(MoonNvenc *e, int pitch, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen);
+static int submit(MoonNvenc *e, NV_ENC_INPUT_PTR input, NV_ENC_BUFFER_FORMAT fmt, int pitch, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen);
 
 static void set_err(char *err, int len, const char *fmt, ...) {
     if (!err || len <= 0)
@@ -60,11 +69,19 @@ void moon_nvenc_close(MoonNvenc *e) {
     if (!e)
         return;
     if (e->enc) {
+        if (e->reg)
+            e->fn.nvEncUnregisterResource(e->enc, e->reg);
         if (e->input)
             e->fn.nvEncDestroyInputBuffer(e->enc, e->input);
         if (e->output)
             e->fn.nvEncDestroyBitstreamBuffer(e->enc, e->output);
         e->fn.nvEncDestroyEncoder(e->enc);
+    }
+    if (e->dev && e->cuMemFree && e->cuCtxPushCurrent && e->cuCtxPopCurrent) {
+        CUcontext popped;
+        e->cuCtxPushCurrent(e->ctx);
+        e->cuMemFree(e->dev);
+        e->cuCtxPopCurrent(&popped);
     }
     if (e->ctx && e->cuCtxDestroy)
         e->cuCtxDestroy(e->ctx);
@@ -329,7 +346,7 @@ int moon_nvenc_encode(MoonNvenc *e, const unsigned char *y, const unsigned char 
         }
     }
     e->fn.nvEncUnlockInputBuffer(e->enc, e->input);
-    return submit(e, pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
+    return submit(e, e->input, e->fmt, pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
 }
 
 /* Encode one 10-bit P010 picture (16-bit samples, value in the high bits;
@@ -355,10 +372,78 @@ int moon_nvenc_encode_p010(MoonNvenc *e, const uint16_t *y, const uint16_t *uv, 
     for (int r = 0; r < ch; r++)
         memcpy(dst + (size_t)pitch * h + (size_t)r * pitch, uv + (size_t)r * uvs, (size_t)row);
     e->fn.nvEncUnlockInputBuffer(e->enc, e->input);
-    return submit(e, pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
+    return submit(e, e->input, e->fmt, pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
 }
 
-static int submit(MoonNvenc *e, int pitch, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen) {
+/* GPU input, as Sunshine does: a CUDA buffer that the caller fills on the GPU
+ * (NV12 for 4:2:0, three full planes for 4:4:4, rows `pitch` bytes apart),
+ * registered once with NVENC. Returns the CUDA context, device pointer and pitch. */
+int moon_nvenc_cuda_input(MoonNvenc *e, void **ctx, unsigned long long *dev, size_t *pitch, char *err, int errlen) {
+    if (e->hdr10) {
+        set_err(err, errlen, "GPU input is 8-bit only");
+        return -1;
+    }
+    if (!e->dev) {
+        CUresult (*cuMemAllocPitch)(CUdeviceptr *, size_t *, size_t, size_t, unsigned) = dlsym(e->cuda_lib, "cuMemAllocPitch_v2");
+        e->cuMemFree = dlsym(e->cuda_lib, "cuMemFree_v2");
+        e->cuCtxPushCurrent = dlsym(e->cuda_lib, "cuCtxPushCurrent_v2");
+        e->cuCtxPopCurrent = dlsym(e->cuda_lib, "cuCtxPopCurrent_v2");
+        if (!cuMemAllocPitch || !e->cuMemFree || !e->cuCtxPushCurrent || !e->cuCtxPopCurrent) {
+            set_err(err, errlen, "CUDA driver lacks memory functions");
+            return -1;
+        }
+        size_t rows = e->yuv444 ? (size_t)e->height * 3 : (size_t)e->height * 3 / 2;
+        CUcontext popped;
+        e->cuCtxPushCurrent(e->ctx);
+        CUresult r = cuMemAllocPitch(&e->dev, &e->dev_pitch, (size_t)e->width, rows, 16);
+        e->cuCtxPopCurrent(&popped);
+        if (r) {
+            e->dev = 0;
+            set_err(err, errlen, "cuMemAllocPitch failed (%d)", r);
+            return -1;
+        }
+        NV_ENC_REGISTER_RESOURCE rr = {0};
+        rr.version = NV_ENC_REGISTER_RESOURCE_VER;
+        rr.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
+        rr.width = (uint32_t)e->width;
+        rr.height = (uint32_t)e->height;
+        rr.pitch = (uint32_t)e->dev_pitch;
+        rr.resourceToRegister = (void *)(uintptr_t)e->dev;
+        rr.bufferFormat = e->yuv444 ? NV_ENC_BUFFER_FORMAT_YUV444 : NV_ENC_BUFFER_FORMAT_NV12;
+        rr.bufferUsage = NV_ENC_INPUT_IMAGE;
+        NVENCSTATUS st = e->fn.nvEncRegisterResource(e->enc, &rr);
+        if (st != NV_ENC_SUCCESS) {
+            set_err(err, errlen, "nvEncRegisterResource failed (%d)", st);
+            return -1;
+        }
+        e->reg = rr.registeredResource;
+    }
+    *ctx = e->ctx;
+    *dev = e->dev;
+    *pitch = e->dev_pitch;
+    return 0;
+}
+
+/* Encode the current content of the GPU input buffer. */
+int moon_nvenc_encode_cuda(MoonNvenc *e, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen) {
+    if (!e->reg) {
+        set_err(err, errlen, "no GPU input registered");
+        return -1;
+    }
+    NV_ENC_MAP_INPUT_RESOURCE mr = {0};
+    mr.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
+    mr.registeredResource = e->reg;
+    NVENCSTATUS st = e->fn.nvEncMapInputResource(e->enc, &mr);
+    if (st != NV_ENC_SUCCESS) {
+        set_err(err, errlen, "nvEncMapInputResource failed (%d)", st);
+        return -1;
+    }
+    int r = submit(e, mr.mappedResource, mr.mappedBufferFmt, (int)e->dev_pitch, ts, force_idr, out, out_len, is_idr, err, errlen);
+    e->fn.nvEncUnmapInputResource(e->enc, mr.mappedResource);
+    return r;
+}
+
+static int submit(MoonNvenc *e, NV_ENC_INPUT_PTR input, NV_ENC_BUFFER_FORMAT fmt, int pitch, uint64_t ts, int force_idr, const unsigned char **out, uint32_t *out_len, int *is_idr, char *err, int errlen) {
     int w = e->width, h = e->height;
     NVENCSTATUS st;
     NV_ENC_PIC_PARAMS pp = {0};
@@ -366,9 +451,9 @@ static int submit(MoonNvenc *e, int pitch, uint64_t ts, int force_idr, const uns
     pp.inputWidth = (uint32_t)w;
     pp.inputHeight = (uint32_t)h;
     pp.inputPitch = (uint32_t)pitch;
-    pp.inputBuffer = e->input;
+    pp.inputBuffer = input;
     pp.outputBitstream = e->output;
-    pp.bufferFmt = e->fmt;
+    pp.bufferFmt = fmt;
     pp.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     pp.inputTimeStamp = ts;
     pp.encodePicFlags = force_idr ? (NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS) : 0;
