@@ -977,24 +977,14 @@ impl GuiApp {
                         ui.add_space(10.0);
                         th::rule(ui, th::white(0.08));
                         ui.add_space(12.0);
+                        // Full-width buttons, one under the other.
                         let full = ui.available_width();
-                        let quit_w = 120.0;
-                        // Side by side when the main button keeps room to breathe, else stacked.
-                        let side = !running || full - quit_w - 10.0 >= 170.0;
-                        let main_w = if running && side { full - quit_w - 10.0 } else { full };
-                        let mut buttons = |ui: &mut egui::Ui| {
-                            if th::button(ui, th::Btn::Accent, Some(th::Icon::Play), if running { "Reprendre" } else { "Lancer" }, Some(main_w), true).clicked() {
-                                launch = Some(a.id);
-                            }
-                            if running && th::button(ui, th::Btn::Outline, None, "Quitter l'application", Some(if side { quit_w } else { full }), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
-                                quit = true;
-                            }
-                        };
-                        if side {
-                            ui.horizontal(|ui| buttons(ui));
-                        } else {
-                            ui.spacing_mut().item_spacing.y = 10.0;
-                            buttons(ui);
+                        ui.spacing_mut().item_spacing.y = 10.0;
+                        if th::button(ui, th::Btn::Accent, Some(th::Icon::Play), if running { "Reprendre" } else { "Lancer" }, Some(full), true).clicked() {
+                            launch = Some(a.id);
+                        }
+                        if running && th::button(ui, th::Btn::Outline, None, "Quitter l'application", Some(full), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
+                            quit = true;
                         }
                     });
                 });
@@ -1385,10 +1375,13 @@ impl GuiApp {
         for ev in events {
             match ev {
                 egui::Event::Key { key, physical_key, pressed, repeat, modifiers } => {
+                    // Forwarded to the host: the physical key (the host applies its own layout).
                     let k = physical_key.unwrap_or(key);
                     let combo = modifiers.ctrl && modifiers.alt && modifiers.shift;
                     if combo && pressed && !repeat {
-                        match k {
+                        // Our shortcuts: the letter printed on the key (logical key), so that
+                        // Ctrl+Alt+Maj+Q is the Q key on AZERTY too (physically QWERTY's A).
+                        match key {
                             Key::Q => {
                                 exit = true;
                                 continue;
