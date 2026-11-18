@@ -1,4 +1,5 @@
 mod admin;
+mod apps;
 mod capture;
 mod control;
 mod http;

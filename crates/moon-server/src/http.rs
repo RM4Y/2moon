@@ -165,7 +165,7 @@ async fn handle(host: Arc<Host>, req: Request<Incoming>, ctx: Ctx) -> Response<F
         }
         _ if !ctx.https => reply(StatusCode::NOT_FOUND, xml::Response::error(404, "Not found").build()),
         _ if !paired => reply(StatusCode::UNAUTHORIZED, xml::Response::error(401, "The client is not authorized. Certificate verification failed.").build()),
-        "/applist" => ok(xml::Response::ok().raw(&xml::apps_xml(&host.cfg.apps))),
+        "/applist" => ok(xml::Response::ok().raw(&host.apps.xml())),
         "/launch" | "/resume" => match launch(&host, &q, &ctx, path == "/resume") {
             Ok(x) => ok(x),
             Err(e) => {
@@ -175,6 +175,7 @@ async fn handle(host: Arc<Host>, req: Request<Incoming>, ctx: Ctx) -> Response<F
         },
         "/cancel" => {
             host.set_session(None);
+            host.apps.stop();
             info!("session cancelled by client");
             ok(xml::Response::ok().field("cancel", 1))
         }
@@ -184,7 +185,15 @@ async fn handle(host: Arc<Host>, req: Request<Incoming>, ctx: Ctx) -> Response<F
             }
             ok(xml::Response::ok())
         }
-        "/appasset" => reply(StatusCode::NOT_FOUND, String::new()),
+        "/appasset" => match q.get("appid").and_then(|a| a.parse().ok()).and_then(|id| host.apps.cover(id)) {
+            Some(png) => Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "image/png")
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(png)))
+                .unwrap(),
+            None => reply(StatusCode::NOT_FOUND, String::new()),
+        },
         _ => reply(StatusCode::NOT_FOUND, xml::Response::error(404, "Not found").build()),
     }
 }
@@ -290,7 +299,7 @@ fn launch(host: &Host, q: &HashMap<String, String>, ctx: &Ctx, resume: bool) -> 
         Some(a) => a.parse()?,
         None => existing.as_ref().map(|s| s.app_id).unwrap_or(1),
     };
-    if !host.cfg.apps.iter().any(|a| a.id == app_id) {
+    if host.apps.get(app_id).is_none() {
         anyhow::bail!("unknown app {app_id}");
     }
     let (mut width, mut height, mut fps) = (1920, 1080, 60);
@@ -315,6 +324,9 @@ fn launch(host: &Host, q: &HashMap<String, String>, ctx: &Ctx, resume: bool) -> 
     };
     info!("{} app {app_id} at {width}x{height}@{fps} for {}", if resume { "Resuming" } else { "Launching" }, session.client_ip);
     host.set_session(Some(session));
+    if !resume {
+        host.apps.start(app_id);
+    }
     let local = ctx.local.map(|a| canonical_ip(a.ip())).unwrap_or(IpAddr::from([127, 0, 0, 1]));
     // Clients announcing `corever` support encrypted RTSP; use it unless disabled.
     let scheme = if q.contains_key("corever") && std::env::var_os("MOON_NO_RTSPENC").is_none() { "rtspenc" } else { "rtsp" };

@@ -188,7 +188,7 @@ fn resp(status: StatusCode, ctype: &str, body: impl Into<Bytes>) -> Response<Ful
         .header("X-Content-Type-Options", "nosniff")
         .header("X-Frame-Options", "DENY")
         .header("Referrer-Policy", "no-referrer")
-        .header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+        .header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'")
         .body(Full::new(body.into()))
         .unwrap()
 }
@@ -205,6 +205,11 @@ fn with_cookie(mut r: Response<Full<Bytes>>, token: &str, max_age: u64) -> Respo
 async fn body_json(req: Request<Incoming>) -> Option<Value> {
     let b = Limited::new(req.into_body(), 64 * 1024).collect().await.ok()?.to_bytes();
     serde_json::from_slice(&b).ok()
+}
+
+/// `?id=N` from the query string.
+fn query_id(req: &Request<Incoming>) -> Option<u32> {
+    url::form_urlencoded::parse(req.uri().query()?.as_bytes()).find(|(k, _)| k == "id").and_then(|(_, v)| v.parse().ok())
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -321,6 +326,59 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
                 Err(e) => js(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e.to_string()})),
             }
         }
+        (Method::GET, "/api/apps") => {
+            let current = host.current_session().map(|s| s.app_id);
+            let list: Vec<Value> = host
+                .apps
+                .list()
+                .into_iter()
+                .map(|a| json!({"id": a.id, "title": a.title, "cmd": a.cmd, "hdr": a.hdr, "cover": host.apps.has_cover(a.id), "running": current == Some(a.id)}))
+                .collect();
+            js(StatusCode::OK, json!(list))
+        }
+        (Method::POST, "/api/apps/save") => {
+            let Some(b) = body_json(req).await else { return js(StatusCode::BAD_REQUEST, json!({"error": "requête invalide"})) };
+            let id = b.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let hdr = b.get("hdr").and_then(|v| v.as_bool()).unwrap_or(false);
+            match host.apps.upsert(id, &s(&b, "title"), &s(&b, "cmd"), hdr) {
+                Ok(id) => {
+                    info!("app {id} saved from the admin panel");
+                    js(StatusCode::OK, json!({"ok": true, "id": id}))
+                }
+                Err(e) => js(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            }
+        }
+        (Method::POST, "/api/apps/delete") => {
+            let Some(b) = body_json(req).await else { return js(StatusCode::BAD_REQUEST, json!({"error": "requête invalide"})) };
+            let id = b.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            match host.apps.remove(id) {
+                Ok(()) => js(StatusCode::OK, json!({"ok": true})),
+                Err(e) => js(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            }
+        }
+        (Method::POST, "/api/apps/move") => {
+            let Some(b) = body_json(req).await else { return js(StatusCode::BAD_REQUEST, json!({"error": "requête invalide"})) };
+            let id = b.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let dir = b.get("dir").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            match host.apps.shift(id, dir) {
+                Ok(()) => js(StatusCode::OK, json!({"ok": true})),
+                Err(e) => js(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            }
+        }
+        (Method::GET, "/api/apps/cover") => match query_id(&req).and_then(|id| host.apps.cover(id)) {
+            Some(png) => resp(StatusCode::OK, "image/png", png),
+            None => resp(StatusCode::NOT_FOUND, "text/plain", "no cover"),
+        },
+        (Method::POST, "/api/apps/cover") => {
+            let Some(id) = query_id(&req) else { return js(StatusCode::BAD_REQUEST, json!({"error": "id manquant"})) };
+            let Ok(b) = Limited::new(req.into_body(), crate::apps::MAX_COVER_BYTES).collect().await.map(|b| b.to_bytes()) else {
+                return js(StatusCode::PAYLOAD_TOO_LARGE, json!({"error": "image trop lourde (8 Mo maximum)"}));
+            };
+            match host.apps.set_cover(id, (!b.is_empty()).then_some(&b[..])) {
+                Ok(()) => js(StatusCode::OK, json!({"ok": true})),
+                Err(e) => js(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            }
+        }
         (Method::POST, "/api/pin") => {
             let Some(b) = body_json(req).await else { return js(StatusCode::BAD_REQUEST, json!({"error": "requête invalide"})) };
             let pin = s(&b, "pin");
@@ -332,6 +390,7 @@ async fn handle(admin: Arc<Admin>, req: Request<Incoming>, peer: SocketAddr) -> 
         }
         (Method::POST, "/api/session/stop") => {
             host.set_session(None);
+            host.apps.stop();
             info!("session stopped from the admin panel");
             js(StatusCode::OK, json!({"ok": true}))
         }

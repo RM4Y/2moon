@@ -163,6 +163,44 @@ pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mo
 #auth code { font-family: var(--mono); font-size: 13px; color: var(--text2); }
 .err { color: var(--warn); min-height: 1.3em; font-size: 13px; }
 
+/* applications: Moonlight-style 2:3 box art */
+.apps-grid { list-style: none; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 24px 20px; padding: 28px; }
+.app-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.poster { position: relative; display: block; width: 100%; aspect-ratio: 2 / 3; padding: 0; min-height: 0; border-radius: 14px; overflow: hidden; background: var(--surface2); border: 1px solid var(--border); cursor: pointer; transition: transform .15s, border-color .15s, box-shadow .15s; }
+.poster:hover:not(:disabled) { background: var(--surface2); transform: translateY(-3px); border-color: var(--border-strong); box-shadow: 0 14px 30px rgba(0,0,0,.45); }
+.poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.poster .ph { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px; text-align: center; color: var(--text); font: 700 20px/1.1 var(--display); letter-spacing: -.02em; overflow-wrap: anywhere; background: radial-gradient(circle at 50% 30%, rgba(255,255,255,.07), transparent 70%); }
+.poster .ph svg { color: var(--muted); }
+.poster.running { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.poster .pill { position: absolute; top: 10px; left: 10px; font-size: 11px; }
+.poster .edit { position: absolute; inset: auto 0 0 0; padding: 26px 12px 12px; font: 500 13px/1 Inter, sans-serif; color: var(--text); background: linear-gradient(180deg, transparent, rgba(9,9,11,.85)); opacity: 0; transition: opacity .15s; }
+.poster:hover .edit, .poster:focus-visible .edit { opacity: 1; }
+.app-meta { display: flex; align-items: flex-start; gap: 6px; }
+.app-meta .grow .name { font-size: 15px; }
+.mini { min-height: 32px; width: 32px; padding: 0; border-radius: 8px; font-size: 13px; color: var(--muted); }
+.add-tile { border-style: dashed; color: var(--muted); }
+.add-tile .ph { font: 500 15px/1.3 Inter, sans-serif; color: var(--muted); background: none; }
+.add-tile:hover .ph, .add-tile:hover .ph svg { color: var(--accent); }
+
+/* app editor */
+dialog.dlg { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border-radius: 22px; border: 1px solid rgba(255,255,255,.12); background: rgba(18,18,21,.96); color: var(--text); overflow: auto; }
+dialog.dlg::backdrop { background: rgba(9,9,11,.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.dlg form { display: grid; grid-template-columns: 260px 1fr; gap: 32px; padding: 32px; }
+.dlg h2 { grid-column: 1 / -1; margin: 0; font: 700 34px/1 var(--display); letter-spacing: -.03em; }
+.cover-col { display: flex; flex-direction: column; gap: 12px; }
+.crop { position: relative; width: 100%; aspect-ratio: 2 / 3; border-radius: 14px; overflow: hidden; background: var(--bg); border: 1px dashed var(--border-strong); touch-action: none; }
+.crop.has { border-style: solid; cursor: grab; } .crop.has:active { cursor: grabbing; }
+.crop.drop { border-color: var(--accent); }
+.crop canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.crop .hint { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; font-size: 13px; color: var(--faint); pointer-events: none; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.zoom { display: flex; align-items: center; gap: 10px; font: 400 12px/1 var(--mono); color: var(--muted); }
+.fields { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.field { display: flex; flex-direction: column; gap: 8px; }
+.field .label { font-weight: 600; } .field .desc { font-size: 13px; color: var(--muted); }
+.dlg-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; padding-top: 8px; border-top: 1px solid var(--divider); padding-top: 22px; }
+.dlg-actions .spacer { flex: 1; }
+
 /* toast */
 .toast { position: fixed; z-index: 10; bottom: 24px; left: 50%; transform: translate(-50%, 8px); display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--border); padding: 12px 18px; border-radius: 999px; font-size: 14px; color: var(--text2); opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
@@ -181,6 +219,9 @@ pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mo
   .stats, .chart-wrap, .desc-line { padding-left: 20px; padding-right: 20px; }
   .kv { grid-template-columns: 1fr; } .kv dt { border-bottom: 0; padding-bottom: 2px; } .kv dd { padding: 0 20px 14px; }
   .pin-boxes input { height: 84px; font-size: 48px; }
+  .apps-grid { padding: 20px; gap: 18px 14px; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .dlg form { grid-template-columns: 1fr; padding: 22px; gap: 22px; }
+  .cover-col { max-width: 260px; width: 100%; margin: 0 auto; }
   body:not(.auth-mode) .lune-orbite { top: -140px; right: -160px; width: 420px; }
   .hero { min-height: 120px; }
 }
@@ -192,6 +233,9 @@ pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mo
   <symbol id="ph0" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
   <symbol id="ph1" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A3 6 0 0 0 7 1Z" fill="currentColor"/></symbol>
   <symbol id="ph2" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13Z" fill="currentColor"/></symbol>
+  <symbol id="ph25" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A3 6 0 0 1 7 1Z" fill="currentColor"/></symbol>
+  <symbol id="i-gamepad" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M7 7h10a5 5 0 0 1 4.8 6.4l-1 3.3a2.4 2.4 0 0 1-4 1l-2.3-2.2h-5l-2.3 2.2a2.4 2.4 0 0 1-4-1l-1-3.3A5 5 0 0 1 7 7Z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11" r=".6" fill="currentColor"/><circle cx="17.2" cy="13" r=".6" fill="currentColor"/></g></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="ph3" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="currentColor"/></symbol>
   <symbol id="i-monitor" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8 20.5h8M12 16.5v4"/></g></symbol>
   <symbol id="i-phone" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></g></symbol>
@@ -236,6 +280,7 @@ pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mo
     <a href="#session" data-sec="session"><svg width="16" height="16"><use href="#ph0"/></svg>Session</a>
     <a href="#pairing" data-sec="pairing"><svg width="16" height="16"><use href="#ph1"/></svg>Appairage</a>
     <a href="#devices" data-sec="devices"><svg width="16" height="16"><use href="#ph2"/></svg>Appareils</a>
+    <a href="#apps" data-sec="apps"><svg width="16" height="16"><use href="#ph25"/></svg>Applications</a>
     <a href="#host" data-sec="host"><svg width="16" height="16"><use href="#ph3"/></svg>Hôte et journal</a>
     <p>Une phase de lune par section, de la nouvelle lune à la pleine lune.</p>
   </nav>
@@ -297,6 +342,11 @@ pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mo
       <div class="row hidden" id="clients-none"><span class="muted">Aucun appareil appairé.</span></div>
     </section>
 
+    <section class="panel" id="apps" aria-labelledby="t-apps">
+      <h2 id="t-apps"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph25"/></svg><span class="grow">Applications</span><button class="ghost" id="app-add"><svg width="16" height="16"><use href="#i-plus"/></svg>Ajouter</button></h2>
+      <ul class="apps-grid" id="apps-grid"></ul>
+    </section>
+
     <section class="panel" id="host" aria-labelledby="t-host">
       <h2 id="t-host"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph3"/></svg>Hôte</h2>
       <dl class="kv" id="host-info"></dl>
@@ -319,6 +369,33 @@ pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mo
     </section>
   </main>
 </div>
+<dialog class="dlg" id="app-dlg" aria-labelledby="dlg-title">
+  <form id="app-form">
+    <h2 id="dlg-title">Nouvelle application</h2>
+    <div class="cover-col">
+      <span class="eyebrow">Vignette · 2:3</span>
+      <div class="crop" id="crop"><canvas id="crop-canvas" width="600" height="900"></canvas><span class="hint" id="crop-hint">Glissez une image ici ou choisissez un fichier (PNG, JPEG, WebP).</span></div>
+      <label class="zoom" for="crop-zoom">zoom<input type="range" id="crop-zoom" min="1" max="4" step="0.01" value="1" disabled></label>
+      <input type="file" id="cover-file" accept="image/*" class="hidden">
+      <div class="actions">
+        <button type="button" id="cover-pick" class="light">Choisir une image</button>
+        <button type="button" id="cover-clear" class="danger">Retirer</button>
+      </div>
+    </div>
+    <div class="fields">
+      <label class="field"><span class="label">Nom</span><input id="app-title" maxlength="80" required autocomplete="off" placeholder="Steam Big Picture"></label>
+      <label class="field"><span class="label">Commande au lancement</span><span class="desc">Exécutée par <code>sh -c</code> quand un client lance l'application, arrêtée quand il la quitte. Vide : le bureau seul.</span><input id="app-cmd" autocomplete="off" spellcheck="false" placeholder="steam steam://open/bigpicture"></label>
+      <label class="switch"><input type="checkbox" id="app-hdr">Annoncer le HDR pour cette application</label>
+      <p class="err" id="app-err" role="alert"></p>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="danger" id="app-del">Supprimer</button>
+      <span class="spacer"></span>
+      <button type="button" id="app-cancel">Annuler</button>
+      <button type="submit" class="primary" id="app-save">Enregistrer</button>
+    </div>
+  </form>
+</dialog>
 <div class="toast" id="toast" role="status"><svg width="14" height="14" style="color:var(--accent)"><use href="#ph2"/></svg><span id="toast-text"></span></div>
 
 <script>
@@ -356,8 +433,8 @@ function showAuth(setup) {
 function showApp() {
   document.body.classList.remove("auth-mode"); $("state-pill").classList.remove("hidden");
   $("auth").classList.add("hidden"); $("app").classList.remove("hidden"); $("logout").classList.remove("hidden");
-  refresh(); refreshClients(); refreshLogs();
-  timers = [setInterval(refresh, 1000), setInterval(refreshLogs, 2000), setInterval(refreshClients, 10000)];
+  refresh(); refreshClients(); refreshLogs(); refreshApps();
+  timers = [setInterval(refresh, 1000), setInterval(refreshLogs, 2000), setInterval(refreshClients, 10000), setInterval(refreshApps, 4000)];
   requestAnimationFrame(markNav);
 }
 
@@ -486,6 +563,119 @@ async function refreshClients() {
   }
   $("clients-none").classList.toggle("hidden", list.length > 0);
 }
+
+// ---- applications ----
+let appsJson = "", appsList = [];
+const coverVer = {};
+function coverUrl(id) { return `/api/apps/cover?id=${id}&v=${coverVer[id] || 0}`; }
+
+async function refreshApps(force) {
+  let list; try { list = await api("/api/apps"); } catch (_) { return; }
+  const j = JSON.stringify(list) + JSON.stringify(coverVer);
+  if (j === appsJson && !force) return;
+  appsJson = j; appsList = list;
+  const ul = $("apps-grid"); ul.replaceChildren();
+  list.forEach((a, i) => {
+    const li = el("li", "app-card");
+    const p = el("button", "poster" + (a.running ? " running" : ""));
+    p.type = "button"; p.title = "Modifier " + a.title;
+    if (a.cover) { const img = el("img"); img.alt = ""; img.loading = "lazy"; img.src = coverUrl(a.id); p.append(img); }
+    else { const ph = el("span", "ph"); ph.append(icon("i-gamepad", 40), el("span", null, a.title)); p.append(ph); }
+    if (a.running) { const pill = el("span", "pill live"); pill.append(icon("ph3", 10), el("span", null, "En cours")); p.append(pill); }
+    p.append(el("span", "edit", "Modifier"));
+    p.addEventListener("click", () => openEditor(a));
+    const meta = el("div", "app-meta"), d = el("div", "grow");
+    d.append(el("div", "name", a.title), el("div", "sub", a.cmd || "bureau"));
+    const up = el("button", "ghost mini", "◀"), down = el("button", "ghost mini", "▶");
+    up.title = "Avancer"; down.title = "Reculer"; up.disabled = i === 0; down.disabled = i === list.length - 1;
+    up.setAttribute("aria-label", "Avancer " + a.title); down.setAttribute("aria-label", "Reculer " + a.title);
+    up.addEventListener("click", () => moveApp(a.id, -1)); down.addEventListener("click", () => moveApp(a.id, 1));
+    meta.append(d, up, down);
+    li.append(p, meta); ul.append(li);
+  });
+  const li = el("li", "app-card"), add = el("button", "poster add-tile"), ph = el("span", "ph");
+  add.type = "button"; ph.append(icon("i-plus", 32), el("span", null, "Ajouter une application")); add.append(ph);
+  add.addEventListener("click", () => openEditor(null));
+  li.append(add); ul.append(li);
+}
+async function moveApp(id, dir) { try { await api("/api/apps/move", { id, dir }); refreshApps(true); } catch (e) { toast(e.message); } }
+
+// Cover editor: the image fills a 600×900 frame (like Moonlight box art); drag to frame it, zoom with the slider or the wheel.
+const crop = { img: null, zoom: 1, x: 0, y: 0, state: "keep" }; // state: keep | new | remove
+const cv = $("crop-canvas"), cg = cv.getContext("2d");
+function cropScale() { return Math.max(cv.width / crop.img.naturalWidth, cv.height / crop.img.naturalHeight) * crop.zoom; }
+function clampCrop() {
+  const s = cropScale(), mx = Math.max(0, (crop.img.naturalWidth * s - cv.width) / 2), my = Math.max(0, (crop.img.naturalHeight * s - cv.height) / 2);
+  crop.x = Math.min(mx, Math.max(-mx, crop.x)); crop.y = Math.min(my, Math.max(-my, crop.y));
+}
+function drawCrop() {
+  cg.clearRect(0, 0, cv.width, cv.height);
+  const has = !!crop.img;
+  $("crop").classList.toggle("has", has); $("crop-hint").classList.toggle("hidden", has);
+  $("crop-zoom").disabled = !has; $("cover-clear").disabled = !has;
+  if (!has) return;
+  clampCrop();
+  const s = cropScale(), w = crop.img.naturalWidth * s, h = crop.img.naturalHeight * s;
+  cg.imageSmoothingQuality = "high";
+  cg.drawImage(crop.img, (cv.width - w) / 2 + crop.x, (cv.height - h) / 2 + crop.y, w, h);
+}
+function setCropImage(img, state) { crop.img = img; crop.zoom = 1; crop.x = crop.y = 0; crop.state = state; $("crop-zoom").value = 1; drawCrop(); }
+function loadCoverFile(f) {
+  if (!f || !f.type.startsWith("image/")) { toast("Choisissez un fichier image"); return; }
+  const url = URL.createObjectURL(f), img = new Image();
+  img.onload = () => { setCropImage(img, "new"); URL.revokeObjectURL(url); };
+  img.onerror = () => { toast("Image illisible"); URL.revokeObjectURL(url); };
+  img.src = url;
+}
+$("cover-pick").addEventListener("click", () => $("cover-file").click());
+$("cover-file").addEventListener("change", (e) => { loadCoverFile(e.target.files[0]); e.target.value = ""; });
+$("cover-clear").addEventListener("click", () => { setCropImage(null, "remove"); });
+$("crop-zoom").addEventListener("input", (e) => { if (!crop.img) return; crop.zoom = +e.target.value; crop.state = "new"; drawCrop(); });
+const cropEl = $("crop");
+cropEl.addEventListener("wheel", (e) => { if (!crop.img) return; e.preventDefault(); crop.zoom = Math.min(4, Math.max(1, crop.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08))); $("crop-zoom").value = crop.zoom; crop.state = "new"; drawCrop(); }, { passive: false });
+let drag = null;
+cropEl.addEventListener("pointerdown", (e) => { if (!crop.img) return; drag = { x: e.clientX, y: e.clientY }; cropEl.setPointerCapture(e.pointerId); });
+cropEl.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const k = cv.width / cropEl.clientWidth;
+  crop.x += (e.clientX - drag.x) * k; crop.y += (e.clientY - drag.y) * k; drag = { x: e.clientX, y: e.clientY }; crop.state = "new"; drawCrop();
+});
+cropEl.addEventListener("pointerup", () => { drag = null; }); cropEl.addEventListener("pointercancel", () => { drag = null; });
+cropEl.addEventListener("dragover", (e) => { e.preventDefault(); cropEl.classList.add("drop"); });
+cropEl.addEventListener("dragleave", () => cropEl.classList.remove("drop"));
+cropEl.addEventListener("drop", (e) => { e.preventDefault(); cropEl.classList.remove("drop"); loadCoverFile(e.dataTransfer.files[0]); });
+
+let editing = null;
+function openEditor(a) {
+  editing = a;
+  $("dlg-title").textContent = a ? "Modifier l'application" : "Nouvelle application";
+  $("app-title").value = a ? a.title : ""; $("app-cmd").value = a ? a.cmd : ""; $("app-hdr").checked = !!(a && a.hdr);
+  $("app-err").textContent = ""; $("app-del").classList.toggle("hidden", !a);
+  setCropImage(null, "keep");
+  if (a && a.cover) { const img = new Image(); img.onload = () => { if (editing === a && crop.state === "keep") setCropImage(img, "keep"); }; img.src = coverUrl(a.id); }
+  $("app-dlg").showModal(); $("app-title").focus();
+}
+$("app-cancel").addEventListener("click", () => $("app-dlg").close());
+$("app-del").addEventListener("click", async () => {
+  if (!editing || !confirm(`Supprimer « ${editing.title} » ?`)) return;
+  try { await api("/api/apps/delete", { id: editing.id }); $("app-dlg").close(); toast("Application supprimée"); refreshApps(true); }
+  catch (e) { $("app-err").textContent = e.message; }
+});
+$("app-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("app-err").textContent = ""; $("app-save").disabled = true;
+  try {
+    const r = await api("/api/apps/save", { id: editing ? editing.id : 0, title: $("app-title").value, cmd: $("app-cmd").value, hdr: $("app-hdr").checked });
+    if (crop.state !== "keep") {
+      const body = crop.state === "new" && crop.img ? await new Promise((ok) => cv.toBlob(ok, "image/png")) : new Blob([]);
+      const res = await fetch(`/api/apps/cover?id=${r.id}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "image/png", "X-2moon": "1" }, body });
+      if (!res.ok) { let m = "HTTP " + res.status; try { m = (await res.json()).error || m; } catch (_) {} throw new Error("vignette : " + m); }
+      coverVer[r.id] = (coverVer[r.id] || 0) + 1;
+    }
+    $("app-dlg").close(); toast(editing ? "Application enregistrée" : "Application ajoutée"); refreshApps(true);
+  } catch (err) { $("app-err").textContent = err.message; }
+  $("app-save").disabled = false;
+});
+$("app-add").addEventListener("click", () => openEditor(null));
 
 async function refreshLogs() {
   if (!$("follow").checked) return;

@@ -108,6 +108,14 @@ impl GsClient {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let (_, body) = Self::request_raw(io, host, path, timeout).await?;
+        Ok(String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn request_raw<S>(io: S, host: String, path: String, timeout: Duration) -> Result<(u16, Bytes)>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
         tokio::spawn(async move {
             let _ = conn.await;
@@ -115,8 +123,9 @@ impl GsClient {
         let req = hyper::Request::get(path).header("Host", host).body(Empty::<Bytes>::new())?;
         let fut = async {
             let res = sender.send_request(req).await?;
+            let status = res.status().as_u16();
             let body = res.into_body().collect().await?.to_bytes();
-            Ok::<_, anyhow::Error>(String::from_utf8_lossy(&body).into_owned())
+            Ok::<_, anyhow::Error>((status, body))
         };
         tokio::time::timeout(timeout, fut).await.context("HTTP request timed out")?
     }
@@ -129,12 +138,24 @@ impl GsClient {
     }
 
     pub async fn https_get(&self, path: &str, params: &[(&str, String)], timeout: Duration) -> Result<String> {
+        let (_, body) = self.https_get_raw(path, params, timeout).await?;
+        Ok(String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn https_get_raw(&self, path: &str, params: &[(&str, String)], timeout: Duration) -> Result<(u16, Bytes)> {
         let cfg = self.tls_config()?;
         let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect((self.host.as_str(), self.https_port))).await??;
         let name = ServerName::try_from(self.host.clone()).unwrap_or_else(|_| ServerName::try_from("localhost").unwrap().to_owned());
         let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg)).connect(name, tcp).await.context("TLS handshake")?;
         debug!("GET https {path}");
-        Self::request(tls, self.host_header(self.https_port), Self::query(path, params), timeout).await
+        Self::request_raw(tls, self.host_header(self.https_port), Self::query(path, params), timeout).await
+    }
+
+    /// Box art of an app (PNG, as served by 2moon and Sunshine); `None` if the host has none.
+    pub async fn app_asset(&self, app_id: u32) -> Result<Option<Bytes>> {
+        let params = [("appid", app_id.to_string()), ("AssetType", "2".into()), ("AssetIdx", "0".into())];
+        let (status, body) = self.https_get_raw("/appasset", &params, Duration::from_secs(10)).await?;
+        Ok((status == 200 && !body.is_empty()).then_some(body))
     }
 
     fn tls_config(&self) -> Result<rustls::ClientConfig> {

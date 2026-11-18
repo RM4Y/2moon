@@ -155,6 +155,8 @@ pub struct Host {
     /// Pairing requests waiting for a PIN: (device name, address).
     pub pending_requests: Mutex<Vec<(String, String)>>,
     pub started_at: std::time::Instant,
+    /// Applications offered to clients (editable from the admin panel).
+    pub apps: crate::apps::Apps,
 }
 
 impl Host {
@@ -179,6 +181,7 @@ impl Host {
         for c in &mut persisted.clients {
             c.cert_der = moon_proto::crypto::pem_decode_cert(&c.cert_pem)?;
         }
+        let apps = crate::apps::Apps::load(&cfg.state_dir, &cfg.apps);
         let host = Arc::new(Self {
             cfg,
             identity,
@@ -199,6 +202,7 @@ impl Host {
             live: Arc::new(Mutex::new(Default::default())),
             pending_requests: Mutex::new(Vec::new()),
             started_at: std::time::Instant::now(),
+            apps,
         });
         host.save()?;
         Ok(host)

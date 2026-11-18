@@ -103,6 +103,8 @@ struct HostStatus {
 enum Msg {
     Paired(HostRef, Result<KnownHost>),
     Apps(HostRef, Result<Vec<HostApp>>),
+    /// Box art of an app (`cover_key`), decoded; None when the host has none.
+    Cover(String, Option<egui::ColorImage>),
     Started(HostRef, Box<Result<Session>>),
     Quit(Result<()>),
 }
@@ -155,6 +157,14 @@ pub struct GuiApp {
     dialog_h: f32,
     /// Microphones of this machine, listed when the settings open.
     mics: Option<Vec<moon_media::audio_io::InputDevice>>,
+    /// Host waiting for the "forget this device?" confirmation.
+    confirm_forget: Option<HostRef>,
+    /// App box art by `cover_key`: None = the host has none.
+    covers: HashMap<String, Option<egui::TextureHandle>>,
+}
+
+fn cover_key(h: &HostRef, app_id: u32) -> String {
+    format!("{}#{app_id}", h.key())
 }
 
 pub fn run(store: Store) -> Result<()> {
@@ -215,6 +225,8 @@ impl GuiApp {
             section_tops: [f32::MAX; 4],
             dialog_h: 520.0,
             mics: None,
+            confirm_forget: None,
+            covers: HashMap::new(),
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -348,6 +360,28 @@ impl GuiApp {
         self.screen = Screen::Apps { host: h, apps: None, error: None };
     }
 
+    /// Download and decode the box art of every app (kept until replaced, so no flicker on refresh).
+    fn fetch_covers(&self, h: &HostRef, apps: &[HostApp]) {
+        for a in apps {
+            let c = client_for(&self.store, h);
+            let (tx, key, id) = (self.tx.clone(), cover_key(h, a.id), a.id);
+            self.rt().spawn(async move {
+                let img = match c.app_asset(id).await {
+                    Ok(Some(bytes)) => tokio::task::spawn_blocking(move || {
+                        let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        Some(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+                    })
+                    .await
+                    .ok()
+                    .flatten(),
+                    _ => None,
+                };
+                let _ = tx.send(Msg::Cover(key, img));
+            });
+        }
+    }
+
     fn launch(&mut self, ctx: &egui::Context, h: HostRef, app_id: u32) {
         let s = &self.settings;
         let stream = StreamConfig {
@@ -436,7 +470,10 @@ impl GuiApp {
                     if let Screen::Apps { host, apps, error } = &mut self.screen {
                         if *host == h {
                             match r {
-                                Ok(a) => *apps = Some(a),
+                                Ok(a) => {
+                                    *apps = Some(a.clone());
+                                    self.fetch_covers(&h, &a);
+                                }
                                 Err(e) => *error = Some(format!("{e:#}")),
                             }
                         }
@@ -466,6 +503,10 @@ impl GuiApp {
                         self.screen = Screen::Home;
                     }
                 },
+                Msg::Cover(key, img) => {
+                    let tex = img.map(|i| ctx.load_texture(format!("cover {key}"), i, egui::TextureOptions::LINEAR));
+                    self.covers.insert(key, tex);
+                }
                 Msg::Quit(r) => match r {
                     Ok(()) => self.toast("Application fermée sur l'hôte"),
                     Err(e) => self.toast(format!("Échec : {e:#}")),
@@ -531,6 +572,8 @@ impl eframe::App for GuiApp {
                 _ => {}
             }
         });
+
+        self.forget_dialog(&ctx);
 
         if let Some((msg, at)) = &self.toast {
             if at.elapsed() < Duration::from_secs(4) {
@@ -864,12 +907,59 @@ impl GuiApp {
                 self.show_add = false;
                 self.start_pairing(h)
             }
-            Some((2, h)) => {
-                self.store.hosts.retain(|k| !(k.address == h.address && k.http_port == h.port));
-                let _ = self.store.save();
-                self.toast(format!("{} oublié", h.name));
-            }
+            Some((2, h)) => self.confirm_forget = Some(h),
             _ => {}
+        }
+    }
+
+    /// Forget a host: drop the pairing on the host (best effort) and remove it from this client.
+    fn forget(&mut self, h: HostRef) {
+        let c = client_for(&self.store, &h);
+        self.rt().spawn(async move {
+            let _ = c.https_get("/unpair", &[], Duration::from_secs(3)).await;
+        });
+        self.store.hosts.retain(|k| !(k.address == h.address && k.http_port == h.port));
+        let _ = self.store.save();
+        let prefix = format!("{}#", h.key());
+        self.covers.retain(|k, _| !k.starts_with(&prefix));
+        self.toast(format!("{} oublié", h.name));
+    }
+
+    /// "Do you really want to forget this device?"
+    fn forget_dialog(&mut self, ctx: &egui::Context) {
+        let Some(h) = self.confirm_forget.clone() else { return };
+        let w = (ctx.content_rect().width() - 48.0).clamp(240.0, 500.0);
+        let mut choice = None;
+        let r = egui::Modal::new(egui::Id::unique("forget-host"))
+            .backdrop_color(Color32::from_black_alpha(170))
+            .frame(egui::Frame::new().fill(Color32::from_rgba_unmultiplied(18, 18, 21, 245)).stroke(Stroke::new(1.0, th::white(0.12))).corner_radius(22).inner_margin(32))
+            .show(ctx, |ui| {
+                ui.set_width(w);
+                ui.spacing_mut().item_spacing.y = 10.0;
+                th::eyebrow(ui, &format!("Oublier · {}", h.name), th::WARN);
+                th::text(ui, "Voulez-vous vraiment oublier cet appareil ?", th::display(if w < 400.0 { 26.0 } else { 32.0 }), th::TEXT);
+                th::text(ui, format!("{} ({}:{}) sera retiré de la liste et son appairage supprimé. Il faudra l'appairer de nouveau avec un code PIN pour s'y connecter.", h.name, h.address, h.port), th::body(15.0), th::MUTED);
+                ui.add_space(14.0);
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 48.0), Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    if th::button(ui, th::Btn::Light, None, "Oublier", None, true).clicked() {
+                        choice = Some(true);
+                    }
+                    if th::button(ui, th::Btn::Outline, None, "Annuler", None, true).clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        if r.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                self.confirm_forget = None;
+                self.forget(h);
+            }
+            Some(false) => self.confirm_forget = None,
+            None => {}
         }
     }
 
@@ -962,31 +1052,69 @@ impl GuiApp {
                     });
                     return;
                 };
-                grid(ui, apps, 300.0, 20.0, |ui, a| {
+                let covers = &self.covers;
+                let cols_w = if w < 600.0 { 140.0 } else { 180.0 };
+                grid(ui, apps, cols_w, 24.0, |ui, a| {
                     let running = current == a.id;
-                    th::card(if running { th::ACCENT } else { th::white(0.12) }).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            th::icon_tile(ui, |p, r| th::paint_gamepad(p, r, th::TEXT));
-                            if running {
-                                ui.with_layout(Layout::right_to_left(Align::Min), |ui| th::pill(ui, th::PillKind::Filled(th::ACCENT), 3, "EN COURS"));
-                            }
-                        });
-                        ui.add_space(14.0);
-                        ui.add(egui::Label::new(RichText::new(&a.title).font(th::display(24.0)).color(th::TEXT)).truncate());
-                        ui.add_space(10.0);
-                        th::rule(ui, th::white(0.08));
-                        ui.add_space(12.0);
-                        // Full-width buttons, one under the other.
-                        let full = ui.available_width();
-                        ui.spacing_mut().item_spacing.y = 10.0;
-                        if th::button(ui, th::Btn::Accent, Some(th::Icon::Play), if running { "Reprendre" } else { "Lancer" }, Some(full), true).clicked() {
-                            launch = Some(a.id);
+                    let cw = ui.available_width();
+                    // Moonlight-style 2:3 box art; click to launch / resume.
+                    let (r, resp) = ui.allocate_exact_size(vec2(cw, cw * 1.5), Sense::click());
+                    let hover = resp.hovered();
+                    let r = if hover { r.translate(vec2(0.0, -3.0)) } else { r };
+                    let p = ui.painter();
+                    if hover {
+                        p.rect_filled(r.translate(vec2(0.0, 10.0)).shrink(6.0), 16.0, Color32::from_black_alpha(110));
+                    }
+                    match covers.get(&cover_key(&host, a.id)).and_then(|t| t.as_ref()) {
+                        Some(tex) => {
+                            // Fill the frame (crop the overflow) whatever the art's aspect.
+                            let [tw, th_] = tex.size().map(|v| v as f32);
+                            let (ta, fa) = (tw / th_.max(1.0), 2.0 / 3.0);
+                            let uv = if ta > fa {
+                                let u = fa / ta;
+                                Rect::from_min_max(pos2(0.5 - u / 2.0, 0.0), pos2(0.5 + u / 2.0, 1.0))
+                            } else {
+                                let v = ta / fa;
+                                Rect::from_min_max(pos2(0.0, 0.5 - v / 2.0), pos2(1.0, 0.5 + v / 2.0))
+                            };
+                            egui::Image::new((tex.id(), r.size())).uv(uv).corner_radius(14).paint_at(ui, r);
                         }
-                        if running && th::button(ui, th::Btn::Outline, None, "Quitter l'application", Some(full), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
+                        None => {
+                            p.rect_filled(r, 14.0, th::SURFACE2);
+                            th::paint_gamepad(p, Rect::from_center_size(r.center() - vec2(0.0, r.height() * 0.12), Vec2::splat(r.width() * 0.3)), th::MUTED);
+                            let g = p.layout(a.title.clone(), th::display((cw / 8.0).clamp(16.0, 24.0)), th::TEXT, r.width() - 28.0);
+                            p.galley(pos2(r.center().x - g.size().x / 2.0, r.center().y + r.height() * 0.06), g, th::TEXT);
+                        }
+                    }
+                    let border = if running {
+                        Stroke::new(2.0, th::ACCENT)
+                    } else if hover {
+                        Stroke::new(1.0, th::white(0.45))
+                    } else {
+                        Stroke::new(1.0, th::white(0.1))
+                    };
+                    p.rect_stroke(r, 14.0, border, egui::StrokeKind::Inside);
+                    if hover {
+                        p.rect_filled(r, 14.0, Color32::from_black_alpha(70));
+                        let c = r.center();
+                        p.circle_filled(c, 28.0, th::ACCENT);
+                        th::paint_icon(p, th::Icon::Play, Rect::from_center_size(c + vec2(2.0, 0.0), Vec2::splat(22.0)), th::BG);
+                    }
+                    if running {
+                        let mut pui = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(10.0)).layout(Layout::left_to_right(Align::Min)));
+                        th::pill(&mut pui, th::PillKind::Filled(th::ACCENT), 3, "EN COURS");
+                    }
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if running { "Reprendre" } else { "Lancer" }).clicked() {
+                        launch = Some(a.id);
+                    }
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(RichText::new(&a.title).font(th::semibold(15.0)).color(if running { th::ACCENT } else { th::TEXT })).truncate());
+                    if running {
+                        ui.add_space(4.0);
+                        if th::button(ui, th::Btn::Outline, None, "Quitter", Some(cw), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
                             quit = true;
                         }
-                    });
+                    }
                 });
                 ui.add_space(40.0);
             });
