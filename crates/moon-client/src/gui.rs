@@ -163,7 +163,7 @@ pub struct GuiApp {
     show_add: bool,
     /// Settings: section to scroll to, and where each section was last frame.
     settings_jump: Option<usize>,
-    section_tops: [f32; 4],
+    section_tops: [f32; 5],
     /// Height of the pairing / connecting dialog last frame (to place it).
     dialog_h: f32,
     /// Microphones of this machine, listed when the settings open.
@@ -175,6 +175,8 @@ pub struct GuiApp {
     /// System shortcut capture for this window (None: not possible here / not set up yet).
     keygrab: Option<crate::keygrab::KeyGrab>,
     keygrab_tried: bool,
+    /// Controllers and their setup, while the settings are open.
+    pads: Option<crate::padmap::Service>,
 }
 
 fn cover_key(h: &HostRef, app_id: u32) -> String {
@@ -236,13 +238,14 @@ impl GuiApp {
             look,
             show_add: false,
             settings_jump: None,
-            section_tops: [f32::MAX; 4],
+            section_tops: [f32::MAX; 5],
             dialog_h: 520.0,
             mics: None,
             confirm_forget: None,
             covers: HashMap::new(),
             keygrab: None,
             keygrab_tried: false,
+            pads: None,
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -560,6 +563,15 @@ impl eframe::App for GuiApp {
             *self.targets.lock().unwrap() = list;
         }
 
+        // Controllers are read here only while the settings are open (a stream reads its own).
+        if matches!(self.screen, Screen::Settings) {
+            if self.pads.is_none() {
+                let c = ctx.clone();
+                self.pads = Some(crate::padmap::Service::start(move || c.request_repaint()));
+            }
+        } else {
+            self.pads = None;
+        }
         if matches!(self.screen, Screen::Streaming) {
             if !self.keygrab_tried {
                 self.keygrab_tried = true;
@@ -735,7 +747,7 @@ fn toggle_row(ui: &mut egui::Ui, last: bool, label: &str, desc: &str, value: &mu
 }
 
 /// A settings section: panel with a phase glyph + title header. Records where it is for the side nav.
-fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 4], jump: &mut Option<usize>, add: impl FnOnce(&mut egui::Ui)) {
+fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 5], jump: &mut Option<usize>, add: impl FnOnce(&mut egui::Ui)) {
     let r = th::panel()
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -761,7 +773,9 @@ fn section(ui: &mut egui::Ui, idx: usize, title: &str, tops: &mut [f32; 4], jump
     ui.add_space(32.0);
 }
 
-const SECTIONS: [&str; 4] = ["Vidéo", "Audio et micro", "Affichage", "Session"];
+const SECTIONS: [&str; 5] = ["Vidéo", "Audio et micro", "Affichage", "Manettes", "Session"];
+/// Moon phase of each section in the side navigation, new moon to full moon.
+const PHASES: [u8; 5] = [0, 1, 2, 4, 3];
 
 impl GuiApp {
     fn header_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
@@ -1186,7 +1200,7 @@ impl GuiApp {
                 } else if resp.hovered() {
                     p.rect_filled(r, 10.0, th::white(0.04));
                 }
-                th::paint_phase(p, pos2(r.left() + 20.0, r.center().y), 6.5, i as u8, if on { th::ACCENT } else { th::FAINT });
+                th::paint_phase(p, pos2(r.left() + 20.0, r.center().y), 6.5, PHASES[i], if on { th::ACCENT } else { th::FAINT });
                 let col = if on || resp.hovered() { th::TEXT } else { th::MUTED };
                 p.text(pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, *label, th::body(15.0), col);
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -1203,6 +1217,8 @@ impl GuiApp {
         let scroll = Rect::from_min_max(pos2(main_left, body.top()), body.max);
         let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(scroll).layout(Layout::top_down(Align::Min)));
         let mics = self.mics.get_or_insert_with(moon_media::audio_io::input_devices).clone();
+        let pads_view = self.pads.as_ref().map(|p| p.view.lock().unwrap().clone()).unwrap_or_default();
+        let mut pad_cmds: Vec<crate::padmap::Cmd> = Vec::new();
         let (s, tops, jump) = (&mut self.settings, &mut self.section_tops, &mut self.settings_jump);
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(&mut sui, |ui| {
             ui.set_width(main_w);
@@ -1235,7 +1251,8 @@ impl GuiApp {
                 toggle_row(ui, false, "Capturer les raccourcis système", "Touche Windows, Alt+Tab, Alt+F4… vont à l'hôte quand le stream a le focus.", &mut s.capture_shortcuts);
                 toggle_row(ui, true, "Synchro verticale (V-Sync)", "Pas de déchirement, mais plus de latence · appliqué au prochain démarrage.", &mut s.vsync);
             });
-            section(ui, 3, SECTIONS[3], tops, jump, |ui| {
+            section(ui, 3, SECTIONS[3], tops, jump, |ui| controllers_ui(ui, &pads_view, &mut pad_cmds));
+            section(ui, 4, SECTIONS[4], tops, jump, |ui| {
                 toggle_row(ui, true, "Quitter l'application sur l'hôte", "En fermant le stream, l'application lancée sur l'hôte est fermée aussi.", &mut s.quit_app_on_exit);
             });
 
@@ -1262,6 +1279,11 @@ impl GuiApp {
             });
             ui.add_space(48.0);
         });
+        if let Some(p) = self.pads.as_ref() {
+            for c in pad_cmds {
+                p.send(c);
+            }
+        }
         if format!("{:?}", before) != format!("{:?}", self.settings) {
             self.settings.save(&self.store);
         }
@@ -1370,6 +1392,124 @@ fn mic_choice(ui: &mut egui::Ui, s: &mut Settings, mics: &[moon_media::audio_io:
             s.mic_device = dev;
         }
     }
+}
+
+/// Controllers: what is plugged in, how it is understood, live view, guided setup.
+fn controllers_ui(ui: &mut egui::Ui, v: &crate::padmap::View, cmds: &mut Vec<crate::padmap::Cmd>) {
+    use crate::padmap::{Cmd, Known, STEPS};
+    if let Some(w) = &v.wizard {
+        let name = v.pads.iter().find(|p| p.id == w.pad).map(|p| p.name.as_str()).unwrap_or("Manette");
+        row(ui, false, |ui| {
+            th::eyebrow(ui, &format!("Configuration · {name} · étape {} sur {}", (w.step + 1).min(STEPS.len()), STEPS.len()), th::ACCENT);
+            ui.add_space(6.0);
+            let prompt = STEPS.get(w.step).map(|s| s.1).unwrap_or("Enregistrement…");
+            th::text(ui, prompt, th::semibold(20.0), th::TEXT);
+            ui.add_space(6.0);
+            th::text(ui, "Une action à la fois : appuie, puis relâche. Rien ne se passe ? Appuie plus franchement, ou « Passer » si ta manette n'a pas ce contrôle.", th::body(14.0), th::MUTED);
+            ui.add_space(14.0);
+            // Progress.
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(520.0), 6.0), Sense::hover());
+            ui.painter().rect_filled(r, 3.0, th::SURFACE2);
+            let done = Rect::from_min_size(r.min, vec2(r.width() * w.step as f32 / STEPS.len() as f32, r.height()));
+            ui.painter().rect_filled(done, 3.0, th::ACCENT);
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if th::button(ui, th::Btn::Outline, None, "Passer", None, true).clicked() {
+                    cmds.push(Cmd::Skip);
+                }
+                if th::button(ui, th::Btn::Light, None, "Annuler", None, true).clicked() {
+                    cmds.push(Cmd::Cancel);
+                }
+            });
+        });
+    }
+    if v.pads.is_empty() {
+        row(ui, v.message.is_none(), |ui| {
+            th::text(ui, "Aucune manette détectée", th::semibold(16.0), th::TEXT);
+            th::text(ui, "Branche-la en USB ou connecte-la en Bluetooth : elle apparaît ici. Xbox, PlayStation, 8BitDo, Switch Pro… toutes sont envoyées à l'hôte comme une manette Xbox 360.", th::body(14.0), th::MUTED);
+        });
+    }
+    let n = v.pads.len();
+    for (i, p) in v.pads.iter().enumerate() {
+        let last = i + 1 == n && v.message.is_none();
+        row(ui, last, |ui| {
+            let (status, col) = match p.known {
+                Known::Profile => ("Configurée par toi", th::ACCENT),
+                Known::Sdl => ("Reconnue automatiquement", th::TEXT2),
+                Known::Guessed => ("Inconnue : disposition standard supposée", th::WARN),
+            };
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    th::text(ui, &p.name, th::semibold(16.0), th::TEXT);
+                    th::text(ui, status, th::body(13.0), col);
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let busy = v.wizard.is_some();
+                    if p.known == Known::Profile && th::button(ui, th::Btn::Outline, None, "Réglage d'origine", None, !busy).clicked() {
+                        cmds.push(Cmd::Reset(p.id));
+                    }
+                    if th::button(ui, th::Btn::Accent, None, "Configurer", None, !busy).clicked() {
+                        cmds.push(Cmd::Configure(p.id));
+                    }
+                });
+            });
+            ui.add_space(12.0);
+            paint_pad(ui, &p.state);
+        });
+    }
+    if let Some(m) = &v.message {
+        row(ui, true, |ui| {
+            th::text(ui, m, th::body(14.0), th::TEXT2);
+        });
+    }
+}
+
+/// Live view of a controller as the host receives it (Xbox 360 layout).
+fn paint_pad(ui: &mut egui::Ui, g: &moon_proto::control::input::Gamepad) {
+    use egui::Pos2;
+    use inp::pad;
+    let w = ui.available_width().min(560.0);
+    let (r, _) = ui.allocate_exact_size(vec2(w, 132.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, 14.0, th::SURFACE2);
+    let on = |flag: u32| g.buttons & flag != 0;
+    // Triggers.
+    for (i, (label, v)) in [("LT", g.left_trigger), ("RT", g.right_trigger)].into_iter().enumerate() {
+        let x = if i == 0 { r.left() + 16.0 } else { r.right() - 16.0 - 60.0 };
+        let bar = Rect::from_min_size(pos2(x, r.top() + 14.0), vec2(60.0, 8.0));
+        p.rect_filled(bar, 4.0, th::BORDER);
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(60.0 * v as f32 / 255.0, 8.0)), 4.0, th::ACCENT);
+        p.text(pos2(bar.center().x, bar.bottom() + 9.0), egui::Align2::CENTER_CENTER, label, th::mono(11.0), th::MUTED);
+    }
+    // Sticks.
+    for (i, (x, y, click)) in [(g.ls_x, g.ls_y, on(pad::LS)), (g.rs_x, g.rs_y, on(pad::RS))].into_iter().enumerate() {
+        let c = pos2(if i == 0 { r.left() + 60.0 } else { r.right() - 60.0 }, r.top() + 82.0);
+        p.circle_stroke(c, 28.0, Stroke::new(1.5, th::BORDER_STRONG));
+        let d = c + vec2(x as f32 / 32767.0, -(y as f32) / 32767.0) * 22.0;
+        p.circle_filled(d, 7.0, if click { th::ACCENT } else { th::TEXT2 });
+    }
+    // Buttons.
+    let chip = |label: &str, c: Pos2, lit: bool| {
+        let rr = Rect::from_center_size(c, vec2(if label.chars().count() > 2 { 44.0 } else { 26.0 }, 22.0));
+        p.rect_filled(rr, 11.0, if lit { th::ACCENT } else { th::BORDER });
+        p.text(rr.center(), egui::Align2::CENTER_CENTER, label, th::mono_bold(11.0), if lit { th::BG } else { th::MUTED });
+    };
+    let mid = r.center().x;
+    chip("LB", pos2(r.left() + 46.0, r.top() + 46.0), on(pad::LB));
+    chip("RB", pos2(r.right() - 46.0, r.top() + 46.0), on(pad::RB));
+    chip("Back", pos2(mid - 52.0, r.top() + 24.0), on(pad::BACK));
+    chip("Home", pos2(mid, r.top() + 24.0), on(pad::HOME));
+    chip("Start", pos2(mid + 52.0, r.top() + 24.0), on(pad::START));
+    let dc = pos2(mid - 70.0, r.top() + 84.0);
+    chip("↑", dc + vec2(0.0, -24.0), on(pad::UP));
+    chip("↓", dc + vec2(0.0, 24.0), on(pad::DOWN));
+    chip("←", dc + vec2(-28.0, 0.0), on(pad::LEFT));
+    chip("→", dc + vec2(28.0, 0.0), on(pad::RIGHT));
+    let fc = pos2(mid + 70.0, r.top() + 84.0);
+    chip("Y", fc + vec2(0.0, -24.0), on(pad::Y));
+    chip("A", fc + vec2(0.0, 24.0), on(pad::A));
+    chip("X", fc + vec2(-28.0, 0.0), on(pad::X));
+    chip("B", fc + vec2(28.0, 0.0), on(pad::B));
 }
 
 /// Bitrate: big value, "advised" chip, log slider.

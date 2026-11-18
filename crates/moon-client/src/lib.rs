@@ -3,6 +3,7 @@ pub mod gamepad;
 pub mod gui;
 pub mod http;
 pub mod keygrab;
+pub mod padmap;
 pub mod probe;
 pub mod rtsp;
 pub mod session;

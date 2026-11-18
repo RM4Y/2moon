@@ -152,6 +152,8 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
             return;
         }
     };
+    // Profiles made with the setup in the settings (any controller, any mode).
+    let profiles = crate::padmap::Profiles::load();
     let mut slots = Slots::default();
     let mut sent: HashMap<u16, Gamepad> = HashMap::new();
     let mut effects: HashMap<u16, gilrs::ff::Effect> = HashMap::new();
@@ -159,7 +161,7 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
     for id in forwarded(&gilrs) {
         if let Some(i) = slots.assign(id) {
             let p = gilrs.gamepad(id);
-            info!("controller {}: {} (rumble: {})", i + 1, p.name(), p.is_ff_supported());
+            info!("controller {}: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p, &profiles));
         }
     }
     while !stop.load(Ordering::Relaxed) {
@@ -172,7 +174,7 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
                     if forwarded(&gilrs).contains(&ev.id) {
                         if let Some(i) = slots.assign(ev.id) {
                             let p = gilrs.gamepad(ev.id);
-                            info!("controller {} connected: {} (rumble: {})", i + 1, p.name(), p.is_ff_supported());
+                            info!("controller {} connected: {} (rumble: {}, {})", i + 1, p.name(), p.is_ff_supported(), describe(&p, &profiles));
                         }
                     }
                 }
@@ -223,7 +225,7 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
         for id in keep {
             let p = gilrs.gamepad(id);
             let Some(i) = slots.assign(id) else { continue };
-            let mut g = state_of(&p);
+            let mut g = crate::padmap::state(&p, &profiles);
             g.index = i;
             g.active_mask = mask | 1 << i;
             if sent.get(&i) != Some(&g) {
@@ -235,6 +237,17 @@ pub fn run(ctl: ControlSender, stop: Arc<AtomicBool>, focus: Arc<AtomicBool>, ru
     // Leave nothing held, and unplug our pads on the host.
     for i in sent.keys() {
         ctl.input(&Event::Gamepad(Gamepad { index: *i, active_mask: 0, ..Default::default() }));
+    }
+}
+
+/// How a controller is mapped, for the logs.
+fn describe(p: &Pad<'_>, profiles: &crate::padmap::Profiles) -> String {
+    if profiles.get(p).is_some() {
+        "profile from the setup".into()
+    } else if p.mapping_source() == gilrs::MappingSource::SdlMappings {
+        "SDL mapping".into()
+    } else {
+        format!("no mapping, standard layout assumed, id {}", crate::padmap::uuid_of(p))
     }
 }
 

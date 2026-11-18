@@ -349,7 +349,8 @@ pub fn paint_icon(p: &Painter, icon: Icon, r: Rect, color: Color32) {
 /// Moon phase glyph: 0 new (outline), 1 waxing crescent, 2 first quarter, 3 full.
 pub fn paint_phase(p: &Painter, c: Pos2, radius: f32, phase: u8, color: Color32) {
     let st = Stroke::new((radius / 5.0).max(1.0), color);
-    if phase >= 3 {
+    // 0 new, 1 crescent, 2 first quarter, 4 gibbous, 3 (or more) full.
+    if phase == 3 || phase > 4 {
         p.circle_filled(c, radius, color);
         return;
     }
@@ -358,6 +359,7 @@ pub fn paint_phase(p: &Painter, c: Pos2, radius: f32, phase: u8, color: Color32)
     let k = match phase {
         1 => 0.5,
         2 => 0.0,
+        4 => -0.5,
         _ => return,
     };
     let mut m = Mesh::default();

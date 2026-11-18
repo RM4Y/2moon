@@ -138,6 +138,7 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     let mut store = Store::load(args.state_dir.unwrap_or_else(Store::default_dir))?;
+    moon_client::padmap::set_dir(store.dir.clone());
 
     let Some(cmd) = args.cmd else {
         return moon_client::gui::run(store);
