@@ -42,6 +42,8 @@ pub struct Settings {
     pub vsync: bool,
     /// Send the microphone to the host (2moon hosts only).
     pub mic: bool,
+    /// Which microphone (input device id); None = the system default.
+    pub mic_device: Option<String>,
     /// 4:4:4 chroma when available (sharper text, more bandwidth).
     pub yuv444: bool,
     /// Accept HDR (10-bit) streams, tone-mapped to this SDR window.
@@ -50,7 +52,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, yuv444: false, hdr: false }
+        Self { width: 1920, height: 1080, fps: 60, bitrate_kbps: 20_000, codec: "auto".into(), audio_channels: 2, hw_decode: true, fullscreen: false, quit_app_on_exit: false, show_stats: false, vsync: false, mic: false, mic_device: None, yuv444: false, hdr: false }
     }
 }
 
@@ -128,7 +130,8 @@ struct Stream {
 }
 
 pub struct GuiApp {
-    rt: tokio::runtime::Runtime,
+    /// Always Some until drop (see `Drop for GuiApp`).
+    rt: Option<tokio::runtime::Runtime>,
     store: Store,
     settings: Settings,
     screen: Screen,
@@ -150,6 +153,8 @@ pub struct GuiApp {
     section_tops: [f32; 4],
     /// Height of the pairing / connecting dialog last frame (to place it).
     dialog_h: f32,
+    /// Microphones of this machine, listed when the settings open.
+    mics: Option<Vec<moon_media::audio_io::InputDevice>>,
 }
 
 pub fn run(store: Store) -> Result<()> {
@@ -171,14 +176,27 @@ fn client_for(store: &Store, h: &HostRef) -> GsClient {
     c
 }
 
+impl Drop for GuiApp {
+    fn drop(&mut self) {
+        // The GUI runs inside `#[tokio::main]`: dropping a runtime there panics.
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
 impl GuiApp {
+    fn rt(&self) -> &tokio::runtime::Runtime {
+        self.rt.as_ref().expect("tokio runtime")
+    }
+
     fn new(cc: &eframe::CreationContext<'_>, store: Store) -> Self {
         let look = Look::new(&cc.egui_ctx);
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let (tx, rx) = mpsc::channel();
         let settings = Settings::load(&store);
         let app = Self {
-            rt,
+            rt: Some(rt),
             store,
             settings,
             screen: Screen::Home,
@@ -196,6 +214,7 @@ impl GuiApp {
             settings_jump: None,
             section_tops: [f32::MAX; 4],
             dialog_h: 520.0,
+            mics: None,
         };
         app.start_discovery(cc.egui_ctx.clone());
         let mut app = app;
@@ -243,7 +262,7 @@ impl GuiApp {
     /// Refresh every host's serverinfo every few seconds.
     fn start_polling(&self, ctx: egui::Context) {
         let (targets, status, identity) = (self.targets.clone(), self.status.clone(), self.store.identity.clone());
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             loop {
                 let list = targets.lock().unwrap().clone();
                 let mut tasks = Vec::new();
@@ -301,7 +320,7 @@ impl GuiApp {
         c.server_cert = None;
         let (tx, p, hr) = (self.tx.clone(), pin.clone(), h.clone());
         let device = crate::device_name();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             let r = async {
                 c.pair(&p, &device).await?;
                 let info = c.server_info().await?;
@@ -322,7 +341,7 @@ impl GuiApp {
     fn open_apps(&mut self, h: HostRef) {
         let c = client_for(&self.store, &h);
         let (tx, hr) = (self.tx.clone(), h.clone());
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             let r = c.app_list().await;
             let _ = tx.send(Msg::Apps(hr, r));
         });
@@ -344,7 +363,7 @@ impl GuiApp {
             },
             ..StreamConfig::default()
         };
-        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, yuv444: s.yuv444, hdr: s.hdr, zero_copy: Some(self.video.zero_copy_flag()) };
+        let opts = SessionOptions { stream, app_id: Some(app_id), audio_output: true, decode: true, codec: s.codec(), hw_decode: s.hw_decode, mic: s.mic, mic_device: s.mic_device.clone(), yuv444: s.yuv444, hdr: s.hdr, zero_copy: Some(self.video.zero_copy_flag()) };
         // Decoded YUV frames go straight to the GPU renderer: no CPU colour conversion.
         let generation = self.video.reset();
         let (view, sink_ctx) = (self.video.clone(), ctx.clone());
@@ -354,7 +373,7 @@ impl GuiApp {
         });
         let c = client_for(&self.store, &h);
         let (tx, hr) = (self.tx.clone(), h.clone());
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             let r = Session::start(&c, opts, sink).await;
             let _ = tx.send(Msg::Started(hr, Box::new(r)));
         });
@@ -364,7 +383,7 @@ impl GuiApp {
     fn quit_app(&mut self, h: &HostRef) {
         let c = client_for(&self.store, h);
         let tx = self.tx.clone();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             let _ = tx.send(Msg::Quit(c.cancel().await));
         });
     }
@@ -381,7 +400,7 @@ impl GuiApp {
             std::thread::spawn(move || st.session.stop());
             self.video.reset();
             if quit {
-                self.rt.spawn(async move {
+                self.rt().spawn(async move {
                     let _ = c.cancel().await;
                 });
             }
@@ -390,6 +409,10 @@ impl GuiApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title("2moon".into()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // The decoder was what asked for repaints: without this the window keeps
+        // showing the last video frame until the next input event.
+        ctx.request_repaint();
         if let Some(w) = why {
             self.toast(w);
         }
@@ -557,6 +580,7 @@ fn grid<T>(ui: &mut egui::Ui, items: &[T], min_w: f32, gap: f32, mut cell: impl 
             ui.spacing_mut().item_spacing.x = gap;
             for it in row {
                 ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
                     ui.set_width(cw);
                     cell(ui, it);
                 });
@@ -703,6 +727,7 @@ impl GuiApp {
             }
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !active {
                 self.screen = if to_settings { Screen::Settings } else { Screen::Home };
+                self.mics = None;
             }
         }
 
@@ -937,7 +962,7 @@ impl GuiApp {
                     });
                     return;
                 };
-                grid(ui, apps, 260.0, 20.0, |ui, a| {
+                grid(ui, apps, 300.0, 20.0, |ui, a| {
                     let running = current == a.id;
                     th::card(if running { th::ACCENT } else { th::white(0.12) }).show(ui, |ui| {
                         ui.set_width(ui.available_width());
@@ -952,17 +977,25 @@ impl GuiApp {
                         ui.add_space(10.0);
                         th::rule(ui, th::white(0.08));
                         ui.add_space(12.0);
-                        ui.horizontal(|ui| {
-                            let full = ui.available_width();
-                            let quit_w = 100.0;
-                            let main_w = if running { full - quit_w - 10.0 } else { full };
+                        let full = ui.available_width();
+                        let quit_w = 120.0;
+                        // Side by side when the main button keeps room to breathe, else stacked.
+                        let side = !running || full - quit_w - 10.0 >= 170.0;
+                        let main_w = if running && side { full - quit_w - 10.0 } else { full };
+                        let mut buttons = |ui: &mut egui::Ui| {
                             if th::button(ui, th::Btn::Accent, Some(th::Icon::Play), if running { "Reprendre" } else { "Lancer" }, Some(main_w), true).clicked() {
                                 launch = Some(a.id);
                             }
-                            if running && th::button(ui, th::Btn::Outline, None, "Quitter", Some(quit_w), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
+                            if running && th::button(ui, th::Btn::Outline, None, "Quitter l'application", Some(if side { quit_w } else { full }), true).on_hover_text("Fermer l'application sur l'hôte").clicked() {
                                 quit = true;
                             }
-                        });
+                        };
+                        if side {
+                            ui.horizontal(|ui| buttons(ui));
+                        } else {
+                            ui.spacing_mut().item_spacing.y = 10.0;
+                            buttons(ui);
+                        }
                     });
                 });
                 ui.add_space(40.0);
@@ -1025,6 +1058,7 @@ impl GuiApp {
 
         let scroll = Rect::from_min_max(pos2(main_left, body.top()), body.max);
         let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(scroll).layout(Layout::top_down(Align::Min)));
+        let mics = self.mics.get_or_insert_with(moon_media::audio_io::input_devices).clone();
         let (s, tops, jump) = (&mut self.settings, &mut self.section_tops, &mut self.settings_jump);
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(&mut sui, |ui| {
             ui.set_width(main_w);
@@ -1049,7 +1083,7 @@ impl GuiApp {
             });
             section(ui, 1, SECTIONS[1], tops, jump, |ui| {
                 seg_row(ui, false, "Canaux audio", &mut s.audio_channels, &[(2, "Stéréo"), (6, "5.1"), (8, "7.1")], false, 64.0);
-                toggle_row(ui, true, "Envoyer mon micro à l'hôte", "Hôtes 2moon · devient le micro par défaut de l'hôte pendant le stream.", &mut s.mic);
+                row(ui, true, |ui| mic_choice(ui, s, &mics));
             });
             section(ui, 2, SECTIONS[2], tops, jump, |ui| {
                 toggle_row(ui, false, "Plein écran au démarrage", "Le stream s'ouvre directement en plein écran.", &mut s.fullscreen);
@@ -1158,6 +1192,37 @@ impl GuiApp {
         self.dialog_h = dialog_h;
         if cancel {
             self.screen = Screen::Home;
+        }
+    }
+}
+
+/// Microphone: off, the system default, or one of this machine's microphones.
+fn mic_choice(ui: &mut egui::Ui, s: &mut Settings, mics: &[moon_media::audio_io::InputDevice]) {
+    label_desc(ui, "Micro envoyé à l'hôte", Some("Hôtes 2moon · devient le micro par défaut de l'hôte pendant le stream · Ctrl+Alt+Maj+M pour le couper."));
+    ui.add_space(6.0);
+    ui.spacing_mut().item_spacing.y = 6.0;
+    let w = ui.available_width();
+    let mut pick: Option<(bool, Option<String>)> = None;
+    if th::choice(ui, w, !s.mic, "Désactivé", None).clicked() {
+        pick = Some((false, None));
+    }
+    if th::choice(ui, w, s.mic && s.mic_device.is_none(), "Micro par défaut du système", None).clicked() {
+        pick = Some((true, None));
+    }
+    for m in mics {
+        let on = s.mic && s.mic_device.as_deref() == Some(m.id.as_str());
+        if th::choice(ui, w, on, &m.label, None).on_hover_text(&m.id).clicked() {
+            pick = Some((true, Some(m.id.clone())));
+        }
+    }
+    // A chosen microphone that is not plugged in right now stays visible.
+    if let Some(id) = s.mic_device.clone().filter(|id| !mics.iter().any(|m| &m.id == id)) {
+        th::choice(ui, w, s.mic, &id, Some("non branché · le micro par défaut sera utilisé"));
+    }
+    if let Some((on, dev)) = pick {
+        s.mic = on;
+        if on {
+            s.mic_device = dev;
         }
     }
 }

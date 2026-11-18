@@ -80,8 +80,10 @@ pub struct SessionOptions {
     pub codec: Option<Codec>,
     /// Use the GPU decoder (NVDEC / VAAPI) when available.
     pub hw_decode: bool,
-    /// Send the default microphone to the host (if the host supports it).
+    /// Send the microphone to the host (if the host supports it).
     pub mic: bool,
+    /// Which microphone (see `moon_media::audio_io::input_devices`); None = the default one.
+    pub mic_device: Option<String>,
     /// Ask for 4:4:4 chroma when the host and this machine can do it.
     pub yuv444: bool,
     /// Accept HDR (10-bit) when the host and this machine can do it; shown
@@ -239,9 +241,10 @@ impl Session {
                 Some(port) => {
                     let addr = resolve(port)?;
                     let (stop, stats, muted) = (stop.clone(), stats.clone(), mic_muted.clone());
+                    let device = opts.mic_device.clone();
                     let cipher = moon_proto::audio::mic::cipher(rikey, rikeyid);
                     threads.push(std::thread::Builder::new().name("mic-tx".into()).spawn(move || {
-                        if let Err(e) = mic_tx(addr, cipher, stop, stats, muted) {
+                        if let Err(e) = mic_tx(addr, cipher, stop, stats, muted, device) {
                             warn!("microphone: {e:#}");
                         }
                     })?);
@@ -494,11 +497,11 @@ fn video_decode(frames: mpsc::Receiver<moon_proto::video::Frame>, mut sink: Fram
 }
 
 /// Capture the default microphone, encode 10 ms Opus frames and send them to the host.
-fn mic_tx(addr: SocketAddr, cipher: AudioCipher, stop: Arc<AtomicBool>, stats: Arc<Stats>, muted: Arc<AtomicBool>) -> Result<()> {
+fn mic_tx(addr: SocketAddr, cipher: AudioCipher, stop: Arc<AtomicBool>, stats: Arc<Stats>, muted: Arc<AtomicBool>, device: Option<String>) -> Result<()> {
     use moon_proto::audio::mic;
     let sock = udp_socket(addr)?;
-    // MOON_MIC_DEVICE: a PulseAudio/PipeWire source name instead of the default microphone.
-    let device = std::env::var("MOON_MIC_DEVICE").ok().filter(|d| !d.is_empty());
+    // MOON_MIC_DEVICE (a PulseAudio/PipeWire source name) overrides the chosen microphone.
+    let device = std::env::var("MOON_MIC_DEVICE").ok().filter(|d| !d.is_empty()).or(device);
     let mut rec = AudioInput::open(device.as_deref(), mic::SAMPLE_RATE, 1, mic::FRAME_MS)?;
     // Voice at 48 kbit/s VBR: clear speech, small packets.
     let mut enc = moon_media::opus::OpusEncoder::new(StreamLayout::mono(), mic::SAMPLE_RATE, mic::FRAME_MS, 48_000, false)?;

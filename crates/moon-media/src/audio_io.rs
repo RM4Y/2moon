@@ -37,8 +37,45 @@ impl AudioOutput {
     }
 }
 
-/// Capture of interleaved i16 PCM from the default input device (or, on Linux,
-/// a named PulseAudio source).
+/// A microphone that [`AudioInput::open`] can record from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    /// What to pass to [`AudioInput::open`] (PulseAudio source name / cpal device id).
+    pub id: String,
+    /// Human-readable name.
+    pub label: String,
+}
+
+/// The microphones of this machine (monitors of outputs excluded). Empty if
+/// they cannot be listed; recording from the default one still works.
+pub fn input_devices() -> Vec<InputDevice> {
+    #[cfg(not(windows))]
+    {
+        // pulse-simple cannot enumerate: ask pactl (PulseAudio and PipeWire both ship it).
+        let Ok(out) = std::process::Command::new("pactl").env("LC_ALL", "C").args(["list", "sources"]).output() else { return Vec::new() };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut v = Vec::new();
+        let mut name: Option<String> = None;
+        for line in text.lines() {
+            let l = line.trim();
+            if let Some(n) = l.strip_prefix("Name: ") {
+                name = Some(n.to_string());
+            } else if let Some(d) = l.strip_prefix("Description: ") {
+                if let Some(n) = name.take() {
+                    if !n.ends_with(".monitor") {
+                        v.push(InputDevice { id: n, label: d.to_string() });
+                    }
+                }
+            }
+        }
+        v
+    }
+    #[cfg(windows)]
+    crate::cpal_io::input_devices()
+}
+
+/// Capture of interleaved i16 PCM from the default input device, or a given
+/// one (see [`input_devices`]).
 pub struct AudioInput(InImpl);
 
 impl AudioInput {
@@ -47,8 +84,8 @@ impl AudioInput {
         return Ok(Self(crate::pulse::PulseStream::record(device, rate, channels, fragment_ms)?));
         #[cfg(windows)]
         {
-            let _ = (device, fragment_ms);
-            Ok(Self(crate::cpal_io::CpalInput::open(rate, channels)?))
+            let _ = fragment_ms;
+            Ok(Self(crate::cpal_io::CpalInput::open(device, rate, channels)?))
         }
     }
 

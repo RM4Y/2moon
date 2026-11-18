@@ -125,6 +125,12 @@ impl Look {
     pub fn new(ctx: &egui::Context) -> Self {
         install_fonts(ctx);
         ctx.set_theme(egui::ThemePreference::Dark);
+        ctx.options_mut(|o| {
+            // egui quits on Ctrl+Q (it also matches Ctrl+Alt+Maj+Q, our "back home" shortcut)
+            // and zooms on Ctrl+plus/minus: both would hijack keys meant for the host.
+            o.quit_shortcuts.clear();
+            o.zoom_with_keyboard = false;
+        });
         ctx.all_styles_mut(|style| {
             style.spacing.item_spacing = vec2(10.0, 8.0);
             style.spacing.button_padding = vec2(12.0, 6.0);
@@ -617,6 +623,34 @@ pub fn segmented<T: PartialEq + Clone>(ui: &mut Ui, value: &mut T, opts: &[(T, &
         p.galley(br.center() - g.size() / 2.0, g, fg);
     }
     changed
+}
+
+/// One option of a single-choice list: radio dot + label (+ muted note), accent border when chosen.
+pub fn choice(ui: &mut Ui, width: f32, selected: bool, label: &str, note: Option<&str>) -> Response {
+    let h = if note.is_some() { 56.0 } else { 44.0 };
+    let (r, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
+    let hover = resp.hovered();
+    let p = ui.painter();
+    let (fill, border) = if selected { (white(0.04), ACCENT) } else if hover { (white(0.03), BORDER_STRONG) } else { (BG, BORDER) };
+    p.rect(r, 10.0, fill, Stroke::new(1.0, border), StrokeKind::Inside);
+    let dot = pos2(r.left() + 22.0, r.center().y);
+    p.circle_stroke(dot, 8.0, Stroke::new(1.5, if selected { ACCENT } else { FAINT }));
+    if selected {
+        p.circle_filled(dot, 4.5, ACCENT);
+    }
+    let max_w = r.width() - 56.0;
+    let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat { font_id: if selected { semibold(14.0) } else { body(14.0) }, color: if selected || hover { TEXT } else { TEXT2 }, ..Default::default() });
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
+    let g = p.layout_job(job);
+    let x = r.left() + 42.0;
+    match note {
+        None => p.galley(pos2(x, r.center().y - g.size().y / 2.0), g, TEXT),
+        Some(n) => {
+            p.galley(pos2(x, r.top() + 10.0), g, TEXT);
+            p.text(pos2(x, r.bottom() - 10.0), Align2::LEFT_BOTTOM, n, body(12.0), MUTED);
+        }
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Horizontal slider on a logarithmic scale (accent fill + knob).

@@ -141,10 +141,27 @@ where
     Ok(s)
 }
 
+/// Input devices (id + name), for the microphone choice.
+pub fn input_devices() -> Vec<crate::audio_io::InputDevice> {
+    let Ok(devs) = cpal::default_host().input_devices() else { return Vec::new() };
+    devs.filter_map(|d| {
+        let id = d.id().ok()?.to_string();
+        let label = d.description().map(|x| x.name().to_string()).unwrap_or_else(|_| id.clone());
+        Some(crate::audio_io::InputDevice { id, label })
+    })
+    .collect()
+}
+
 impl CpalInput {
-    /// Capture `channels`@`rate` from the default input device.
-    pub fn open(rate: u32, channels: u8) -> Result<Self> {
-        let dev = cpal::default_host().default_input_device().ok_or_else(|| anyhow!("no audio input device"))?;
+    /// Capture `channels`@`rate` from the input device whose id is `device`
+    /// (the default one if `None` or not found).
+    pub fn open(device: Option<&str>, rate: u32, channels: u8) -> Result<Self> {
+        let host = cpal::default_host();
+        let wanted = device.and_then(|id| host.input_devices().ok()?.find(|d| d.id().is_ok_and(|i| i.to_string() == id)));
+        let dev = match wanted {
+            Some(d) => d,
+            None => host.default_input_device().ok_or_else(|| anyhow!("no audio input device"))?,
+        };
         let def = dev.default_input_config()?;
         let cfg = def.config();
         let shared: Shared = Default::default();

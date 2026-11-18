@@ -214,7 +214,7 @@ async fn main() -> Result<()> {
                 },
                 ..StreamConfig::default()
             };
-            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, yuv444, hdr, zero_copy: None };
+            let opts = SessionOptions { stream, app_id: app, audio_output: !headless, decode: true, codec, hw_decode: !software_decode, mic, mic_device: None, yuv444, hdr, zero_copy: None };
             if headless {
                 let first = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, usize, u32)>));
                 let f2 = first.clone();
