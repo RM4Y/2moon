@@ -1,6 +1,6 @@
 [package]
 name = "moon-server"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -17,8 +17,8 @@ if-addrs = "0.15.0"
 libc = "0.2.191"
 libloading = "0.9.1"
 mdns-sd = "0.22.0"
-moon-media = { version = "0.3.0", path = "../moon-media" }
-moon-proto = { version = "0.3.0", path = "../moon-proto" }
+moon-media = { version = "0.4.0", path = "../moon-media" }
+moon-proto = { version = "0.4.0", path = "../moon-proto" }
 pbkdf2 = "0.12"
 rand = "0.8"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }

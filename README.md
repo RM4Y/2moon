@@ -39,7 +39,8 @@ Options utiles : `--port` (47989 par défaut ; les autres ports en découlent),
 les entrées), `--no-mdns`, `--no-mic`, `--list-clients`, `--name`.
 
 **Micro du client** (extension 2moon, absente de GameStream) : si le client l'active
-(réglage « Micro » ou `moon-client stream --mic`), il envoie son micro par défaut en
+(réglage « Micro envoyé à l'hôte » ou `moon-client stream --mic`), il envoie le micro
+choisi (celui par défaut, ou un micro précis choisi dans les Réglages) en
 Opus mono 48 kHz, chiffré avec la clé de session, sur le port UDP base + 12 (48001).
 L'hôte crée alors un micro virtuel « 2moon Microphone » (PipeWire/PulseAudio, via
 `pactl`), le met comme entrée par défaut pendant le stream, puis restaure l'ancienne
@@ -67,6 +68,14 @@ journalctl --user -u 2moon-server -f      # stats vidéo toutes les 5 s (fps, d�
 **Appairage** : quand un client demande à s'appairer, tapez le PIN affiché par le
 client dans la console de l'hôte, ou `curl 'http://127.0.0.1:47989/pin?pin=1234'`.
 
+**Panneau d'administration web** : `https://<hôte>:47990/` (port de base + 1,
+`--admin-port`, `--no-admin` pour le désactiver). À la première ouverture, créez le
+compte administrateur avec le jeton affiché dans le journal du serveur. On y suit la
+session en direct (images/s, débit, temps d'encodage), on saisit le PIN d'appairage
+dans quatre cases, on révoque les appareils appairés et on lit le journal. Même thème
+que le client. Le certificat est celui de l'hôte (auto-signé) : Firefox l'accepte après
+l'avertissement, Chrome le refuse pour l'instant.
+
 Fonctionnalités : HTTP/HTTPS GameStream avec certificats épinglés, RTSP (clair ou
 chiffré `rtspenc`), flux de contrôle ENet chiffré AES-GCM, vidéo RTP avec FEC
 Reed-Solomon, audio Opus multistream RTP avec FEC et chiffrement AES-CBC, H.264
@@ -76,15 +85,18 @@ de texte Unicode selon la disposition clavier de l'hôte, ex. AZERTY).
 
 ## Client (`moon-client`)
 
-**Interface graphique** : lancez simplement `moon-client` (sans argument).
+**Interface graphique** : lancez simplement `moon-client` (sans argument). Thème « nuit
+lunaire » (ciel étoilé, lune, un accent citron), le même que le panneau d'administration
+de l'hôte.
 
 - Accueil : hôtes trouvés sur le réseau (mDNS) et hôtes enregistrés, avec leur état
   (en ligne, en jeu, hors ligne) ; ajout manuel par adresse.
 - Appairage en un clic : le PIN s'affiche en grand, à saisir sur l'hôte (panneau
   d'administration 2moon ou interface Sunshine).
-- Applications de l'hôte : Lancer, Reprendre, Quitter.
-- Réglages mémorisés : résolution, fps, débit (avec valeur conseillée), codec, audio
-  2/6/8 canaux, décodage GPU, plein écran, statistiques.
+- Applications de l'hôte : Lancer, Reprendre, Quitter l'application.
+- Réglages mémorisés : résolution, fps, débit (avec valeur conseillée), codec, 4:4:4,
+  HDR, audio 2/6/8 canaux, micro envoyé à l'hôte (désactivé, micro par défaut ou un
+  micro précis), décodage GPU, plein écran, statistiques, V-Sync.
 - Le stream s'affiche dans la même fenêtre (texture GPU) ; Ctrl+Alt+Shift+Q revient à l'accueil.
 
 En ligne de commande :
@@ -101,8 +113,10 @@ Options de `stream` : `--codec auto|h264|hevc|av1`, `--software-decode`,
 `--audio-channels 2|6|8`, `--app <id>`, `--quit-on-exit`, `--headless --seconds N`
 (sans fenêtre, affiche des statistiques).
 
-Raccourcis dans la fenêtre : **Ctrl+Alt+Shift+Q** quitter, **+Z** capturer la souris
-(mode relatif, pour les jeux), **+F** plein écran, **+S** statistiques dans le titre.
+Raccourcis dans la fenêtre : **Ctrl+Alt+Shift+Q** revenir à l'accueil, **+Z** capturer
+la souris (mode relatif, pour les jeux), **+F** plein écran, **+S** statistiques,
+**+M** couper le micro. Les lettres sont celles inscrites sur les touches (AZERTY
+compris) ; les touches envoyées à l'hôte gardent leur position physique.
 
 Décodage : NVDEC (GPU NVIDIA) pour H.264/HEVC/AV1, sinon OpenH264 (H.264) ou dav1d (AV1).
 
