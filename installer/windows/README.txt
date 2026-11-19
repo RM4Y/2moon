@@ -32,5 +32,10 @@ Ports utilisés : TCP 47984, 47989, 47990 (administration), 48010 ;
 UDP 47998 à 48000. Sunshine utilise les mêmes : un seul des deux peut
 fonctionner à la fois.
 
+Pare-feu : l'hôte n'est joignable que depuis les réseaux privés (domicile,
+travail). Si le client ne trouve pas l'hôte, vérifiez dans Paramètres >
+Réseau et Internet que votre réseau est « Privé », ou réinstallez en cochant
+« Autoriser sur les réseaux publics ».
+
 Licence : GPL 3.0 ou ultérieure (LICENSE.txt). Bibliothèques incluses :
 voir le dossier LICENSES.
