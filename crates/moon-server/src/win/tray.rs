@@ -4,7 +4,9 @@
 //! - Tooltip: waiting / streaming WxH at N fps / pairing request.
 //! - A balloon when a device asks to pair (the PIN is typed in the admin panel);
 //!   clicking it opens the panel.
-//! - Menu: open the admin panel, restart the host (service) or quit (manual run).
+//! - Menu (left or right click): open the admin panel, restart the host (service)
+//!   and quit. Under the service, quitting stops the service, so the host stays off
+//!   until the next start of Windows (or of the service).
 //!
 //! The panel opens in the browser of the signed-in user, never as SYSTEM: a browser
 //! running as SYSTEM would hand the whole machine to whoever uses it.
@@ -22,7 +24,7 @@ use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSA
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadIconW, LoadImageW, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem, SetTimer, TrackPopupMenu, TranslateMessage, HICON, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON,
-    SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 
 use crate::state::Host;
@@ -32,6 +34,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const NIN_BALLOONUSERCLICK: u32 = 0x0405;
 const ID_OPEN: usize = 1;
 const ID_RESTART: usize = 2;
+const ID_QUIT: usize = 3;
 const TIMER_REFRESH: usize = 1;
 const ICON_ID: u32 = 1;
 
@@ -228,14 +231,21 @@ fn show_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else { return };
         let status = wide(&tip);
         let open = wide(texts.open);
-        let restart = wide(if as_service { texts.restart } else { texts.quit });
+        let restart = wide(texts.restart);
+        let quit = wide(texts.quit);
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         if has_admin {
             let _ = AppendMenuW(menu, MF_STRING, ID_OPEN, PCWSTR(open.as_ptr()));
             let _ = SetMenuDefaultItem(menu, ID_OPEN as u32, 0);
         }
-        let _ = AppendMenuW(menu, MF_STRING, ID_RESTART, PCWSTR(restart.as_ptr()));
+        if as_service {
+            let _ = AppendMenuW(menu, MF_STRING, ID_RESTART, PCWSTR(restart.as_ptr()));
+        }
+        if has_admin || as_service {
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, PCWSTR(quit.as_ptr()));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         // Needed for the menu to close when clicking elsewhere.
@@ -246,9 +256,27 @@ fn show_menu(hwnd: HWND) {
     }
 }
 
+/// Quit for good: under the service, ask the service manager to stop the service
+/// (otherwise it would start a new host); the service then ends this process.
+fn quit_for_good() {
+    let as_service = TRAY.with(|cell| cell.borrow().as_ref().is_some_and(|t| t.as_service));
+    if as_service {
+        use windows_service::service::ServiceAccess;
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+        let stopped = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .and_then(|m| m.open_service(super::service::SERVICE_NAME, ServiceAccess::STOP))
+            .and_then(|s| s.stop().map(|_| ()));
+        match stopped {
+            Ok(()) => info!("service stop requested from the notification area icon"),
+            Err(e) => warn!("cannot stop the service: {e}"),
+        }
+    }
+    end();
+}
+
 /// Remove the icon, then end the host. Under the service, the service starts a new
 /// host a second later: this is the restart.
-fn quit() {
+fn end() {
     TRAY.with(|cell| {
         if let Some(t) = cell.borrow().as_ref() {
             unsafe {
@@ -265,8 +293,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_TRAY => {
             match lparam.0 as u32 {
-                WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
-                WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => open_admin(),
+                WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                NIN_BALLOONUSERCLICK => open_admin(),
                 _ => {}
             }
             LRESULT(0)
@@ -274,7 +302,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             match wparam.0 & 0xffff {
                 ID_OPEN => open_admin(),
-                ID_RESTART => quit(),
+                ID_RESTART => end(),
+                ID_QUIT => quit_for_good(),
                 _ => {}
             }
             LRESULT(0)
