@@ -240,20 +240,104 @@ mod x11 {
 // ---------------------------------------------------------------- Windows
 
 #[cfg(windows)]
-struct Imp;
+struct Imp {
+    nohotkeys: rawkb::NoHotkeys,
+}
 
 #[cfg(windows)]
 impl Imp {
     fn new(_: RawDisplayHandle, _: RawWindowHandle) -> Option<Self> {
-        Some(Self)
+        Some(Self { nohotkeys: rawkb::NoHotkeys::default() })
     }
 
     fn set(&mut self, on: bool, ctl: Option<&ControlSender>) {
+        self.nohotkeys.set(on);
         win::set(on, ctl)
     }
 
     fn granted(&mut self) -> Option<bool> {
         None
+    }
+}
+
+#[cfg(windows)]
+mod rawkb {
+    //! Second line of defence, independent of the hook: the keyboard's raw input
+    //! registration with RIDEV_NOHOTKEYS. While a window of this process is in the
+    //! foreground, hotkeys registered by other programs stop acting, among them the
+    //! Windows logo key and Win+… (registered by explorer.exe); the keys still reach
+    //! our window, which sends them to the host. Alt+Tab and Ctrl+Alt+Del are not
+    //! affected. Seen on a Windows 11 Insider build (26300): the low-level hook was
+    //! installed but Windows never called it (0 keys seen) and the Start menu opened,
+    //! while a hook in another process on the same PC did get the keys.
+    //!
+    //! winit registers the keyboard for its own raw input (device events): we keep
+    //! its target window and flags, add RIDEV_NOHOTKEYS, and put its registration
+    //! back on release. Called from the UI thread, which owns winit's windows.
+
+    use windows_sys::Win32::UI::Input::{GetRegisteredRawInputDevices, RegisterRawInputDevices, RAWINPUTDEVICE};
+
+    const PAGE_GENERIC: u16 = 0x01;
+    const USAGE_KEYBOARD: u16 = 0x06;
+    const RIDEV_REMOVE: u32 = 0x0000_0001;
+    const RIDEV_NOHOTKEYS: u32 = 0x0000_0200;
+    const SIZE: u32 = std::mem::size_of::<RAWINPUTDEVICE>() as u32;
+
+    #[derive(Default)]
+    pub struct NoHotkeys {
+        /// Set while registered by us: the registration found before (None: there was none).
+        active: Option<Option<RAWINPUTDEVICE>>,
+    }
+
+    impl NoHotkeys {
+        pub fn set(&mut self, on: bool) {
+            if on == self.active.is_some() {
+                return;
+            }
+            if on {
+                let before = keyboard_registration();
+                let dev = RAWINPUTDEVICE {
+                    usUsagePage: PAGE_GENERIC,
+                    usUsage: USAGE_KEYBOARD,
+                    dwFlags: before.map_or(0, |d| d.dwFlags) | RIDEV_NOHOTKEYS,
+                    hwndTarget: before.map_or(std::ptr::null_mut(), |d| d.hwndTarget),
+                };
+                if register(&dev) {
+                    let prev = before.map_or("none".to_string(), |d| format!("flags {:#x}", d.dwFlags));
+                    tracing::info!("raw input: keyboard hotkeys (Windows key) disabled, flags {:#x}, previous registration: {prev}", dev.dwFlags);
+                    self.active = Some(before);
+                } else {
+                    tracing::warn!("raw input: cannot disable the keyboard hotkeys: {}", std::io::Error::last_os_error());
+                }
+            } else if let Some(before) = self.active.take() {
+                let dev = before.unwrap_or(RAWINPUTDEVICE { usUsagePage: PAGE_GENERIC, usUsage: USAGE_KEYBOARD, dwFlags: RIDEV_REMOVE, hwndTarget: std::ptr::null_mut() });
+                if register(&dev) {
+                    tracing::info!("raw input: keyboard hotkeys enabled again");
+                } else {
+                    tracing::warn!("raw input: cannot enable the keyboard hotkeys again: {}", std::io::Error::last_os_error());
+                }
+            }
+        }
+    }
+
+    fn register(dev: &RAWINPUTDEVICE) -> bool {
+        unsafe { RegisterRawInputDevices(dev, 1, SIZE) != 0 }
+    }
+
+    /// This process's current raw input registration for the keyboard.
+    fn keyboard_registration() -> Option<RAWINPUTDEVICE> {
+        let mut n = 0u32;
+        unsafe { GetRegisteredRawInputDevices(std::ptr::null_mut(), &mut n, SIZE) };
+        if n == 0 {
+            return None;
+        }
+        let mut devs: Vec<RAWINPUTDEVICE> = (0..n).map(|_| unsafe { std::mem::zeroed() }).collect();
+        let got = unsafe { GetRegisteredRawInputDevices(devs.as_mut_ptr(), &mut n, SIZE) };
+        if got == u32::MAX {
+            return None;
+        }
+        devs.truncate(got as usize);
+        devs.into_iter().find(|d| d.usUsagePage == PAGE_GENERIC && d.usUsage == USAGE_KEYBOARD)
     }
 }
 
