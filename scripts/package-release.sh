@@ -46,6 +46,9 @@ package() { # name binary [extra files...]
     if [ "$name" = client ]; then
         cp -a "$SDL_BUNDLE/lib/." "$dir/lib/"
         cp -a "$SDL_BUNDLE/LICENSES/." "$dir/LICENSES/"
+        # ./install.sh: applications menu entry, desktop shortcut and the 2moon icon.
+        cp "$ROOT/installer/linux/install.sh" "$ROOT/installer/linux/2moon.svg" "$dir/"
+        cp "$ROOT/crates/moon-client/assets/icon.png" "$dir/2moon.png"
     fi
     tar -C "$OUT" -czf "$dir.tar.gz" "$(basename "$dir")"
     (cd "$OUT" && sha256sum "$(basename "$dir").tar.gz" >"$(basename "$dir").tar.gz.sha256")

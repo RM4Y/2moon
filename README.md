@@ -90,6 +90,14 @@ de texte Unicode selon la disposition clavier de l'hôte, ex. AZERTY).
 
 ## Client (`moon-client`)
 
+**Installation sous Linux** : extrayez l'archive `2moon-client-<version>-linux-x86_64.tar.gz`
+puis lancez `./install.sh` (sans root). Le client est installé dans `~/.local/share/2moon/client`,
+avec l'entrée « 2moon » dans le menu des applications et un raccourci sur le Bureau, tous
+deux avec le logo (`--no-desktop` pour ne pas créer le raccourci), plus la commande
+`moon-client` dans `~/.local/bin`. Pour une mise à jour, relancez `./install.sh` depuis la
+nouvelle archive. Pour désinstaller : `~/.local/share/2moon/client/install.sh --uninstall`
+(les réglages et les hôtes appairés restent dans `~/.config/2moon-client`).
+
 **Interface graphique** : lancez simplement `moon-client` (sans argument). Thème « nuit
 lunaire » (ciel étoilé, lune, un accent citron), le même que le panneau d'administration
 de l'hôte.

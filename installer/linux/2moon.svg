@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 42 42" width="256" height="256">
+  <!-- The 2moon logo, same geometry as theme.rs paint_logo and installer/windows/make-icon.ps1:
+       the acid-green moon behind the bone-white one with its dark ring, with craters. -->
+  <g transform="translate(-2.35 5)">
+    <circle cx="31.5" cy="16" r="12" fill="#CBFF4D"/>
+    <g fill="#09090B" fill-opacity="0.16">
+      <circle cx="36" cy="11" r="2.4"/>
+      <circle cx="38.2" cy="19.5" r="1.6"/>
+      <circle cx="32.5" cy="23" r="1.9"/>
+    </g>
+    <circle cx="17" cy="16" r="13.8" fill="#09090B"/>
+    <circle cx="17" cy="16" r="11.2" fill="#F5F5F2"/>
+    <g fill="#CBCBC4">
+      <circle cx="12.5" cy="12" r="2.8"/>
+      <circle cx="20.5" cy="20.5" r="3.3"/>
+      <circle cx="21.5" cy="10" r="1.6"/>
+      <circle cx="11.5" cy="21" r="1.3"/>
+      <circle cx="25" cy="15" r="1"/>
+    </g>
+  </g>
+</svg>
