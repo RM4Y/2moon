@@ -13,7 +13,8 @@ use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObje
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, HDESK};
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, ResumeThread, WaitForSingleObject, CREATE_NEW_CONSOLE, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessAsUserW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, ResumeThread, WaitForSingleObject, CREATE_NEW_CONSOLE, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTUPINFOW,
 };
 
 thread_local! {
@@ -66,6 +67,49 @@ pub fn is_system() -> bool {
     }
 }
 
+/// Start `line` on the interactive desktop: as the user signed in on the console when
+/// this process runs as SYSTEM, otherwise as ourselves.
+fn start_as_user(line: &str, flags: PROCESS_CREATION_FLAGS) -> Result<PROCESS_INFORMATION> {
+    let mut line: Vec<u16> = line.encode_utf16().chain([0]).collect();
+    let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain([0]).collect();
+    let si = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, lpDesktop: PWSTR(desktop.as_mut_ptr()), ..Default::default() };
+    let mut pi = PROCESS_INFORMATION::default();
+    unsafe {
+        let started = if is_system() {
+            let session = WTSGetActiveConsoleSessionId();
+            let mut token = HANDLE::default();
+            WTSQueryUserToken(session, &mut token).context("no user signed in on the console")?;
+            let mut env = std::ptr::null_mut();
+            let env_ok = CreateEnvironmentBlock(&mut env, Some(token), false).is_ok();
+            let flags = if env_ok { flags | CREATE_UNICODE_ENVIRONMENT } else { flags };
+            let r = CreateProcessAsUserW(Some(token), PCWSTR::null(), Some(PWSTR(line.as_mut_ptr())), None, None, false, flags, env_ok.then_some(env as *const _), PCWSTR::null(), &si, &mut pi);
+            if env_ok {
+                let _ = DestroyEnvironmentBlock(env);
+            }
+            let _ = CloseHandle(token);
+            r
+        } else {
+            CreateProcessW(PCWSTR::null(), Some(PWSTR(line.as_mut_ptr())), None, None, false, flags, None, PCWSTR::null(), &si, &mut pi)
+        };
+        if let Err(e) = started {
+            bail!("CreateProcess: {e}");
+        }
+    }
+    Ok(pi)
+}
+
+/// Open a URL or a document with its default program, as the signed-in user (a
+/// browser started as SYSTEM would give full control of the machine).
+pub fn open_for_user(target: &str) -> Result<()> {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let pi = start_as_user(&format!("\"{root}\\System32\\rundll32.exe\" url.dll,FileProtocolHandler {target}"), PROCESS_CREATION_FLAGS(0))?;
+    unsafe {
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+    Ok(())
+}
+
 /// A program started for an app: `cmd /C <command>` in a job object, so stopping
 /// it stops everything it started.
 pub struct UserProcess {
@@ -81,32 +125,15 @@ impl UserProcess {
     /// runs as SYSTEM, otherwise as ourselves.
     pub fn spawn(command: &str) -> Result<Self> {
         let comspec = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
-        let mut line: Vec<u16> = format!("\"{comspec}\" /C {command}").encode_utf16().chain([0]).collect();
-        let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain([0]).collect();
-        let si = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, lpDesktop: PWSTR(desktop.as_mut_ptr()), ..Default::default() };
-        let mut pi = PROCESS_INFORMATION::default();
         unsafe {
             let job = CreateJobObjectW(None, PCWSTR::null()).context("CreateJobObject")?;
-            let flags = CREATE_SUSPENDED | CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT;
-            let started = if is_system() {
-                let session = WTSGetActiveConsoleSessionId();
-                let mut token = HANDLE::default();
-                WTSQueryUserToken(session, &mut token).context("no user signed in on the console")?;
-                let mut env = std::ptr::null_mut();
-                let env_ok = CreateEnvironmentBlock(&mut env, Some(token), false).is_ok();
-                let r = CreateProcessAsUserW(Some(token), PCWSTR::null(), Some(PWSTR(line.as_mut_ptr())), None, None, false, flags, env_ok.then_some(env as *const _), PCWSTR::null(), &si, &mut pi);
-                if env_ok {
-                    let _ = DestroyEnvironmentBlock(env);
+            let pi = match start_as_user(&format!("\"{comspec}\" /C {command}"), CREATE_SUSPENDED | CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT) {
+                Ok(pi) => pi,
+                Err(e) => {
+                    let _ = CloseHandle(job);
+                    return Err(e);
                 }
-                let _ = CloseHandle(token);
-                r
-            } else {
-                CreateProcessW(PCWSTR::null(), Some(PWSTR(line.as_mut_ptr())), None, None, false, flags, None, PCWSTR::null(), &si, &mut pi)
             };
-            if let Err(e) = started {
-                let _ = CloseHandle(job);
-                bail!("CreateProcess: {e}");
-            }
             if let Err(e) = AssignProcessToJobObject(job, pi.hProcess) {
                 warn!("app not in a job object ({e}): quitting may leave its programs running");
             }

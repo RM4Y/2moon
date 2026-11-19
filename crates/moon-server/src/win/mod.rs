@@ -6,6 +6,7 @@ pub mod capture;
 pub mod input;
 pub mod service;
 pub mod session;
+pub mod tray;
 
 use tracing::info;
 

@@ -97,6 +97,9 @@ struct Args {
     /// Windows: write the log to this file too (the service's host process has no console).
     #[arg(long)]
     log_file: Option<PathBuf>,
+    /// Windows: no icon in the notification area.
+    #[arg(long)]
+    no_tray: bool,
 }
 
 fn main() -> Result<()> {
@@ -253,6 +256,11 @@ async fn serve(args: Args) -> Result<()> {
                 tracing::error!("admin panel: {e:#}");
             }
         });
+    }
+    // The host has no window: an icon near the clock shows that it runs.
+    #[cfg(windows)]
+    if !args.no_tray {
+        win::tray::spawn(host.clone(), (!args.no_admin).then(|| args.admin_port.unwrap_or(args.port + 1)));
     }
     let rtsp_host = host.clone();
     tokio::spawn(async move {

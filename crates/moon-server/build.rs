@@ -37,7 +37,9 @@ BEGIN
   END
 END
 "#,
-        icon = icon.display()
+        // windres reads backslashes as escapes: on a Windows build machine, drop the
+        // \\?\ prefix of canonicalize() and use forward slashes.
+        icon = icon.display().to_string().trim_start_matches(r"\\?\").replace('\\', "/")
     );
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("app.rc");
     std::fs::write(&out, rc).unwrap();
