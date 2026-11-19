@@ -1501,7 +1501,8 @@ impl GuiApp {
                 seg_row(ui, false, "Codec", &mut s.codec, &codecs, false, 0.0);
                 toggle_row(ui, false, "Couleurs 4:4:4", "Texte plus net, plus de débit. H.264 / HEVC si l'hôte le propose.", &mut s.yuv444);
                 toggle_row(ui, false, "HDR / 10 bits", "HEVC ou AV1 · moins d'effets d'escalier · affichée en SDR.", &mut s.hdr);
-                toggle_row(ui, true, "Décodage GPU", "Si possible. NVIDIA : NVDEC · Intel / AMD : VAAPI.", &mut s.hw_decode);
+                let gpu_help = if cfg!(windows) { "Si possible. NVIDIA : NVDEC · Intel / AMD : D3D11VA." } else { "Si possible. NVIDIA : NVDEC · Intel / AMD : VAAPI." };
+                toggle_row(ui, true, "Décodage GPU", gpu_help, &mut s.hw_decode);
             });
             section(ui, 1, SECTIONS[1], tops, jump, |ui| {
                 seg_row(ui, false, "Canaux audio", &mut s.audio_channels, &[(2, "Stéréo"), (6, "5.1"), (8, "7.1")], false, 64.0);

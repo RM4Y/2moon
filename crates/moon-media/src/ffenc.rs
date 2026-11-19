@@ -687,6 +687,19 @@ unsafe fn hw_device_ctx_offset(a: &Api, ctx: *mut c_void) -> Result<usize> {
     Ok(slot)
 }
 
+/// Pixel format of the frames a hardware device type decodes into. It is not always the
+/// device's name: a "d3d11va" device gives AV_PIX_FMT_D3D11 ("d3d11"), "dxva2" gives
+/// AV_PIX_FMT_DXVA2_VLD ("dxva2_vld"). With the device name, Windows got -1: every GPU
+/// picture was then an "unsupported pixel format" and decoding fell back to the CPU.
+fn hw_pix_fmt_name(device: &str) -> &str {
+    match device {
+        "d3d11va" => "d3d11",
+        "dxva2" => "dxva2_vld",
+        "qsv" => "qsv",
+        other => other, // vaapi, cuda, vulkan: same name
+    }
+}
+
 impl FfmpegDecoder {
     /// Software decoder: the first of `names` that FFmpeg has.
     pub fn new(names: &[&str]) -> Result<Self> {
@@ -743,7 +756,10 @@ impl FfmpegDecoder {
                     let off = hw_device_ctx_offset(a, ctx)?;
                     // FFmpeg's default get_format picks the hardware format of the supplied device.
                     *((ctx as *mut u8).add(off) as *mut *mut c_void) = (a.buffer_ref)(hw_device);
-                    hw_fmt = fmt(kind);
+                    hw_fmt = fmt(hw_pix_fmt_name(kind));
+                    if hw_fmt < 0 {
+                        bail!("FFmpeg has no pixel format for {kind} frames");
+                    }
                     Ok(())
                 })();
                 if let Err(e) = r {
