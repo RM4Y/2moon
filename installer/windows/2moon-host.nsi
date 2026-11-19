@@ -121,9 +121,13 @@ Section "2moon Host (service)" SecHost
 
   ; Start menu
   CreateDirectory "$SMPROGRAMS\2moon Host"
-  WriteINIStr "$INSTDIR\Administration 2moon.url" "InternetShortcut" "URL" "${ADMIN_URL}"
-  CreateShortcut "$SMPROGRAMS\2moon Host\Administration 2moon.lnk" "$INSTDIR\Administration 2moon.url" "" "$INSTDIR\2moon.ico"
-  CreateShortcut "$SMPROGRAMS\2moon Host\Journaux 2moon.lnk" "$APPDATA\2moon\logs"
+  ; A web link shows the icon named inside it (a .lnk pointing at it would not).
+  Delete "$SMPROGRAMS\2moon Host\Administration 2moon.lnk"
+  Delete "$INSTDIR\Administration 2moon.url"
+  WriteINIStr "$SMPROGRAMS\2moon Host\Administration 2moon.url" "InternetShortcut" "URL" "${ADMIN_URL}"
+  WriteINIStr "$SMPROGRAMS\2moon Host\Administration 2moon.url" "InternetShortcut" "IconFile" "$INSTDIR\moon-server.exe"
+  WriteINIStr "$SMPROGRAMS\2moon Host\Administration 2moon.url" "InternetShortcut" "IconIndex" "0"
+  CreateShortcut "$SMPROGRAMS\2moon Host\Journaux 2moon.lnk" "$APPDATA\2moon\logs" "" "$INSTDIR\moon-server.exe" 0
   CreateShortcut "$SMPROGRAMS\2moon Host\Désinstaller 2moon Host.lnk" "$INSTDIR\uninstall.exe"
 
   ; Programs and Features
@@ -131,7 +135,7 @@ Section "2moon Host (service)" SecHost
   WriteRegStr HKLM "${UNINSTKEY}" "DisplayName" "${APPNAME}"
   WriteRegStr HKLM "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "${UNINSTKEY}" "Publisher" "2moon"
-  WriteRegStr HKLM "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\2moon.ico"
+  WriteRegStr HKLM "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\moon-server.exe,0"
   WriteRegStr HKLM "${UNINSTKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTKEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKLM "${UNINSTKEY}" "URLInfoAbout" "https://github.com/RM4Y/2moon"
