@@ -209,6 +209,44 @@ pub fn run(store: Store) -> Result<()> {
     event_loop.run_app(&mut FastInputLoop { app, fast, mods: Default::default() }).map_err(|e| anyhow::anyhow!("cannot open the window: {e}"))
 }
 
+/// `moon-client --gl-check`, run by the Windows installer: creates the client's OpenGL
+/// renderer in a hidden window and exits. Exit code 0: it works; 3: OpenGL is missing or
+/// older than 2.0 (virtual machines, no graphics driver), the installer then adds Mesa's
+/// software OpenGL next to the executable; 4: another error; 5: no answer in time.
+pub fn gl_check() -> i32 {
+    // A window that never comes up must not block the installer.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        std::process::exit(5);
+    });
+    let opts = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_title("2moon").with_inner_size([64.0, 64.0]).with_visible(false),
+        ..Default::default()
+    };
+    // The app is only created once egui_glow has its context (and checked the version).
+    let r = eframe::run_native(
+        "2moon-gl-check",
+        opts,
+        Box::new(|cc| {
+            if cc.gl.is_some() {
+                std::process::exit(0);
+            }
+            Err("no OpenGL context".into())
+        }),
+    );
+    let msg = match r {
+        Ok(()) => return 4,
+        Err(e) => e.to_string(),
+    };
+    eprintln!("{msg}");
+    let m = msg.to_lowercase();
+    if m.contains("opengl") || m.contains("glutin") || m.contains("wgl") {
+        3
+    } else {
+        4
+    }
+}
+
 /// While the mouse is captured, mouse motion, buttons, wheel and keys go to the host as
 /// soon as the event loop receives them, like Moonlight's input thread. Through egui they
 /// would only be read once per displayed frame (60 times a second, several moves per packet).

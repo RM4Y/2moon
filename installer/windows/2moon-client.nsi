@@ -80,6 +80,10 @@ LangString DESC_SecApp ${LANG_ENGLISH} "The streaming client and a Start menu sh
 LangString DESC_SecApp ${LANG_FRENCH} "Le client de streaming et son raccourci dans le menu Démarrer. Installé pour votre compte seulement, sans droits d'administrateur."
 LangString DESC_SecDesktop ${LANG_ENGLISH} "A 2moon shortcut on the desktop."
 LangString DESC_SecDesktop ${LANG_FRENCH} "Un raccourci 2moon sur le Bureau."
+LangString MSG_GL_CHECK ${LANG_ENGLISH} "Checking OpenGL..."
+LangString MSG_GL_CHECK ${LANG_FRENCH} "Vérification d'OpenGL..."
+LangString MSG_GL_MESA ${LANG_ENGLISH} "No OpenGL 2.0 driver: installing Mesa (software OpenGL)."
+LangString MSG_GL_MESA ${LANG_FRENCH} "Pas de pilote OpenGL 2.0 : installation de Mesa (OpenGL logiciel)."
 LangString UN_ASK_DATA ${LANG_ENGLISH} "Also delete the 2moon settings (saved hosts, pairing identity)?"
 LangString UN_ASK_DATA ${LANG_FRENCH} "Supprimer aussi les réglages de 2moon (hôtes enregistrés, identité d'appairage) ?"
 
@@ -135,6 +139,25 @@ Section "$(NAME_SecApp)" SecApp
   SetOutPath "$INSTDIR\LICENSES"
   File /r "${STAGE}\LICENSES\*.*"
   SetOutPath "$INSTDIR"
+
+  ; The client draws with OpenGL 2.0+. Without a graphics driver that provides it
+  ; (virtual machines, Remote Desktop, no driver installed), Windows only has OpenGL 1.1
+  ; and the client cannot open its window: then (only then) install Mesa's software
+  ; OpenGL next to the executable, where it is loaded instead of the system one. The
+  ; check runs again on every install (the DLLs are deleted above): Mesa goes away once
+  ; a driver is installed and 2moon is updated.
+  DetailPrint "$(MSG_GL_CHECK)"
+  nsExec::Exec '"$INSTDIR\${EXE}" --gl-check'
+  Pop $R0
+  ${If} $R0 == 3
+    DetailPrint "$(MSG_GL_MESA)"
+    File "${STAGE}\mesa\opengl32.dll"
+    File "${STAGE}\mesa\libgallium_wgl.dll"
+    File "${STAGE}\mesa\dxil.dll"
+    SetOutPath "$INSTDIR\LICENSES"
+    File "${STAGE}\mesa\Mesa-license.txt"
+    SetOutPath "$INSTDIR"
+  ${EndIf}
 
   ; Start menu: one shortcut at the top level, like most apps.
   CreateShortcut "$SMPROGRAMS\2moon.lnk" "$INSTDIR\${EXE}"

@@ -128,6 +128,10 @@ extern "system" {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Internal: the Windows installer checks OpenGL with it (see gui::gl_check).
+    if std::env::args().nth(1).as_deref() == Some("--gl-check") {
+        std::process::exit(moon_client::gui::gl_check());
+    }
     #[cfg(windows)]
     if std::env::args().len() > 1 {
         // ATTACH_PARENT_PROCESS: print to the console that started us.
