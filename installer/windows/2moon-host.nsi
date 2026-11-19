@@ -244,6 +244,10 @@ Section "$(NAME_SecHost)" SecHost
   WriteRegDWORD HKLM "${UNINSTKEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD HKLM "${UNINSTKEY}" "EstimatedSize" $0
+
+  ; Windows caches icons by path: after an update from a version whose exe had no
+  ; icon, Explorer, Start and Task Manager would keep the generic one.
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0x1000, p 0, p 0)'
 SectionEnd
 
 Section /o "$(NAME_SecFwPublic)" SecFwPublic

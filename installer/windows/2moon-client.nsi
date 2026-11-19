@@ -153,6 +153,9 @@ Section "$(NAME_SecApp)" SecApp
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD HKCU "${UNINSTKEY}" "EstimatedSize" $0
+
+  ; Windows caches icons by path: refresh them (updates from an exe without icon).
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0x1000, p 0, p 0)'
 SectionEnd
 
 Section "$(NAME_SecDesktop)" SecDesktop
