@@ -259,8 +259,18 @@ impl Imp {
 
 #[cfg(windows)]
 mod win {
-    use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    //! The hook callback is called by Windows from inside the kernel (a user-mode
+    //! callback); an exception there can be swallowed: the callback just stops, the key
+    //! goes on to Windows (Start menu…) and the hooks installed before ours are skipped,
+    //! with no crash and no log. Seen with 0.5.4 on Windows 11: the callback (mutexes, a
+    //! HashSet with random hash keys, allocation, logging) never got to its end, not even
+    //! for keys it lets through, while a minimal hook in another process worked. It now
+    //! only uses atomics, GetAsyncKeyState and PostThreadMessageW; sending to the host
+    //! and logging happen in the message loop, outside the callback. A vectored
+    //! exception handler reports any exception on the hook thread.
+
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use moon_proto::control::input::{self as inp, Event as In};
@@ -269,7 +279,7 @@ mod win {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN, WM_USER,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN, WM_USER,
     };
 
     use crate::control::ControlSender;
@@ -277,9 +287,33 @@ mod win {
     static ON: AtomicBool = AtomicBool::new(false);
     /// Thread running the hook (0: none).
     static THREAD: AtomicU32 = AtomicU32::new(0);
+    /// Only used outside the hook callback.
     static SENDER: Mutex<Option<ControlSender>> = Mutex::new(None);
-    /// Keys whose press we took from Windows: their release is taken too.
-    static HELD: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+    /// Keys (by virtual-key code) whose press we kept from Windows: their release is kept too.
+    static HELD: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+    /// Keys from the callback to the message loop of the same thread, packed as
+    /// vk | modifiers << 8 | down << 16 | for the host << 17 | injected << 18.
+    const QLEN: usize = 64;
+    static QUEUE: [AtomicU32; QLEN] = [const { AtomicU32::new(0) }; QLEN];
+    /// Next slot written by the callback / read by the message loop.
+    static Q_HEAD: AtomicUsize = AtomicUsize::new(0);
+    static Q_TAIL: AtomicUsize = AtomicUsize::new(0);
+    /// Posted by the callback: keys are waiting in the queue.
+    const WM_HOOK_KEYS: u32 = WM_APP + 0x31;
+
+    /// Diagnostics: callbacks entered / ending with CallNextHookEx / keeping the key.
+    static ENTERED: AtomicU64 = AtomicU64::new(0);
+    static PASSED: AtomicU64 = AtomicU64::new(0);
+    static KEPT: AtomicU64 = AtomicU64::new(0);
+    /// Inside the callback right now (for the exception report).
+    static IN_HOOK: AtomicBool = AtomicBool::new(false);
+    /// Id of the hook thread while it runs (for the exception handler).
+    static HOOK_TID: AtomicU32 = AtomicU32::new(0);
+    static EXC_COUNT: AtomicU32 = AtomicU32::new(0);
+    static EXC_CODE: AtomicU32 = AtomicU32::new(0);
+    static EXC_ADDR: AtomicUsize = AtomicUsize::new(0);
+    static EXC_IN_HOOK: AtomicBool = AtomicBool::new(false);
 
     const VK_TAB: u32 = 0x09;
     const VK_ESCAPE: u32 = 0x1B;
@@ -307,16 +341,10 @@ mod win {
                 Err(e) => tracing::warn!("cannot start the keyboard hook thread: {e}"),
             }
         } else if !on {
+            // The hook thread releases on the host the keys it kept, then exits.
             let t = THREAD.swap(0, Ordering::SeqCst);
             if t != 0 {
                 unsafe { PostThreadMessageW(t, WM_QUIT, 0, 0) };
-            }
-            // Release on the host what we were holding for it.
-            let held = HELD.lock().unwrap().take().unwrap_or_default();
-            if let Some(c) = SENDER.lock().unwrap().as_ref() {
-                for vk in held {
-                    c.input(&In::Key { down: false, vk: vk as u16, modifiers: 0 });
-                }
             }
         }
     }
@@ -329,53 +357,178 @@ mod win {
             // Create this thread's message queue before anyone posts to it.
             PeekMessageW(&mut msg, std::ptr::null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            let tid = GetCurrentThreadId();
+            HOOK_TID.store(tid, Ordering::SeqCst);
+            install_exception_probe();
+            Q_TAIL.store(Q_HEAD.load(Ordering::SeqCst), Ordering::SeqCst);
+            let start = (ENTERED.load(Ordering::SeqCst), PASSED.load(Ordering::SeqCst), KEPT.load(Ordering::SeqCst));
             let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0);
             if h.is_null() {
+                HOOK_TID.store(0, Ordering::SeqCst);
                 tracing::warn!("cannot install the keyboard hook");
                 let _ = tx.send(0);
                 return;
             }
-            let tid = GetCurrentThreadId();
             tracing::info!("keyboard hook installed (thread {tid})");
             let _ = tx.send(tid);
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                if msg.message == WM_HOOK_KEYS {
+                    drain();
+                    continue;
+                }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
             UnhookWindowsHookEx(h);
-            tracing::info!("keyboard hook removed (thread {tid})");
+            HOOK_TID.store(0, Ordering::SeqCst);
+            drain();
+            release_held();
+            let seen = ENTERED.load(Ordering::SeqCst).saturating_sub(start.0);
+            let passed = PASSED.load(Ordering::SeqCst).saturating_sub(start.1);
+            let kept = KEPT.load(Ordering::SeqCst).saturating_sub(start.2);
+            let unfinished = seen.saturating_sub(passed + kept);
+            tracing::info!("keyboard hook removed (thread {tid}): {seen} keys seen, {passed} left to Windows, {kept} kept for the host, {unfinished} unfinished");
+            report_exceptions();
         }
     }
 
+    /// Keep it minimal: atomics, GetAsyncKeyState, PostThreadMessageW. No lock, no
+    /// allocation, no thread-local, no logging (see the module comment).
     unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        IN_HOOK.store(true, Ordering::Relaxed);
+        ENTERED.fetch_add(1, Ordering::Relaxed);
         if code == 0 && ON.load(Ordering::Relaxed) {
             let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
-            let vk = kb.vkCode;
-            let down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
+            let vk = kb.vkCode & 0xff;
+            let msg = wparam as u32;
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             let alt = kb.flags & LLKHF_ALTDOWN != 0;
             let ctrl = GetAsyncKeyState(VK_CONTROL) < 0;
             let shift = GetAsyncKeyState(VK_SHIFT) < 0;
-            let mut held = HELD.lock().unwrap();
-            let held = held.get_or_insert_with(HashSet::new);
             let system = matches!(vk, VK_LWIN | VK_RWIN | VK_APPS) || (alt && matches!(vk, VK_TAB | VK_ESCAPE | VK_F4 | VK_SPACE)) || (ctrl && vk == VK_ESCAPE);
-            if matches!(vk, VK_LWIN | VK_RWIN) || (down && (system || (ctrl && alt && shift))) {
-                // Diagnostics: system keys and Ctrl+Alt+Shift+… as the hook sees them.
-                tracing::info!("hook: vk {vk:#04x} {} ctrl {ctrl} alt {alt} shift {shift} injected {} -> {}", if down { "down" } else { "up" }, kb.flags & 0x10 != 0, if (down && system) || (!down && held.contains(&vk)) { "to host" } else { "to Windows" });
-            }
-            if (down && system) || (!down && held.contains(&vk)) {
-                if down {
-                    held.insert(vk);
-                } else {
-                    held.remove(&vk);
-                }
+            let held = &HELD[vk as usize];
+            let keep = (down && system) || (!down && held.load(Ordering::Relaxed));
+            // Logged by the message loop: what goes to the host, plus the Windows keys and
+            // Ctrl+Alt+Shift+… (diagnostics). Plain typing is not.
+            if keep || matches!(vk, VK_LWIN | VK_RWIN) || (down && ctrl && alt && shift) {
                 let modifiers = (shift as u8) * inp::MOD_SHIFT | (ctrl as u8) * inp::MOD_CTRL | (alt as u8) * inp::MOD_ALT;
-                if let Some(c) = SENDER.lock().unwrap().as_ref() {
-                    c.input(&In::Key { down, vk: vk as u16, modifiers });
+                let ev = vk | (modifiers as u32) << 8 | (down as u32) << 16 | (keep as u32) << 17 | ((kb.flags & 0x10 != 0) as u32) << 18;
+                if push(ev) {
+                    PostThreadMessageW(GetCurrentThreadId(), WM_HOOK_KEYS, 0, 0);
                 }
+            }
+            if keep {
+                held.store(down, Ordering::Relaxed);
+                KEPT.fetch_add(1, Ordering::Relaxed);
+                IN_HOOK.store(false, Ordering::Relaxed);
                 return 1; // keep it from Windows
             }
         }
+        PASSED.fetch_add(1, Ordering::Relaxed);
+        IN_HOOK.store(false, Ordering::Relaxed);
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    /// Callback side of the queue (false: full, the key is not sent / logged).
+    fn push(ev: u32) -> bool {
+        let h = Q_HEAD.load(Ordering::Relaxed);
+        if h.wrapping_sub(Q_TAIL.load(Ordering::Acquire)) >= QLEN {
+            return false;
+        }
+        QUEUE[h % QLEN].store(ev, Ordering::Relaxed);
+        Q_HEAD.store(h.wrapping_add(1), Ordering::Release);
+        true
+    }
+
+    /// Message loop side: send the kept keys to the host and log.
+    fn drain() {
+        let sender = SENDER.lock().unwrap().clone();
+        loop {
+            let t = Q_TAIL.load(Ordering::Relaxed);
+            if t == Q_HEAD.load(Ordering::Acquire) {
+                break;
+            }
+            let ev = QUEUE[t % QLEN].load(Ordering::Relaxed);
+            Q_TAIL.store(t.wrapping_add(1), Ordering::Release);
+            let (vk, modifiers, down, keep, injected) = ((ev & 0xff) as u16, (ev >> 8) as u8, ev >> 16 & 1 != 0, ev >> 17 & 1 != 0, ev >> 18 & 1 != 0);
+            tracing::info!("hook: vk {vk:#04x} {} modifiers {modifiers:#04x} injected {injected} -> {}", if down { "down" } else { "up" }, if keep { "host" } else { "Windows" });
+            if keep {
+                if let Some(c) = &sender {
+                    c.input(&In::Key { down, vk, modifiers });
+                }
+            }
+        }
+    }
+
+    /// Release on the host the keys we were holding for it.
+    fn release_held() {
+        let sender = SENDER.lock().unwrap().clone();
+        for (vk, held) in HELD.iter().enumerate() {
+            if held.swap(false, Ordering::SeqCst) {
+                if let Some(c) = &sender {
+                    c.input(&In::Key { down: false, vk: vk as u16, modifiers: 0 });
+                }
+            }
+        }
+    }
+
+    // ---- exception probe (diagnostics)
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct ExceptionRecord {
+        code: u32,
+        flags: u32,
+        record: *const ExceptionRecord,
+        address: *const c_void,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct ExceptionPointers {
+        record: *const ExceptionRecord,
+        context: *const c_void,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AddVectoredExceptionHandler(first: u32, handler: unsafe extern "system" fn(*const ExceptionPointers) -> i32) -> *mut c_void;
+    }
+
+    /// Notes exceptions raised on the hook thread (they would be swallowed silently)
+    /// and lets them go on as before.
+    unsafe extern "system" fn on_exception(info: *const ExceptionPointers) -> i32 {
+        let tid = HOOK_TID.load(Ordering::Relaxed);
+        if tid != 0 && GetCurrentThreadId() == tid && !info.is_null() && !(*info).record.is_null() {
+            let r = &*(*info).record;
+            EXC_COUNT.fetch_add(1, Ordering::Relaxed);
+            EXC_CODE.store(r.code, Ordering::Relaxed);
+            EXC_ADDR.store(r.address as usize, Ordering::Relaxed);
+            EXC_IN_HOOK.store(IN_HOOK.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH
+    }
+
+    fn install_exception_probe() {
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if !DONE.swap(true, Ordering::SeqCst) {
+            unsafe { AddVectoredExceptionHandler(1, on_exception) };
+        }
+    }
+
+    fn report_exceptions() {
+        let n = EXC_COUNT.swap(0, Ordering::SeqCst);
+        if n == 0 {
+            return;
+        }
+        let base = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
+        let addr = EXC_ADDR.load(Ordering::SeqCst);
+        tracing::warn!(
+            "keyboard hook thread: {n} exception(s), last code {:#010x} at {addr:#x} (moon-client.exe+{:#x}){}",
+            EXC_CODE.load(Ordering::SeqCst),
+            addr.wrapping_sub(base),
+            if EXC_IN_HOOK.load(Ordering::SeqCst) { ", inside the hook callback" } else { "" }
+        );
     }
 }
 
