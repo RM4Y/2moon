@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "moon-client"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "moon-media"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "cc",
@@ -2123,7 +2123,7 @@ dependencies = [
 
 [[package]]
 name = "moon-proto"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "moon-server"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "ashpd",
