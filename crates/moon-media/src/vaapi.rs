@@ -17,6 +17,7 @@ const VA_PROFILE_H264_MAIN: c_int = 6;
 const VA_PROFILE_H264_HIGH: c_int = 7;
 const VA_PROFILE_H264_CONSTRAINED_BASELINE: c_int = 13;
 const VA_PROFILE_HEVC_MAIN: c_int = 17;
+const VA_PROFILE_HEVC_MAIN444: c_int = 26;
 const VA_PROFILE_AV1_PROFILE0: c_int = 32;
 
 #[derive(Debug, Clone, Default)]
@@ -27,6 +28,8 @@ pub struct VaapiInfo {
     pub driver: String,
     /// Codecs with a hardware decode (VLD) entrypoint.
     pub codecs: Vec<Codec>,
+    /// HEVC 4:4:4 8-bit decoding (Intel Gen11 / Iris Xe and later; never AMD).
+    pub hevc_444: bool,
 }
 
 /// Probe once; `None` without libva, a render node or a working driver.
@@ -35,7 +38,7 @@ pub fn probe() -> Option<&'static VaapiInfo> {
     INFO.get_or_init(|| {
         let r = unsafe { probe_inner() };
         match &r {
-            Some(i) => info!("VAAPI: {} on {} decodes {:?}", i.driver, i.device, i.codecs),
+            Some(i) => info!("VAAPI: {} on {} decodes {:?}{}", i.driver, i.device, i.codecs, if i.hevc_444 { " (HEVC 4:4:4 too)" } else { "" }),
             None => debug!("VAAPI unavailable"),
         }
         r
@@ -84,6 +87,7 @@ unsafe fn probe_inner() -> Option<VaapiInfo> {
             query_entrypoints(dpy, p, eps.as_mut_ptr(), &mut m) == 0 && eps[..(m.max(0) as usize).min(eps.len())].contains(&VA_ENTRYPOINT_VLD)
         };
         let mut codecs = Vec::new();
+        let mut hevc_444 = false;
         if query_profiles(dpy, profiles.as_mut_ptr(), &mut n) == 0 {
             let profiles = &profiles[..(n.max(0) as usize).min(profiles.len())];
             let decodes = |want: &[c_int], has_vld: &mut dyn FnMut(c_int) -> bool| want.iter().any(|p| profiles.contains(p) && has_vld(*p));
@@ -91,6 +95,7 @@ unsafe fn probe_inner() -> Option<VaapiInfo> {
             if decodes(&[VA_PROFILE_HEVC_MAIN], &mut has_vld) {
                 codecs.push(Codec::Hevc);
             }
+            hevc_444 = decodes(&[VA_PROFILE_HEVC_MAIN444], &mut has_vld);
             if decodes(&[VA_PROFILE_AV1_PROFILE0], &mut has_vld) {
                 codecs.push(Codec::Av1);
             }
@@ -101,7 +106,7 @@ unsafe fn probe_inner() -> Option<VaapiInfo> {
         terminate(dpy);
         drop(file);
         if !codecs.is_empty() {
-            return Some(VaapiInfo { device: node, driver, codecs });
+            return Some(VaapiInfo { device: node, driver, codecs, hevc_444 });
         }
         debug!("VAAPI on {node} ({driver}) has no usable decoder");
     }

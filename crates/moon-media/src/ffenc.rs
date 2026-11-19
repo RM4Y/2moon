@@ -601,6 +601,9 @@ pub struct FfmpegDecoder {
     yuvj420p: c_int,
     yuv444p: c_int,
     yuvj444p: c_int,
+    /// Packed 8-bit 4:4:4 (V, U, Y, X bytes): Intel VAAPI / D3D11VA HEVC 4:4:4 output.
+    vuyx: c_int,
+    vuya: c_int,
     nv12: c_int,
     yuv420p10: c_int,
     p010: c_int,
@@ -769,6 +772,8 @@ impl FfmpegDecoder {
                 yuvj420p: fmt("yuvj420p"),
                 yuv444p: fmt("yuv444p"),
                 yuvj444p: fmt("yuvj444p"),
+                vuyx: fmt("vuyx"),
+                vuya: fmt("vuya"),
                 yuv420p10: fmt("yuv420p10le"),
                 p010: fmt("p010le"),
                 out16: crate::hdr::Yuv16Frame::new(2, 2),
@@ -878,6 +883,9 @@ impl FfmpegDecoder {
                     let (u, su) = plane(1, h);
                     let (v, sv) = plane(2, h);
                     self.out.copy_from_planes_fmt(w, h, true, [y, u, v], [sy, su, sv]);
+                } else if fmt >= 0 && (fmt == self.vuyx || fmt == self.vuya) {
+                    let (p, s) = plane(0, h);
+                    self.out.copy_from_vuyx(w, h, p, s);
                 } else if fmt == self.nv12 {
                     let (y, sy) = plane(0, h);
                     let (uv, suv) = plane(1, ch);

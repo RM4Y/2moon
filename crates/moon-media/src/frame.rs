@@ -335,6 +335,21 @@ impl I420Frame {
             self.v[r * cw..r * cw + cw].copy_from_slice(&planes[2][r * strides[2]..r * strides[2] + cw]);
         }
     }
+
+    /// Copy from packed 8-bit 4:4:4 with bytes V, U, Y, A/X per pixel (FFmpeg VUYX /
+    /// VUYA, DXGI AYUV): what Intel GPUs output for HEVC 4:4:4 (VAAPI, D3D11VA).
+    pub fn copy_from_vuyx(&mut self, w: usize, h: usize, src: &[u8], stride: usize) {
+        self.reshape(w, h, true);
+        for r in 0..h {
+            let row = &src[r * stride..r * stride + w * 4];
+            let (y, u, v) = (&mut self.y[r * w..r * w + w], &mut self.u[r * w..r * w + w], &mut self.v[r * w..r * w + w]);
+            for (i, px) in row.chunks_exact(4).enumerate() {
+                v[i] = px[0];
+                u[i] = px[1];
+                y[i] = px[2];
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +439,20 @@ mod tests {
             max_err = max_err.max((r as i32 - px[2] as i32).abs()).max((g as i32 - px[1] as i32).abs()).max((b as i32 - px[0] as i32).abs());
         }
         assert!(max_err <= 12, "{csc:?}: max error {max_err}");
+    }
+}
+
+#[cfg(test)]
+mod vuyx_tests {
+    use super::I420Frame;
+
+    #[test]
+    fn packed_vuyx_to_planar_444() {
+        // 2x2 picture, stride 12 (4 bytes of padding per row): bytes V, U, Y, X.
+        let src = [10, 20, 30, 0, 11, 21, 31, 0, 99, 99, 99, 99, 12, 22, 32, 0, 13, 23, 33, 0, 99, 99, 99, 99];
+        let mut f = I420Frame::new(2, 2);
+        f.copy_from_vuyx(2, 2, &src, 12);
+        assert!(f.yuv444);
+        assert_eq!((f.y.as_slice(), f.u.as_slice(), f.v.as_slice()), (&[30, 31, 32, 33][..], &[20, 21, 22, 23][..], &[10, 11, 12, 13][..]));
     }
 }

@@ -9,6 +9,7 @@ pub struct VaapiInfo {
     pub device: String,
     pub driver: String,
     pub codecs: Vec<Codec>,
+    pub hevc_444: bool,
 }
 
 pub fn probe() -> Option<&'static VaapiInfo> {

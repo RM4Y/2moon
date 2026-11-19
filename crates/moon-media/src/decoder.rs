@@ -122,6 +122,28 @@ impl VideoDecoder {
                     return Ok(Self::Nvdec(d));
                 }
             }
+            // Intel (Iris Xe, Arc...): HEVC 4:4:4 in hardware through VAAPI (Linux) or
+            // D3D11VA (Windows); pictures come back as packed VUYX. AMD has none: CPU.
+            // If the GPU still refuses the stream, FFmpeg decodes it on the CPU.
+            if hardware && codec == Codec::Hevc {
+                if let Some(va) = crate::vaapi::probe().filter(|i| i.hevc_444) {
+                    match FfmpegDecoder::new_hw(ffmpeg_hw_names(codec), "vaapi", Some(&va.device)) {
+                        Ok(d) => {
+                            info!("{codec:?} 4:4:4 decoding with VAAPI ({}, {})", va.driver, va.device);
+                            return Ok(Self::FfHw(d, codec, "VAAPI"));
+                        }
+                        Err(e) => warn!("VAAPI {codec:?} 4:4:4 decoder unavailable ({e:#})"),
+                    }
+                }
+                #[cfg(windows)]
+                match FfmpegDecoder::new_hw(ffmpeg_hw_names(codec), "d3d11va", None) {
+                    Ok(d) => {
+                        info!("{codec:?} 4:4:4 decoding with D3D11VA");
+                        return Ok(Self::FfHw(d, codec, "D3D11VA"));
+                    }
+                    Err(e) => warn!("D3D11VA {codec:?} 4:4:4 decoder unavailable ({e:#})"),
+                }
+            }
             info!("{codec:?} 4:4:4: decoding on the CPU");
             return Self::open_cpu(codec);
         }
