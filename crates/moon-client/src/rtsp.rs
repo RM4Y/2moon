@@ -93,13 +93,18 @@ pub struct RtspClient {
 }
 
 impl RtspClient {
-    pub fn new(session_url: &str, fallback_host: &str, fallback_port: u16) -> Self {
-        let (host, port) = session_url
+    /// `host` is the address the client already talks to. Only the port is taken from the
+    /// session URL: hosts (Sunshine, 2moon) put their own local IP in it, which is not
+    /// reachable from outside their network (NAT, port forwarding), so Moonlight ignores
+    /// it too.
+    pub fn new(session_url: &str, host: &str, fallback_port: u16) -> Self {
+        let port = session_url
             .strip_prefix("rtsp://")
             .or_else(|| session_url.strip_prefix("rtspenc://"))
             .and_then(|r| r.rsplit_once(':'))
-            .map(|(h, p)| (h.trim_matches(['[', ']']).to_string(), p.trim_end_matches('/').parse().unwrap_or(fallback_port)))
-            .unwrap_or((fallback_host.to_string(), fallback_port));
+            .and_then(|(_, p)| p.trim_end_matches('/').parse().ok())
+            .unwrap_or(fallback_port);
+        let host = host.trim_matches(['[', ']']).to_string();
         let url = if host.contains(':') { format!("rtsp://[{host}]:{port}") } else { format!("rtsp://{host}:{port}") };
         Self { host, port, url, cseq: 0, session: None, key: None }
     }
@@ -292,4 +297,20 @@ pub fn announce_sdp(c: &StreamConfig, host: &str, encryption: u32) -> String {
     }
     s.push_str("t=0 0\r\nm=video 47998  \r\n");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RtspClient;
+
+    #[test]
+    fn session_url_gives_only_the_port() {
+        // Host behind NAT: its local IP in the URL must not replace the address we reach it at.
+        let c = RtspClient::new("rtspenc://192.168.1.85:48010", "moon.example.org", 1);
+        assert_eq!((c.host.as_str(), c.port, c.url.as_str()), ("moon.example.org", 48010, "rtsp://moon.example.org:48010"));
+        let c = RtspClient::new("rtsp://[fd00::5]:48110/", "203.0.113.7", 1);
+        assert_eq!((c.host.as_str(), c.port), ("203.0.113.7", 48110));
+        let c = RtspClient::new("", "[2001:db8::1]", 48010);
+        assert_eq!((c.host.as_str(), c.port, c.url.as_str()), ("2001:db8::1", 48010, "rtsp://[2001:db8::1]:48010"));
+    }
 }
