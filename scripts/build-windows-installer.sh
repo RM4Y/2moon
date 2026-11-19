@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Build the Windows host installer (NSIS) in a Debian 12 container:
+# Build the Windows installers (NSIS) in a Debian 12 container:
 #   scripts/build-windows-installer.sh <version> [output-dir]
-# -> <output-dir>/2moon-host-<version>-windows-x86_64-setup.exe
+# -> <output-dir>/2moon-client-<version>-windows-x86_64-setup.exe  (per user, no admin)
+# -> <output-dir>/2moon-host-<version>-windows-x86_64-setup.exe    (service, admin)
+# (the two paths are printed in that order, one per line)
 #
 # Needs the Windows build (scripts/build-windows.sh) and its DLLs
-# (scripts/build-windows-deps.sh); bundles the ViGEmBus driver installer
-# (BSD 3-Clause, Nefarius Software Solutions) for gamepads.
+# (scripts/build-windows-deps.sh); the host one bundles the ViGEmBus driver
+# installer (BSD 3-Clause, Nefarius Software Solutions) for gamepads.
 set -eu
 VERSION="${1:?usage: $0 <version> [output-dir]}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,8 +23,10 @@ echo "$VIGEM_SHA256  $SRC/$VIGEM_FILE" | sha256sum -c --quiet - || { echo "check
 [ -f "$SRC/ViGEmBus-LICENSE.txt" ] || curl -sSfL "https://raw.githubusercontent.com/nefarius/ViGEmBus/v$VIGEM_VERSION/LICENSE" -o "$SRC/ViGEmBus-LICENSE.txt"
 
 EXE="$ROOT/target/windows/x86_64-pc-windows-gnu/release/moon-server.exe"
+CLIENT_EXE="$ROOT/target/windows/x86_64-pc-windows-gnu/release/moon-client.exe"
 DEPS="$ROOT/target/windows-deps"
 [ -f "$EXE" ] || { echo "missing $EXE (run scripts/build-windows.sh)" >&2; exit 1; }
+[ -f "$CLIENT_EXE" ] || { echo "missing $CLIENT_EXE (run scripts/build-windows.sh)" >&2; exit 1; }
 [ -f "$DEPS/avcodec-62.dll" ] || { echo "missing $DEPS (run scripts/build-windows-deps.sh)" >&2; exit 1; }
 
 STAGE="$ROOT/target/windows-installer/stage"
@@ -38,15 +42,28 @@ cp "$SRC/$VIGEM_FILE" "$STAGE/ViGEmBus_setup.exe"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
 cp "$ROOT/installer/windows/README.txt" "$STAGE/README.txt"
 
+# Client: moon-client.exe and every DLL (FFmpeg decoders, Opus, SDL3, winpthread).
+CSTAGE="$ROOT/target/windows-installer/stage-client"
+rm -rf "$CSTAGE"
+mkdir -p "$CSTAGE/LICENSES"
+cp "$CLIENT_EXE" "$CSTAGE/"
+cp "$DEPS"/*.dll "$CSTAGE/"
+cp -r "$DEPS/LICENSES/." "$CSTAGE/LICENSES/"
+cp "$ROOT/LICENSE" "$CSTAGE/LICENSE.txt"
+
 NAME="2moon-host-$VERSION-windows-x86_64-setup.exe"
+CNAME="2moon-client-$VERSION-windows-x86_64-setup.exe"
 # NSIS wants a numeric version (a.b.c): drop any -dev.N suffix there.
 NUMERIC="$(echo "${VERSION#v}" | sed 's/-.*//')"
 docker run --rm -v "$ROOT":/src -w /src/installer/windows -e OWNER="$(id -u):$(id -g)" debian:bookworm bash -euc '
     apt-get update -qq && apt-get install -y -qq --no-install-recommends nsis binutils-mingw-w64-x86-64 >/dev/null
-    x86_64-w64-mingw32-strip /src/target/windows-installer/stage/moon-server.exe
+    x86_64-w64-mingw32-strip /src/target/windows-installer/stage/moon-server.exe /src/target/windows-installer/stage-client/moon-client.exe
     makensis -V2 -DVERSION='"$NUMERIC"' -DSTAGE=/src/target/windows-installer/stage -DOUTFILE=/src/target/windows-installer/'"$NAME"' 2moon-host.nsi
+    makensis -V2 -DVERSION='"$NUMERIC"' -DSTAGE=/src/target/windows-installer/stage-client -DOUTFILE=/src/target/windows-installer/'"$CNAME"' 2moon-client.nsi
     chown -R $OWNER /src/target/windows-installer
 '
-cp "$ROOT/target/windows-installer/$NAME" "$OUT/"
-(cd "$OUT" && sha256sum "$NAME" > "$NAME.sha256")
-echo "$OUT/$NAME"
+for n in "$CNAME" "$NAME"; do
+    cp "$ROOT/target/windows-installer/$n" "$OUT/"
+    (cd "$OUT" && sha256sum "$n" > "$n.sha256")
+    echo "$OUT/$n"
+done

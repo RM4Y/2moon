@@ -191,7 +191,14 @@ fn cover_key(h: &HostRef, app_id: u32) -> String {
 pub fn run(store: Store) -> Result<()> {
     let vsync = Settings::load(&store).vsync;
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("2moon").with_inner_size([1180.0, 760.0]).with_min_inner_size([640.0, 400.0]).with_app_id("2moon"),
+        viewport: {
+            let vp = egui::ViewportBuilder::default().with_title("2moon").with_inner_size([1180.0, 760.0]).with_min_inner_size([640.0, 400.0]).with_app_id("2moon");
+            // Title bar / taskbar icon (the .exe icon itself is embedded by build.rs).
+            match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
+                Ok(icon) => vp.with_icon(icon),
+                Err(_) => vp,
+            }
+        },
         glow_options: eframe::egui_glow::GlowConfiguration { vsync, ..Default::default() },
         ..Default::default()
     };

@@ -73,6 +73,6 @@ if [ "${WINDOWS:-1}" = 1 ]; then
     (cd "$OUT" && python3 -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.', sys.argv[1])" "$name" && sha256sum "$name.zip" >"$name.zip.sha256")
     rm -rf "$dir"
     echo "$dir.zip"
-    # Windows host: installer (service, firewall rule, ViGEmBus).
-    "$ROOT/scripts/build-windows-installer.sh" "$VERSION" "$OUT" | tail -1
+    # Windows installers: client (per user) and host (service, firewall rule, ViGEmBus).
+    "$ROOT/scripts/build-windows-installer.sh" "$VERSION" "$OUT" | tail -2
 fi

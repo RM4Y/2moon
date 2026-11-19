@@ -199,15 +199,26 @@ connexion, et suit les changements de session.
 - Le premier compte du panneau d'administration se crée sans jeton depuis le PC hôte
   lui-même (`https://localhost:47990/`).
 - `moon-server.exe --install-service` / `--uninstall-service` (ce que fait l'installateur).
+- Pare-feu : l'hôte est autorisé sur les réseaux **privés et de domaine** ; le composant
+  « Autoriser sur les réseaux publics » l'étend aux réseaux publics (coché d'office lors
+  d'une mise à jour depuis une version qui les autorisait déjà).
+- Installation silencieuse : `2moon-host-…-setup.exe /S [/D=C:\chemin]` ;
+  désinstallation : `uninstall.exe /S` (garde `C:\ProgramData\2moon`).
 
 Compilé depuis Linux : `scripts/build-windows-deps.sh`, `scripts/build-windows.sh`, puis
 `scripts/build-windows-installer.sh <version>` (NSIS, dans un conteneur Debian 12).
 
 ## Client Windows
 
-Archive `2moon-client-<version>-windows-x86_64.zip` : `moon-client.exe` (interface
-graphique ; les commandes `pair`, `stream`... s'utilisent depuis l'invite de commandes)
-et ses DLL (FFmpeg, Opus, SDL3). Rien à installer : extraire et lancer.
+Installateur `2moon-client-<version>-windows-x86_64-setup.exe` : installe le client pour
+l'utilisateur courant **sans droits d'administrateur** (`%LOCALAPPDATA%\Programs\2moon`),
+avec un raccourci dans le menu Démarrer (et sur le Bureau, facultatif) et une entrée dans
+Paramètres > Applications. Installation silencieuse : `/S` ; désinstallation : `uninstall.exe /S`
+(garde les réglages).
+
+Ou, en version portable, l'archive `2moon-client-<version>-windows-x86_64.zip` :
+`moon-client.exe` (interface graphique ; les commandes `pair`, `stream`... s'utilisent depuis
+l'invite de commandes) et ses DLL (FFmpeg, Opus, SDL3). Rien à installer : extraire et lancer.
 
 - Décodage : NVDEC (NVIDIA), sinon **D3D11VA** (tous GPU, DXVA2 sur les systèmes plus
   anciens), sinon le processeur. Copie zéro NVDEC → OpenGL comme sous Linux.
@@ -215,7 +226,8 @@ et ses DLL (FFmpeg, Opus, SDL3). Rien à installer : extraire et lancer.
 - Réglages et identité : `%APPDATA%\2moon-client`.
 
 Compilé depuis Linux : `scripts/build-windows-deps.sh` (DLL FFmpeg / Opus / SDL3, MinGW-w64)
-puis `scripts/build-windows.sh` ; `scripts/package-release.sh` produit le zip.
+puis `scripts/build-windows.sh` ; `scripts/build-windows-installer.sh <version>` produit
+l'installateur et `scripts/package-release.sh` le zip et les deux installateurs.
 
 ## FFmpeg fourni
 
