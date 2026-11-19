@@ -44,7 +44,7 @@ pub async fn run(host: Arc<Host>) -> Result<()> {
             tokio::spawn(async move {
                 let svc = service_fn(move |req| {
                     let host = host.clone();
-                    async move { Ok::<_, Infallible>(handle(host, req, Ctx { peer, local, https: false, cert: None }).await) }
+                    async move { Ok::<_, Infallible>(handle(host, req, Ctx { peer, local, https: false, cert: None, host_name: None }).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(sock), svc).await;
             });
@@ -69,7 +69,7 @@ pub async fn run(host: Arc<Host>) -> Result<()> {
                 let svc = service_fn(move |req| {
                     let host = host.clone();
                     let cert = cert.clone();
-                    async move { Ok::<_, Infallible>(handle(host, req, Ctx { peer, local, https: true, cert }).await) }
+                    async move { Ok::<_, Infallible>(handle(host, req, Ctx { peer, local, https: true, cert, host_name: None }).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), svc).await;
             });
@@ -126,6 +126,23 @@ struct Ctx {
     local: Option<SocketAddr>,
     https: bool,
     cert: Option<Vec<u8>>,
+    /// Address the client used to reach us (Host header, without the port).
+    host_name: Option<String>,
+}
+
+/// The host part of a Host header ("moon.example.org:47984", "[fd00::1]:47984",
+/// "192.168.1.85"), if it looks like a name or an address.
+fn host_header_name(v: &str) -> Option<String> {
+    let h = if v.starts_with('[') {
+        &v[..=v.find(']')?]
+    } else {
+        match v.rsplit_once(':') {
+            Some((h, p)) if !h.contains(':') && p.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => v,
+        }
+    };
+    let ok = !h.is_empty() && h.len() <= 255 && h.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:[]".contains(&b));
+    ok.then(|| h.to_string())
 }
 
 fn reply(status: StatusCode, body: String) -> Response<Full<Bytes>> {
@@ -141,7 +158,8 @@ fn ok(x: xml::Response) -> Response<Full<Bytes>> {
     reply(StatusCode::OK, x.build())
 }
 
-async fn handle(host: Arc<Host>, req: Request<Incoming>, ctx: Ctx) -> Response<Full<Bytes>> {
+async fn handle(host: Arc<Host>, req: Request<Incoming>, mut ctx: Ctx) -> Response<Full<Bytes>> {
+    ctx.host_name = req.headers().get(hyper::header::HOST).and_then(|v| v.to_str().ok()).and_then(host_header_name);
     let path = req.uri().path().to_string();
     let q: HashMap<String, String> = url::form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes()).into_owned().collect();
     debug!("{} {} {}{}", if ctx.https { "HTTPS" } else { "HTTP" }, ctx.peer, path, if q.is_empty() { "" } else { " (query)" });
@@ -330,9 +348,13 @@ fn launch(host: &Host, q: &HashMap<String, String>, ctx: &Ctx, resume: bool) -> 
     let local = ctx.local.map(|a| canonical_ip(a.ip())).unwrap_or(IpAddr::from([127, 0, 0, 1]));
     // Clients announcing `corever` support encrypted RTSP; use it unless disabled.
     let scheme = if q.contains_key("corever") && std::env::var_os("MOON_NO_RTSPENC").is_none() { "rtspenc" } else { "rtsp" };
-    let url = match local {
-        IpAddr::V4(v4) => format!("{scheme}://{v4}:{}", host.cfg.rtsp_port),
-        IpAddr::V6(v6) => format!("{scheme}://[{v6}]:{}", host.cfg.rtsp_port),
+    // The address the client reached us at (a host behind NAT is known by its public
+    // name or IP, not by `local`): 2moon clients up to 0.5.1 connect RTSP to this host;
+    // Moonlight only reads the port.
+    let url = match (&ctx.host_name, local) {
+        (Some(h), _) => format!("{scheme}://{h}:{}", host.cfg.rtsp_port),
+        (None, IpAddr::V4(v4)) => format!("{scheme}://{v4}:{}", host.cfg.rtsp_port),
+        (None, IpAddr::V6(v6)) => format!("{scheme}://[{v6}]:{}", host.cfg.rtsp_port),
     };
     let r = xml::Response::ok();
     Ok(if resume { r.field("resume", 1) } else { r.field("gamesession", 1) }.field("sessionUrl0", url))
@@ -342,4 +364,19 @@ fn rand_alnum16() -> [u8; 16] {
     const CH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let r: [u8; 16] = crypto::random_bytes();
     r.map(|b| CH[b as usize % CH.len()])
+}
+
+#[cfg(test)]
+mod host_header_tests {
+    use super::host_header_name;
+
+    #[test]
+    fn host_header() {
+        assert_eq!(host_header_name("moon.example.org:47984").as_deref(), Some("moon.example.org"));
+        assert_eq!(host_header_name("192.168.1.85").as_deref(), Some("192.168.1.85"));
+        assert_eq!(host_header_name("[fd00::1]:47984").as_deref(), Some("[fd00::1]"));
+        assert_eq!(host_header_name("fd00::1").as_deref(), Some("fd00::1"));
+        assert_eq!(host_header_name("a<b>:1"), None);
+        assert_eq!(host_header_name(""), None);
+    }
 }
