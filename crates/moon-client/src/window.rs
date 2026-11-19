@@ -305,26 +305,27 @@ impl ApplicationHandler<UserEvent> for App {
                 let down = event.state == ElementState::Pressed;
                 let combo = self.mods.control_key() && self.mods.alt_key() && self.mods.shift_key();
                 if combo && down {
-                    match code {
-                        KeyCode::KeyQ => {
+                    // The letter of the active layout, not the QWERTY position.
+                    match layout_letter(&event) {
+                        Some('q') => {
                             self.release_all();
                             el.exit();
                             return;
                         }
-                        KeyCode::KeyZ => {
+                        Some('z') => {
                             self.release_all();
                             self.want_capture = !self.want_capture;
                             self.set_capture(self.want_capture);
                             return;
                         }
-                        KeyCode::KeyF => {
+                        Some('f') => {
                             if let Some(g) = &self.gfx {
                                 let fs = g.window.fullscreen().is_some();
                                 g.window.set_fullscreen(if fs { None } else { Some(Fullscreen::Borderless(None)) });
                             }
                             return;
                         }
-                        KeyCode::KeyS => {
+                        Some('s') => {
                             self.show_stats = !self.show_stats;
                             return;
                         }
@@ -385,6 +386,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.ctl.input(&In::MouseRel { dx: dx.clamp(-32768, 32767) as i16, dy: dy.clamp(-32768, 32767) as i16 });
             }
         }
+    }
+}
+
+/// The letter this key gives in the active keyboard layout, modifiers left aside
+/// (AZERTY: the key at QWERTY's A gives 'q'). Lower case.
+pub fn layout_letter(ev: &winit::event::KeyEvent) -> Option<char> {
+    use winit::keyboard::Key;
+    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+    match ev.key_without_modifiers() {
+        Key::Character(s) => {
+            let mut it = s.chars();
+            let c = it.next()?;
+            it.next().is_none().then(|| c.to_ascii_lowercase()).filter(char::is_ascii_alphabetic)
+        }
+        _ => None,
     }
 }
 

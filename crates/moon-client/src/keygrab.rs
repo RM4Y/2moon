@@ -260,19 +260,23 @@ impl Imp {
 #[cfg(windows)]
 mod win {
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Mutex;
 
     use moon_proto::control::input::{self as inp, Event as In};
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN, WM_USER,
+    };
 
     use crate::control::ControlSender;
 
     static ON: AtomicBool = AtomicBool::new(false);
-    static HOOK: AtomicUsize = AtomicUsize::new(0);
+    /// Thread running the hook (0: none).
+    static THREAD: AtomicU32 = AtomicU32::new(0);
     static SENDER: Mutex<Option<ControlSender>> = Mutex::new(None);
     /// Keys whose press we took from Windows: their release is taken too.
     static HELD: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
@@ -292,17 +296,20 @@ mod win {
             *SENDER.lock().unwrap() = Some(c.clone());
         }
         ON.store(on, Ordering::SeqCst);
-        if on && HOOK.load(Ordering::SeqCst) == 0 {
-            // Installed on the UI thread, whose message loop runs the hook.
-            let h = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0) };
-            if h.is_null() {
-                tracing::warn!("cannot install the keyboard hook");
+        if on && THREAD.load(Ordering::SeqCst) == 0 {
+            // The hook runs on a thread of its own that does nothing else. On the UI
+            // thread (busy drawing, a lot with software OpenGL) it would answer late:
+            // Windows then hands the key to the system (Start menu, Alt+Tab here) and,
+            // after a few timeouts, silently removes the hook.
+            let (tx, rx) = std::sync::mpsc::channel();
+            match std::thread::Builder::new().name("moon-keyhook".into()).spawn(move || hook_thread(tx)) {
+                Ok(_) => THREAD.store(rx.recv().unwrap_or(0), Ordering::SeqCst),
+                Err(e) => tracing::warn!("cannot start the keyboard hook thread: {e}"),
             }
-            HOOK.store(h as usize, Ordering::SeqCst);
         } else if !on {
-            let h = HOOK.swap(0, Ordering::SeqCst);
-            if h != 0 {
-                unsafe { UnhookWindowsHookEx(h as _) };
+            let t = THREAD.swap(0, Ordering::SeqCst);
+            if t != 0 {
+                unsafe { PostThreadMessageW(t, WM_QUIT, 0, 0) };
             }
             // Release on the host what we were holding for it.
             let held = HELD.lock().unwrap().take().unwrap_or_default();
@@ -311,6 +318,29 @@ mod win {
                     c.input(&In::Key { down: false, vk: vk as u16, modifiers: 0 });
                 }
             }
+        }
+    }
+
+    /// Installs the hook, sends this thread's id (0 on failure) and runs the message
+    /// loop (it is what calls the hook) until WM_QUIT.
+    fn hook_thread(tx: std::sync::mpsc::Sender<u32>) {
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            // Create this thread's message queue before anyone posts to it.
+            PeekMessageW(&mut msg, std::ptr::null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0);
+            if h.is_null() {
+                tracing::warn!("cannot install the keyboard hook");
+                let _ = tx.send(0);
+                return;
+            }
+            let _ = tx.send(GetCurrentThreadId());
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            UnhookWindowsHookEx(h);
         }
     }
 

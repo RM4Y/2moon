@@ -261,9 +261,49 @@ struct FastMouseState {
     rest: (f64, f64),
     /// Keys sent down through this path, released when capture ends.
     pressed: HashSet<u16>,
+    /// A stream is on screen: Ctrl+Alt+Shift+letter are our shortcuts.
+    armed: bool,
+    /// Shortcuts pressed, for the interface: (letter of the active layout, key, modifiers).
+    shortcuts: Vec<(char, u16, u8)>,
+    /// To wake the interface up when a shortcut comes in.
+    egui: Option<egui::Context>,
 }
 
+/// Letters of our Ctrl+Alt+Shift+… shortcuts (quit, mouse capture, fullscreen, stats, mic).
+const SHORTCUT_LETTERS: [char; 5] = ['q', 'z', 'f', 's', 'm'];
+
 impl FastMouse {
+    /// Shortcuts are recognised (and kept from the host) only while a stream is shown.
+    fn arm(&self, on: bool) {
+        let mut st = self.0.lock().unwrap();
+        st.armed = on;
+        if !on {
+            st.shortcuts.clear();
+        }
+    }
+
+    fn set_egui(&self, ctx: egui::Context) {
+        self.0.lock().unwrap().egui = Some(ctx);
+    }
+
+    /// A Ctrl+Alt+Shift+`letter` press (`letter`: what the key gives in the active layout,
+    /// so Q is Q on AZERTY too). True: it is one of ours, taken from the event loop.
+    fn shortcut(&self, letter: char, vk: u16, modifiers: u8) -> bool {
+        let mut st = self.0.lock().unwrap();
+        if !st.armed || !SHORTCUT_LETTERS.contains(&letter) {
+            return false;
+        }
+        st.shortcuts.push((letter, vk, modifiers));
+        if let Some(c) = &st.egui {
+            c.request_repaint();
+        }
+        true
+    }
+
+    fn take_shortcuts(&self) -> Vec<(char, u16, u8)> {
+        std::mem::take(&mut self.0.lock().unwrap().shortcuts)
+    }
+
     fn set(&self, ctl: Option<ControlSender>) {
         let mut st = self.0.lock().unwrap();
         if let Some(old) = st.ctl.take() {
@@ -370,7 +410,14 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for FastInputLoop
                     let m = self.mods;
                     let bits = (m.shift_key() as u8) * inp::MOD_SHIFT | (m.control_key() as u8) * inp::MOD_CTRL | (m.alt_key() as u8) * inp::MOD_ALT | (m.super_key() as u8) * inp::MOD_META;
                     let shortcut = m.control_key() && m.alt_key() && m.shift_key();
-                    self.fast.key(vk, k.state == ElementState::Pressed, k.repeat, bits, shortcut)
+                    let pressed = k.state == ElementState::Pressed;
+                    // Our shortcuts by the letter of the active layout: Ctrl+Alt is AltGr on
+                    // Windows, the logical key egui gets is then empty and it falls back to
+                    // the QWERTY position.
+                    if shortcut && pressed && !k.repeat && crate::window::layout_letter(k).is_some_and(|l| self.fast.shortcut(l, vk, bits)) {
+                        return true;
+                    }
+                    self.fast.key(vk, pressed, k.repeat, bits, shortcut)
                 }),
                 _ => false,
             },
@@ -442,6 +489,7 @@ impl GuiApp {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let (tx, rx) = mpsc::channel();
         let settings = Settings::load(&store);
+        fast_mouse.set_egui(cc.egui_ctx.clone());
         let app = Self {
             rt: Some(rt),
             store,
@@ -664,6 +712,7 @@ impl GuiApp {
 
     fn end_stream(&mut self, ctx: &egui::Context, why: Option<String>) {
         self.fast_mouse.set(None);
+        self.fast_mouse.arm(false);
         if let Some(g) = self.keygrab.as_mut() {
             g.set(false, None);
         }
@@ -1776,48 +1825,44 @@ impl GuiApp {
         if capture != st.captured {
             st.captured = capture;
             self.fast_mouse.set(capture.then(|| ctl.clone()));
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if capture { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
+            ctx.send_viewport_cmd(cursor_grab(capture));
+        }
+        // Our Ctrl+Alt+Shift+… shortcuts, recognised in the event loop by the letter of the
+        // active keyboard layout (Ctrl+Alt+Maj+Q is the Q key on AZERTY too).
+        self.fast_mouse.arm(true);
+        for (letter, vk, modifiers) in self.fast_mouse.take_shortcuts() {
+            match letter {
+                'q' => exit = true,
+                'z' => {
+                    release_all(st, &ctl);
+                    st.want_capture = !st.want_capture;
+                    st.captured = st.want_capture;
+                    self.fast_mouse.set(st.captured.then(|| ctl.clone()));
+                    ctx.send_viewport_cmd(cursor_grab(st.captured));
+                }
+                'f' => {
+                    st.fullscreen = !st.fullscreen;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(st.fullscreen));
+                }
+                's' => self.settings.show_stats = !self.settings.show_stats,
+                'm' if st.session.mic_active => {
+                    let m = !st.session.mic_muted.load(Ordering::Relaxed);
+                    st.session.mic_muted.store(m, Ordering::Relaxed);
+                    st.mic_toast = Some(Instant::now());
+                }
+                // Not ours here (no microphone): the host gets the key.
+                _ => {
+                    if st.pressed.insert(vk) {
+                        ctl.input(&In::Key { down: true, vk, modifiers });
+                    }
+                }
+            }
         }
         for ev in events {
             match ev {
                 egui::Event::Key { key, physical_key, pressed, repeat, modifiers } => {
                     // Forwarded to the host: the physical key (the host applies its own layout).
                     let k = physical_key.unwrap_or(key);
-                    let combo = modifiers.ctrl && modifiers.alt && modifiers.shift;
-                    if combo && pressed && !repeat {
-                        // Our shortcuts: the letter printed on the key (logical key), so that
-                        // Ctrl+Alt+Maj+Q is the Q key on AZERTY too (physically QWERTY's A).
-                        match key {
-                            Key::Q => {
-                                exit = true;
-                                continue;
-                            }
-                            Key::Z => {
-                                release_all(st, &ctl);
-                                st.want_capture = !st.want_capture;
-                                st.captured = st.want_capture;
-                                self.fast_mouse.set(st.captured.then(|| ctl.clone()));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if st.captured { egui::CursorGrab::Locked } else { egui::CursorGrab::None }));
-                                continue;
-                            }
-                            Key::F => {
-                                st.fullscreen = !st.fullscreen;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(st.fullscreen));
-                                continue;
-                            }
-                            Key::S => {
-                                self.settings.show_stats = !self.settings.show_stats;
-                                continue;
-                            }
-                            Key::M if st.session.mic_active => {
-                                let m = !st.session.mic_muted.load(Ordering::Relaxed);
-                                st.session.mic_muted.store(m, Ordering::Relaxed);
-                                st.mic_toast = Some(Instant::now());
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
                     // Like Moonlight: every key by its physical position, modifiers
                     // included (left / right Shift, Ctrl, Alt, AltGr, Windows), and no
                     // auto-repeat (the host repeats held keys itself).
@@ -1900,6 +1945,18 @@ fn short_stats(s: &Stats) -> String {
 
 fn mod_bits(m: egui::Modifiers) -> u8 {
     (m.shift as u8) * inp::MOD_SHIFT | (m.ctrl as u8) * inp::MOD_CTRL | (m.alt as u8) * inp::MOD_ALT | (m.mac_cmd as u8) * inp::MOD_META
+}
+
+/// Mouse capture for the stream window. winit cannot lock the cursor on Windows (Locked is
+/// NotSupported there and egui only logs it, so the cursor stayed free): confine it to the
+/// window instead. The relative motion comes from raw input (`DeviceEvent::MouseMotion`)
+/// either way, so it keeps flowing when the hidden cursor reaches an edge.
+fn cursor_grab(on: bool) -> egui::ViewportCommand {
+    egui::ViewportCommand::CursorGrab(match on {
+        false => egui::CursorGrab::None,
+        true if cfg!(windows) => egui::CursorGrab::Confined,
+        true => egui::CursorGrab::Locked,
+    })
 }
 
 fn release_all(st: &mut Stream, ctl: &ControlSender) {
