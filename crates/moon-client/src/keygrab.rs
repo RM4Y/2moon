@@ -37,7 +37,7 @@ impl KeyGrab {
         if let Some(imp) = self.imp.as_mut() {
             imp.set(on, ctl);
         }
-        debug!("system shortcuts {}", if on { "captured" } else { "released" });
+        info!("system shortcuts {}", if on { "captured" } else { "released" });
     }
 }
 
@@ -335,12 +335,15 @@ mod win {
                 let _ = tx.send(0);
                 return;
             }
-            let _ = tx.send(GetCurrentThreadId());
+            let tid = GetCurrentThreadId();
+            tracing::info!("keyboard hook installed (thread {tid})");
+            let _ = tx.send(tid);
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
             UnhookWindowsHookEx(h);
+            tracing::info!("keyboard hook removed (thread {tid})");
         }
     }
 
@@ -355,6 +358,10 @@ mod win {
             let mut held = HELD.lock().unwrap();
             let held = held.get_or_insert_with(HashSet::new);
             let system = matches!(vk, VK_LWIN | VK_RWIN | VK_APPS) || (alt && matches!(vk, VK_TAB | VK_ESCAPE | VK_F4 | VK_SPACE)) || (ctrl && vk == VK_ESCAPE);
+            if matches!(vk, VK_LWIN | VK_RWIN) || (down && (system || (ctrl && alt && shift))) {
+                // Diagnostics: system keys and Ctrl+Alt+Shift+… as the hook sees them.
+                tracing::info!("hook: vk {vk:#04x} {} ctrl {ctrl} alt {alt} shift {shift} injected {} -> {}", if down { "down" } else { "up" }, kb.flags & 0x10 != 0, if (down && system) || (!down && held.contains(&vk)) { "to host" } else { "to Windows" });
+            }
             if (down && system) || (!down && held.contains(&vk)) {
                 if down {
                     held.insert(vk);

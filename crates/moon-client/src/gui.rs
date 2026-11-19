@@ -145,6 +145,8 @@ struct Stream {
     mic_toast: Option<Instant>,
     /// (window start, frames presented at start, fps over the last window)
     fps_window: (Instant, u64, f64),
+    /// Last focus state written to the log (diagnostics).
+    dbg_focus: Option<bool>,
 }
 
 pub struct GuiApp {
@@ -291,8 +293,10 @@ impl FastMouse {
     fn shortcut(&self, letter: char, vk: u16, modifiers: u8) -> bool {
         let mut st = self.0.lock().unwrap();
         if !st.armed || !SHORTCUT_LETTERS.contains(&letter) {
+            tracing::info!("Ctrl+Alt+Shift+{letter}: not a shortcut here (stream shown: {})", st.armed);
             return false;
         }
+        tracing::info!("shortcut Ctrl+Alt+Shift+{letter} recognised");
         st.shortcuts.push((letter, vk, modifiers));
         if let Some(c) = &st.egui {
             c.request_repaint();
@@ -403,6 +407,11 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for FastInputLoop
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
+                tracing::debug!("modifiers: {:?}", self.mods);
+                false
+            }
+            WindowEvent::Focused(f) => {
+                tracing::info!("window focus: {f}");
                 false
             }
             WindowEvent::KeyboardInput { event: k, is_synthetic: false, .. } => match k.physical_key {
@@ -411,6 +420,10 @@ impl winit::application::ApplicationHandler<eframe::UserEvent> for FastInputLoop
                     let bits = (m.shift_key() as u8) * inp::MOD_SHIFT | (m.control_key() as u8) * inp::MOD_CTRL | (m.alt_key() as u8) * inp::MOD_ALT | (m.super_key() as u8) * inp::MOD_META;
                     let shortcut = m.control_key() && m.alt_key() && m.shift_key();
                     let pressed = k.state == ElementState::Pressed;
+                    // Diagnostics: only keys pressed with at least two of Ctrl / Alt / Shift.
+                    if pressed && (m.control_key() as u8 + m.alt_key() as u8 + m.shift_key() as u8) >= 2 {
+                        tracing::info!("combo key {code:?} (vk {vk:#04x}) mods {m:?} layout letter {:?} logical {:?}", crate::window::layout_letter(k), k.logical_key);
+                    }
                     // Our shortcuts by the letter of the active layout: Ctrl+Alt is AltGr on
                     // Windows, the logical key egui gets is then empty and it falls back to
                     // the QWERTY position.
@@ -792,6 +805,7 @@ impl GuiApp {
                             pressed: HashSet::new(),
                             mic_toast: None,
                             fps_window: (Instant::now(), 0, 0.0),
+                            dbg_focus: None,
                         });
                         self.screen = Screen::Streaming;
                     }
@@ -842,9 +856,11 @@ impl eframe::App for GuiApp {
             if !self.keygrab_tried {
                 self.keygrab_tried = true;
                 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-                if let (Ok(d), Ok(w)) = (frame.display_handle(), frame.window_handle()) {
-                    self.keygrab = crate::keygrab::KeyGrab::new(d.as_raw(), w.as_raw());
+                match (frame.display_handle(), frame.window_handle()) {
+                    (Ok(d), Ok(w)) => self.keygrab = crate::keygrab::KeyGrab::new(d.as_raw(), w.as_raw()),
+                    (d, w) => tracing::warn!("no window handle for shortcut capture (display: {:?}, window: {:?})", d.err(), w.err()),
                 }
+                tracing::info!("system shortcut capture: {}", if self.keygrab.is_some() { "set up" } else { "not possible" });
             }
             self.stream_ui(ui, &ctx);
             return;
@@ -1811,6 +1827,10 @@ impl GuiApp {
 
         // Input forwarding.
         let (events, focused) = ctx.input(|i| (i.events.clone(), i.viewport().focused.unwrap_or(true)));
+        if st.dbg_focus != Some(focused) {
+            tracing::info!("stream focus (egui): {focused}, shortcut capture setting: {}, keygrab available: {}", self.settings.capture_shortcuts, self.keygrab.is_some());
+            st.dbg_focus = Some(focused);
+        }
         let ctl = st.session.control.clone();
         st.session.input_focus.store(focused, Ordering::Relaxed);
         if let Some(g) = self.keygrab.as_mut() {
@@ -1832,6 +1852,7 @@ impl GuiApp {
         // active keyboard layout (Ctrl+Alt+Maj+Q is the Q key on AZERTY too).
         self.fast_mouse.arm(true);
         for (letter, vk, modifiers) in self.fast_mouse.take_shortcuts() {
+            tracing::info!("shortcut {letter} applied");
             match letter {
                 'q' => exit = true,
                 'z' => {

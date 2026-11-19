@@ -120,6 +120,18 @@ fn client_for(store: &Store, host: &str) -> GsClient {
     c
 }
 
+/// Log file of the Windows interface (no arguments: nothing to print to).
+fn gui_log_file() -> Option<std::fs::File> {
+    if !cfg!(windows) || std::env::args().len() > 1 {
+        return None;
+    }
+    let dir = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("2moon");
+    std::fs::create_dir_all(&dir).ok()?;
+    let log = dir.join("client.log");
+    let _ = std::fs::rename(&log, dir.join("client.old.log"));
+    std::fs::File::create(log).ok()
+}
+
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
@@ -137,9 +149,14 @@ async fn main() -> Result<()> {
         // ATTACH_PARENT_PROCESS: print to the console that started us.
         unsafe { AttachConsole(u32::MAX) };
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // Windows, started from the Start menu: no console, so the log goes to
+    // %LOCALAPPDATA%\2moon\client.log (previous run kept as client.old.log).
+    match gui_log_file() {
+        Some(f) => tracing_subscriber::fmt().with_env_filter(filter()).with_ansi(false).with_writer(std::sync::Mutex::new(f)).init(),
+        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+    }
+    tracing::info!("2moon client {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
     let args = Args::parse();
     let mut store = Store::load(args.state_dir.unwrap_or_else(Store::default_dir))?;
 
