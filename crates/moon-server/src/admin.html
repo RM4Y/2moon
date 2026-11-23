@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>2moon — hôte</title>
+<style>
+@font-face { font-family: Inter; font-weight: 400; src: url(/assets/inter.ttf) format("truetype"); font-display: swap; }
+@font-face { font-family: Inter; font-weight: 600; src: url(/assets/inter-semibold.ttf) format("truetype"); font-display: swap; }
+@font-face { font-family: "Space Grotesk"; font-weight: 700; src: url(/assets/space-grotesk-bold.ttf) format("truetype"); font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url(/assets/jetbrains-mono.ttf) format("truetype"); font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 700; src: url(/assets/jetbrains-mono-bold.ttf) format("truetype"); font-display: swap; }
+
+/* Nuit lunaire : noir profond, lune blanc os, un seul accent. */
+:root {
+  --bg: #09090B; --surface: #121215; --surface2: #1C1C21; --border: #2A2A31; --divider: #222228; --border-strong: #3F3F46;
+  --text: #F5F5F2; --text2: #D4D4D8; --muted: #A1A1AA; --faint: #71717A; --accent: #CBFF4D; --warn: #FF8A3D;
+  --glass: rgba(18,18,21,.62);
+  --display: "Space Grotesk", Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 96px; }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.5 Inter, system-ui, sans-serif; overflow-x: hidden; }
+a { color: var(--text); }
+::selection { background: rgba(203,255,77,.35); }
+.hidden { display: none !important; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---- sky ---- */
+.sky { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+.ciel { position: absolute; inset: 0; background: url(/assets/stars.webp); background-size: 1200px 800px; opacity: .75; animation: derive 220s linear infinite; }
+.ciel-proche { position: absolute; inset: 0; background: url(/assets/stars.webp); background-size: 520px 347px; animation: derive-proche 140s linear infinite, scintille 5s ease-in-out infinite alternate; }
+.lune-orbite { position: absolute; top: -330px; right: -300px; width: min(1040px, 80vw); aspect-ratio: 1; animation: flotte 16s ease-in-out infinite alternate; }
+.lune-halo { position: absolute; inset: -18%; border-radius: 50%; background: radial-gradient(circle, rgba(245,245,242,.13) 0, rgba(245,245,242,.05) 45%, rgba(245,245,242,0) 68%); animation: respire 8s ease-in-out infinite alternate; }
+.lune-img { position: absolute; inset: 0; width: 100%; height: 100%; animation: libration 40s ease-in-out infinite alternate; }
+.voile { position: absolute; inset: 0; background: linear-gradient(90deg, #09090B 0%, rgba(9,9,11,.82) 34%, rgba(9,9,11,.25) 66%, rgba(9,9,11,0) 100%), linear-gradient(180deg, rgba(9,9,11,0) 45%, #09090B 100%); }
+body.auth-mode .lune-orbite { top: -180px; right: auto; left: 50%; width: min(720px, 110vw); margin-left: calc(min(720px, 110vw) / -2); }
+body.auth-mode .voile { background: linear-gradient(180deg, rgba(9,9,11,0) 20%, rgba(9,9,11,.7) 55%, #09090B 85%); }
+@keyframes derive { from { background-position: 0 0 } to { background-position: -1200px 800px } }
+@keyframes derive-proche { from { background-position: 0 0 } to { background-position: -1040px 347px } }
+@keyframes scintille { from { opacity: .12 } to { opacity: .45 } }
+@keyframes flotte { from { transform: translate3d(0,0,0) } to { transform: translate3d(-24px,18px,0) } }
+@keyframes libration { from { transform: rotate(-5deg) scale(1) } to { transform: rotate(5deg) scale(1.015) } }
+@keyframes respire { from { opacity: .7 } to { opacity: 1 } }
+@media (prefers-reduced-motion: reduce) { .ciel, .ciel-proche, .lune-orbite, .lune-halo, .lune-img, .phases svg { animation: none !important; } }
+
+/* ---- header ---- */
+header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 0 40px; min-height: 76px; border-bottom: 1px solid rgba(255,255,255,.08); background: rgba(9,9,11,.82); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; }
+.brand b { font: 700 24px/1 var(--display); letter-spacing: -.03em; }
+.brand .role { font: 400 12px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); padding-left: 12px; border-left: 1px solid var(--border-strong); }
+.head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.chip { font: 400 13px/1 var(--mono); padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
+
+/* ---- pills & phases ---- */
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px; border: 1px solid currentColor; font: 700 12px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.pill.live { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.pill.open { color: var(--text); }
+.phase { flex: none; }
+.phases { display: inline-flex; gap: 6px; }
+.phases svg { color: var(--faint); animation: phase 2s steps(1) infinite; }
+.phases svg:nth-child(2) { animation-delay: .5s } .phases svg:nth-child(3) { animation-delay: 1s } .phases svg:nth-child(4) { animation-delay: 1.5s }
+@keyframes phase { 0% { color: var(--accent) } 25%, 100% { color: var(--faint) } }
+
+/* ---- buttons & inputs ---- */
+button, .btn { font: 500 15px/1 Inter, sans-serif; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; padding: 0 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: var(--text2); cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
+button:hover:not(:disabled) { background: rgba(255,255,255,.06); color: var(--text); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: #dcff8a; color: var(--bg); }
+button.light { background: var(--text); border-color: var(--text); color: var(--bg); font-weight: 600; }
+button.light:hover:not(:disabled) { background: #fff; color: var(--bg); }
+button.ghost { border-color: transparent; min-height: 44px; padding: 0 12px; }
+button.danger:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); background: rgba(255,138,61,.08); }
+button:disabled { opacity: .4; cursor: default; }
+input[type=text], input[type=password], input:not([type]) { font: 400 15px/1 var(--mono); width: 100%; min-height: 48px; padding: 0 16px; background: var(--bg); color: var(--text); border: 1px solid var(--border-strong); border-radius: 12px; }
+input::placeholder { color: var(--faint); }
+input:focus { border-color: var(--accent); outline: none; }
+
+/* ---- layout ---- */
+.wrap { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 56px 40px 64px; display: flex; gap: 48px; align-items: flex-start; }
+nav.side { position: sticky; top: 140px; flex: 0 0 220px; display: flex; flex-direction: column; gap: 2px; padding-top: 150px; }
+nav.side a { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 12px; border-radius: 10px; text-decoration: none; color: var(--muted); font-weight: 500; }
+nav.side a:hover { color: var(--text); background: rgba(255,255,255,.04); }
+nav.side a.on { color: var(--text); background: var(--surface); }
+nav.side a.on svg { color: var(--accent); }
+nav.side svg { color: var(--faint); }
+nav.side p { margin: 16px 12px 0; font-size: 13px; color: var(--faint); }
+main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 32px; }
+.hero { min-height: 190px; display: flex; flex-direction: column; justify-content: flex-end; gap: 12px; padding-bottom: 12px; }
+.eyebrow { font: 500 12px/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { margin: 0; font: 700 clamp(40px, 6.5vw, 72px)/.95 var(--display); letter-spacing: -.04em; }
+.hero-sub { margin: 4px 0 0; color: var(--muted); font: 400 14px/1.5 var(--mono); }
+
+/* ---- panels ---- */
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; overflow: hidden; transition: border-color .2s; }
+.panel.glass { background: var(--glass); backdrop-filter: blur(32px) saturate(140%); -webkit-backdrop-filter: blur(32px) saturate(140%); border-color: rgba(255,255,255,.12); }
+.panel.hot { border-color: var(--accent); }
+.panel > h2 { margin: 0; padding: 20px 28px; border-bottom: 1px solid var(--divider); display: flex; align-items: center; gap: 14px; font: 700 20px/1.2 var(--display); letter-spacing: -.01em; }
+.panel > h2 .grow { flex: 1; }
+.row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 22px 28px; border-bottom: 1px solid var(--divider); }
+.row:last-child { border-bottom: 0; }
+.row .label { font-weight: 600; }
+.row .desc { display: block; font-size: 13px; color: var(--muted); font-weight: 400; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.muted { color: var(--muted); }
+.empty { display: flex; align-items: center; gap: 14px; color: var(--text2); font-size: 14px; }
+
+/* session */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; padding: 24px 28px 0; }
+.stat { background: var(--bg); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+.stat .v { font: 700 40px/1 var(--display); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.stat .l { margin-top: 8px; font: 400 12px/1.2 var(--mono); color: var(--muted); letter-spacing: .04em; }
+.chart-wrap { padding: 20px 28px 4px; }
+canvas { width: 100%; height: 110px; display: block; }
+.desc-line { padding: 4px 28px 22px; margin: 0; font: 400 13px/1.6 var(--mono); color: var(--muted); }
+
+/* pairing */
+.pair-body { padding: 28px; display: flex; flex-direction: column; gap: 22px; }
+.pair-body h3 { margin: 0; font: 700 clamp(28px, 4vw, 40px)/1 var(--display); letter-spacing: -.03em; }
+.pair-body p { margin: 0; color: var(--muted); }
+.pin-boxes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; max-width: 520px; }
+.pin-boxes input { height: 108px; padding: 0; text-align: center; border-radius: 16px; font: 700 64px/1 var(--display); letter-spacing: -.02em; caret-color: var(--accent); }
+.request { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--accent); background: rgba(203,255,77,.06); }
+.request .name { font-weight: 600; } .request .sub { font: 400 13px/1.3 var(--mono); color: var(--muted); }
+
+/* lists */
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; align-items: center; gap: 16px; padding: 18px 28px; border-bottom: 1px solid var(--divider); }
+.list li:last-child { border-bottom: 0; }
+.tile { flex: none; display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: rgba(255,255,255,.06); }
+.grow { flex: 1; min-width: 0; }
+.name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { font: 400 12px/1.4 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* host info */
+.kv { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; }
+.kv dt, .kv dd { margin: 0; padding: 16px 28px; border-bottom: 1px solid var(--divider); }
+.kv dt { font-weight: 600; } .kv dd { font: 400 14px/1.5 var(--mono); color: var(--text2); overflow-wrap: anywhere; padding-left: 0; }
+.kv dt:nth-last-of-type(1), .kv dd:last-child { border-bottom: 0; }
+.badge { display: inline-block; margin: 0 6px 4px 0; padding: 4px 10px; border-radius: 999px; font: 700 12px/1.2 var(--mono); letter-spacing: .06em; border: 1px solid var(--text); color: var(--text); }
+.badge.off { border-color: var(--border-strong); color: var(--faint); text-decoration: line-through; }
+
+/* logs */
+.switch { display: inline-flex; align-items: center; gap: 10px; font: 400 13px/1 Inter, sans-serif; color: var(--muted); cursor: pointer; }
+/* The thumb is part of the input's own background, so it always updates with the track. */
+.switch input { appearance: none; -webkit-appearance: none; flex: none; margin: 0; width: 52px; height: 30px; border-radius: 999px; border: 1px solid var(--border-strong); background: radial-gradient(circle at 14px 50%, var(--muted) 0 10.5px, transparent 11px) var(--surface2); cursor: pointer; transition: background-color .15s, border-color .15s; }
+.switch input:checked { background: radial-gradient(circle at 36px 50%, var(--bg) 0 10.5px, transparent 11px) var(--accent); border-color: var(--accent); }
+.switch input:disabled { opacity: .4; cursor: default; }
+pre#logs { margin: 0; max-height: 380px; overflow: auto; font: 12px/1.6 var(--mono); color: var(--text2); background: var(--bg); padding: 18px 28px; white-space: pre-wrap; word-break: break-word; }
+
+/* password */
+.pw { display: flex; flex-wrap: wrap; gap: 10px; padding: 22px 28px; }
+.pw input { flex: 1 1 200px; width: auto; }
+
+/* settings */
+.seg { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg); }
+.seg button { min-height: 40px; padding: 0 18px; border: 0; border-radius: 9px; }
+.seg button[aria-checked="true"] { background: var(--text); color: var(--bg); font-weight: 600; }
+select { font: 400 15px/1.3 Inter, sans-serif; min-height: 48px; min-width: min(340px, 100%); max-width: 100%; padding: 0 44px 0 16px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23A1A1AA' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 16px center; color: var(--text); appearance: none; -webkit-appearance: none; cursor: pointer; }
+select:focus { border-color: var(--accent); outline: none; }
+select option { background: var(--surface); color: var(--text); }
+.row.stack { flex-direction: column; align-items: stretch; }
+.row .pw { padding: 0; }
+.file-btn { position: relative; overflow: hidden; }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+/* auth */
+#auth { position: relative; z-index: 1; min-height: calc(100vh - 76px); display: flex; align-items: flex-end; justify-content: center; padding: 40px 16px; }
+#auth form { width: min(560px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 36px; border-radius: 22px; background: rgba(18,18,21,.78); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border: 1px solid rgba(255,255,255,.12); margin-top: 26vh; }
+#auth h2 { margin: 0 0 6px; font: 700 40px/1 var(--display); letter-spacing: -.03em; }
+#auth p { margin: 0 0 6px; color: var(--muted); font-size: 14px; }
+#auth code { font-family: var(--mono); font-size: 13px; color: var(--text2); }
+.err { color: var(--warn); min-height: 1.3em; font-size: 13px; }
+
+/* applications: 2:3 box art */
+.apps-grid { list-style: none; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 24px 20px; padding: 28px; }
+.app-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.poster { position: relative; display: block; width: 100%; aspect-ratio: 2 / 3; padding: 0; min-height: 0; border-radius: 14px; overflow: hidden; background: var(--surface2); border: 1px solid var(--border); cursor: pointer; transition: transform .15s, border-color .15s, box-shadow .15s; }
+.poster:hover:not(:disabled) { background: var(--surface2); transform: translateY(-3px); border-color: var(--border-strong); box-shadow: 0 14px 30px rgba(0,0,0,.45); }
+.poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.poster .ph { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px; text-align: center; color: var(--text); font: 700 20px/1.1 var(--display); letter-spacing: -.02em; overflow-wrap: anywhere; background: radial-gradient(circle at 50% 30%, rgba(255,255,255,.07), transparent 70%); }
+.poster .ph svg { color: var(--muted); }
+.poster.running { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.poster .pill { position: absolute; top: 10px; left: 10px; font-size: 11px; }
+.poster .edit { position: absolute; inset: auto 0 0 0; padding: 26px 12px 12px; font: 500 13px/1 Inter, sans-serif; color: var(--text); background: linear-gradient(180deg, transparent, rgba(9,9,11,.85)); opacity: 0; transition: opacity .15s; }
+.poster:hover .edit, .poster:focus-visible .edit { opacity: 1; }
+.app-meta { display: flex; align-items: flex-start; gap: 6px; }
+.app-meta .grow .name { font-size: 15px; }
+.mini { min-height: 32px; width: 32px; padding: 0; border-radius: 8px; font-size: 13px; color: var(--muted); }
+.add-tile { border-style: dashed; color: var(--muted); }
+.add-tile .ph { font: 500 15px/1.3 Inter, sans-serif; color: var(--muted); background: none; }
+.add-tile:hover .ph, .add-tile:hover .ph svg { color: var(--accent); }
+
+/* app editor */
+dialog.dlg { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border-radius: 22px; border: 1px solid rgba(255,255,255,.12); background: rgba(18,18,21,.96); color: var(--text); overflow: auto; }
+dialog.dlg::backdrop { background: rgba(9,9,11,.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.dlg form { display: grid; grid-template-columns: 260px 1fr; gap: 32px; padding: 32px; }
+.dlg h2 { grid-column: 1 / -1; margin: 0; font: 700 34px/1 var(--display); letter-spacing: -.03em; }
+.cover-col { display: flex; flex-direction: column; gap: 12px; }
+.crop { position: relative; width: 100%; aspect-ratio: 2 / 3; border-radius: 14px; overflow: hidden; background: var(--bg); border: 1px dashed var(--border-strong); touch-action: none; }
+.crop.has { border-style: solid; cursor: grab; } .crop.has:active { cursor: grabbing; }
+.crop.drop { border-color: var(--accent); }
+.crop canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.crop .hint { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; font-size: 13px; color: var(--faint); pointer-events: none; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.zoom { display: flex; align-items: center; gap: 10px; font: 400 12px/1 var(--mono); color: var(--muted); }
+.fields { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.field { display: flex; flex-direction: column; gap: 8px; }
+.field .label { font-weight: 600; } .field .desc { font-size: 13px; color: var(--muted); }
+.dlg-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; padding-top: 8px; border-top: 1px solid var(--divider); padding-top: 22px; }
+.dlg-actions .spacer { flex: 1; }
+
+/* toast */
+.toast { position: fixed; z-index: 10; bottom: 24px; left: 50%; transform: translate(-50%, 8px); display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--border); padding: 12px 18px; border-radius: 999px; font-size: 14px; color: var(--text2); opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+@media (max-width: 900px) {
+  nav.side { display: none; }
+  .wrap { padding: 32px 16px 48px; }
+  header { padding: 10px 16px; }
+  .brand .role, #hostname { display: none; }
+  header { min-height: 64px; flex-wrap: nowrap; }
+  .brand b { font-size: 20px; }
+  .brand svg { width: 44px; height: 30px; }
+  .head-right { gap: 6px; flex-wrap: nowrap; }
+  button.ghost { min-height: 40px; padding: 0 8px; font-size: 14px; }
+  .panel > h2, .row, .list li, .pair-body, .pw, pre#logs, .kv dt { padding-left: 20px; padding-right: 20px; }
+  .stats, .chart-wrap, .desc-line { padding-left: 20px; padding-right: 20px; }
+  .kv { grid-template-columns: 1fr; } .kv dt { border-bottom: 0; padding-bottom: 2px; } .kv dd { padding: 0 20px 14px; }
+  .pin-boxes input { height: 84px; font-size: 48px; }
+  .apps-grid { padding: 20px; gap: 18px 14px; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .dlg form { grid-template-columns: 1fr; padding: 22px; gap: 22px; }
+  .cover-col { max-width: 260px; width: 100%; margin: 0 auto; }
+  body:not(.auth-mode) .lune-orbite { top: -140px; right: -160px; width: 420px; }
+  .hero { min-height: 120px; }
+}
+</style>
+</head>
+<body>
+<!-- Icons (inline, recoloured with currentColor). -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="ph0" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
+  <symbol id="ph1" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A3 6 0 0 0 7 1Z" fill="currentColor"/></symbol>
+  <symbol id="ph05" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A4.6 6 0 0 0 7 1Z" fill="currentColor"/></symbol>
+  <symbol id="ph2" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13Z" fill="currentColor"/></symbol>
+  <symbol id="ph25" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 1A6 6 0 0 1 7 13A3 6 0 0 1 7 1Z" fill="currentColor"/></symbol>
+  <symbol id="i-gamepad" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M7 7h10a5 5 0 0 1 4.8 6.4l-1 3.3a2.4 2.4 0 0 1-4 1l-2.3-2.2h-5l-2.3 2.2a2.4 2.4 0 0 1-4-1l-1-3.3A5 5 0 0 1 7 7Z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11" r=".6" fill="currentColor"/><circle cx="17.2" cy="13" r=".6" fill="currentColor"/></g></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="ph3" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="currentColor"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8 20.5h8M12 16.5v4"/></g></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></g></symbol>
+</svg>
+
+<div class="sky" aria-hidden="true">
+  <div class="ciel"></div><div class="ciel-proche"></div>
+  <div class="lune-orbite"><div class="lune-halo"></div><img class="lune-img" src="/assets/moon.webp" alt=""></div>
+  <div class="voile"></div>
+</div>
+
+<header>
+  <a class="brand" href="#">
+    <svg width="54" height="36" viewBox="0 0 48 32" aria-hidden="true"><circle cx="31.5" cy="16" r="12" fill="#CBFF4D"/><circle cx="36" cy="11" r="2.4" fill="#09090B" fill-opacity=".16"/><circle cx="38.2" cy="19.5" r="1.6" fill="#09090B" fill-opacity=".16"/><circle cx="32.5" cy="23" r="1.9" fill="#09090B" fill-opacity=".16"/><circle cx="17" cy="16" r="12.5" fill="#F5F5F2" stroke="#09090B" stroke-width="2.6"/><circle cx="12.5" cy="12" r="2.8" fill="#CBCBC4"/><circle cx="20.5" cy="20.5" r="3.3" fill="#CBCBC4"/><circle cx="21.5" cy="10" r="1.6" fill="#CBCBC4"/><circle cx="11.5" cy="21" r="1.3" fill="#CBCBC4"/><circle cx="25" cy="15" r="1" fill="#CBCBC4"/></svg>
+    <b>2moon</b><span class="role">Hôte</span>
+  </a>
+  <div class="head-right">
+    <span class="chip hidden" id="hostname"></span>
+    <span class="pill" id="state-pill"><svg class="phase" width="12" height="12" id="state-icon"><use href="#ph0"/></svg><span id="state-text">…</span></span>
+    <button class="ghost hidden" id="logout">Déconnexion</button>
+  </div>
+</header>
+
+<div id="auth" class="hidden">
+  <form id="auth-form" autocomplete="on">
+    <span class="eyebrow" id="auth-eyebrow">Administration de l'hôte</span>
+    <h2 id="auth-title">Connexion</h2>
+    <p class="hidden" id="setup-help">Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (<code>journalctl --user -u 2moon-server</code>, ou <code>C:\ProgramData\2moon\logs\host.log</code> sous Windows). Pas de jeton depuis l'ordinateur hôte lui-même.</p>
+    <label class="sr" for="f-token">Jeton de configuration</label>
+    <input id="f-token" class="hidden" placeholder="Jeton de configuration" autocomplete="off">
+    <label class="sr" for="f-user">Identifiant</label>
+    <input id="f-user" placeholder="Identifiant" autocomplete="username" required>
+    <label class="sr" for="f-pass">Mot de passe</label>
+    <input id="f-pass" type="password" placeholder="Mot de passe" autocomplete="current-password" required>
+    <div class="err" id="auth-err" role="alert"></div>
+    <button class="primary" type="submit" id="auth-btn">Se connecter</button>
+  </form>
+</div>
+
+<div class="wrap hidden" id="app">
+  <nav class="side" aria-label="Sections">
+    <a href="#session" data-sec="session"><svg width="16" height="16"><use href="#ph0"/></svg>Session</a>
+    <a href="#pairing" data-sec="pairing"><svg width="16" height="16"><use href="#ph05"/></svg>Appairage</a>
+    <a href="#devices" data-sec="devices"><svg width="16" height="16"><use href="#ph1"/></svg>Appareils</a>
+    <a href="#apps" data-sec="apps"><svg width="16" height="16"><use href="#ph2"/></svg>Applications</a>
+    <a href="#host" data-sec="host"><svg width="16" height="16"><use href="#ph25"/></svg>Hôte et journal</a>
+    <a href="#settings" data-sec="settings"><svg width="16" height="16"><use href="#ph3"/></svg>Paramètres</a>
+  </nav>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow" id="hero-eyebrow">Hôte</span>
+      <h1 id="hero-title">En attente d'un client</h1>
+      <p class="hero-sub" id="hero-sub"></p>
+    </div>
+
+    <section class="panel glass" id="session" aria-labelledby="t-session">
+      <h2 id="t-session"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph0"/></svg><span class="grow">Session</span></h2>
+      <div class="row" id="session-idle">
+        <span class="empty"><span class="phases" aria-hidden="true"><svg width="14" height="14"><use href="#ph0"/></svg><svg width="14" height="14"><use href="#ph1"/></svg><svg width="14" height="14"><use href="#ph2"/></svg><svg width="14" height="14"><use href="#ph3"/></svg></span>Aucun client ne streame en ce moment.</span>
+      </div>
+      <div id="session-live" class="hidden">
+        <div class="stats">
+          <div class="stat"><div class="v" id="s-fps">–</div><div class="l">images/s</div></div>
+          <div class="stat"><div class="v" id="s-mbps">–</div><div class="l">Mbit/s envoyés</div></div>
+          <div class="stat"><div class="v" id="s-enc">–</div><div class="l">ms d'encodage</div></div>
+          <div class="stat"><div class="v" id="s-idr">–</div><div class="l">images clés</div></div>
+        </div>
+        <div class="chart-wrap"><canvas id="chart" aria-label="Débit des 2 dernières minutes"></canvas></div>
+        <p class="desc-line" id="s-desc"></p>
+      </div>
+      <div class="row">
+        <span><span class="label">Contrôle</span><span class="desc">Arrête le stream du client, ou demande une image clé si l'image est abîmée.</span></span>
+        <div class="actions">
+          <button id="btn-idr" disabled>Forcer une image clé</button>
+          <button class="danger" id="btn-stop" disabled>Arrêter la session</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel glass" id="pairing" aria-labelledby="t-pair">
+      <h2 id="t-pair"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph05"/></svg>Appairage</h2>
+      <div class="pair-body" id="pair-card">
+        <span class="eyebrow" id="pair-eyebrow">Appairage</span>
+        <h3>Saisissez le code affiché sur le client</h3>
+        <p>Lancez l'appairage depuis le client 2moon : il affiche un code à 4 chiffres, entrez-le ici.</p>
+        <ul class="list" id="pending" style="display:flex;flex-direction:column;gap:10px"></ul>
+        <form id="pin-form" style="display:flex;flex-direction:column;gap:18px">
+          <div class="pin-boxes" role="group" aria-label="Code PIN">
+            <input class="pin-digit" inputmode="numeric" maxlength="1" aria-label="Chiffre 1" autocomplete="off">
+            <input class="pin-digit" inputmode="numeric" maxlength="1" aria-label="Chiffre 2" autocomplete="off">
+            <input class="pin-digit" inputmode="numeric" maxlength="1" aria-label="Chiffre 3" autocomplete="off">
+            <input class="pin-digit" inputmode="numeric" maxlength="1" aria-label="Chiffre 4" autocomplete="off">
+          </div>
+          <div class="actions"><button class="primary" type="submit">Valider le code</button></div>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel" id="devices" aria-labelledby="t-dev">
+      <h2 id="t-dev"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph1"/></svg>Appareils appairés</h2>
+      <ul class="list" id="clients"></ul>
+      <div class="row hidden" id="clients-none"><span class="muted">Aucun appareil appairé.</span></div>
+    </section>
+
+    <section class="panel" id="apps" aria-labelledby="t-apps">
+      <h2 id="t-apps"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph2"/></svg><span class="grow">Applications</span><button class="ghost" id="app-add"><svg width="16" height="16"><use href="#i-plus"/></svg>Ajouter</button></h2>
+      <ul class="apps-grid" id="apps-grid"></ul>
+    </section>
+
+    <section class="panel" id="host" aria-labelledby="t-host">
+      <h2 id="t-host"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph25"/></svg>Hôte</h2>
+      <dl class="kv" id="host-info"></dl>
+    </section>
+
+    <section class="panel" aria-labelledby="t-logs">
+      <h2 id="t-logs"><span class="grow">Journal</span><label class="switch"><input type="checkbox" id="follow" checked>suivre</label></h2>
+      <pre id="logs"></pre>
+    </section>
+
+    <section class="panel" id="settings" aria-labelledby="t-settings">
+      <h2 id="t-settings"><svg width="18" height="18" style="color:var(--accent)"><use href="#ph3"/></svg>Paramètres</h2>
+      <div class="row">
+        <span><span class="label">Langue</span><span class="desc">Langue de ce panneau d'administration.</span></span>
+        <div class="seg" role="radiogroup" aria-label="Langue" id="set-lang">
+          <button type="button" role="radio" data-v="fr" data-noi18n>Français</button>
+          <button type="button" role="radio" data-v="en" data-noi18n>English</button>
+        </div>
+      </div>
+      <div class="row">
+        <span><span class="label">Type de clavier</span><span class="desc">Disposition utilisée pour taper le texte envoyé par les clients (saisie de texte, coller, clavier du téléphone). Les touches, elles, suivent toujours la disposition active de l'hôte.</span></span>
+        <label class="sr" for="set-kb">Type de clavier</label>
+        <select id="set-kb"></select>
+      </div>
+      <div class="row">
+        <span><span class="label">Nom de l'hôte</span><span class="desc">Nom affiché dans les clients 2moon. Vide : le nom du système.</span></span>
+        <form id="name-form" class="actions" style="flex:0 1 340px">
+          <label class="sr" for="set-name">Nom de l'hôte</label>
+          <input id="set-name" maxlength="63" autocomplete="off" spellcheck="false">
+        </form>
+      </div>
+      <div class="row" id="preset-row">
+        <span><span class="label">Qualité d'encodage</span><span class="desc">Preset de l'encodeur NVENC : plus la qualité est haute, plus le GPU travaille. Appliqué au prochain lancement de stream.</span></span>
+        <label class="sr" for="set-preset">Qualité d'encodage</label>
+        <select id="set-preset"></select>
+      </div>
+      <div class="row">
+        <span><span class="label">Arrêt automatique</span><span class="desc">Quitte l'application lancée (et arrête sa commande) quand aucun client ne streame depuis ce temps.</span></span>
+        <label class="sr" for="set-autoquit">Arrêt automatique</label>
+        <select id="set-autoquit"></select>
+      </div>
+      <div class="row">
+        <span><span class="label">Résolution native</span><span class="desc" id="native-desc">Pendant une session, l'écran capturé prend la résolution et la fréquence du client, puis revient à son mode d'origine. Sans mode à la bonne taille (GNOME, Windows sans écran virtuel), l'image est mise à l'échelle comme avant.</span></span>
+        <label class="switch"><input type="checkbox" id="set-native"><span>Adapter l'écran au client</span></label>
+      </div>
+      <div class="row">
+        <span><span class="label">Accès à distance</span><span class="desc" id="remote-desc"></span></span>
+        <label class="switch"><input type="checkbox" id="set-remote"><span>Joindre l'hôte depuis n'importe où, sans ouvrir de port</span></label>
+      </div>
+      <div class="row hidden" id="remote-code-row">
+        <span><span class="label">Code de l'hôte</span><span class="desc">À saisir dans 2moon (Ajouter un ordinateur) pour s'y connecter depuis l'extérieur. Les appareils déjà appairés le reçoivent tout seuls. Il faut toujours le code PIN pour appairer un nouvel appareil.</span><code class="chip" id="remote-code" style="display:block;margin-top:10px;word-break:break-all"></code></span>
+        <span style="display:flex;gap:8px;flex-wrap:wrap"><button id="remote-copy">Copier</button><button class="danger" id="remote-regen">Changer le code</button></span>
+      </div>
+      <div class="row stack">
+        <span><span class="label">Mot de passe</span><span class="desc">Mot de passe de ce panneau d'administration.</span></span>
+        <form class="pw" id="pw-form">
+          <label class="sr" for="pw-cur">Mot de passe actuel</label>
+          <input type="password" id="pw-cur" placeholder="Actuel" autocomplete="current-password">
+          <label class="sr" for="pw-new">Nouveau mot de passe</label>
+          <input type="password" id="pw-new" placeholder="Nouveau (8 caractères ou plus)" autocomplete="new-password">
+          <button class="light" type="submit">Changer</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+<dialog class="dlg" id="app-dlg" aria-labelledby="dlg-title">
+  <form id="app-form">
+    <h2 id="dlg-title">Nouvelle application</h2>
+    <div class="cover-col">
+      <span class="eyebrow">Vignette · 2:3</span>
+      <div class="crop" id="crop"><canvas id="crop-canvas" width="600" height="900"></canvas><span class="hint" id="crop-hint">Glissez une image ici ou choisissez un fichier (PNG, JPEG, WebP).</span></div>
+      <label class="zoom" for="crop-zoom">zoom<input type="range" id="crop-zoom" min="1" max="4" step="0.01" value="1" disabled></label>
+      <input type="file" id="cover-file" accept="image/*" class="hidden">
+      <div class="actions">
+        <button type="button" id="cover-pick" class="light">Choisir une image</button>
+        <button type="button" id="cover-clear" class="danger">Retirer</button>
+      </div>
+    </div>
+    <div class="fields">
+      <label class="field"><span class="label">Nom</span><input id="app-title" maxlength="80" required autocomplete="off" placeholder="Steam Big Picture"></label>
+      <label class="field"><span class="label">Commande au lancement</span><span class="desc">Exécutée par <code>sh -c</code> quand un client lance l'application, arrêtée quand il la quitte. Vide : le bureau seul.</span><input id="app-cmd" autocomplete="off" spellcheck="false" placeholder="steam steam://open/bigpicture"></label>
+      <label class="switch"><input type="checkbox" id="app-hdr">Annoncer le HDR pour cette application</label>
+      <p class="err" id="app-err" role="alert"></p>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="danger" id="app-del">Supprimer</button>
+      <span class="spacer"></span>
+      <button type="button" id="app-cancel">Annuler</button>
+      <button type="submit" class="primary" id="app-save">Enregistrer</button>
+    </div>
+  </form>
+</dialog>
+<div class="toast" id="toast" role="status"><svg width="14" height="14" style="color:var(--accent)"><use href="#ph2"/></svg><span id="toast-text"></span></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const icon = (id, size) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("width", size); s.setAttribute("height", size); const u = document.createElementNS("http://www.w3.org/2000/svg", "use"); u.setAttribute("href", "#" + id); s.append(u); return s; };
+
+// ---- language: the page is written in French; English comes from this table ----
+let LANG = "fr";
+const EN = {
+  "Hôte": "Host", "Déconnexion": "Log out", "Administration de l'hôte": "Host administration", "Connexion": "Log in",
+  "Première utilisation : créez le compte administrateur. Le jeton de configuration est affiché dans le journal du serveur (": "First use: create the administrator account. The setup token is printed in the server log (",
+  "), ou": "), or", "sous Windows). Pas de jeton depuis l'ordinateur hôte lui-même.": "on Windows). No token needed on the host computer itself.",
+  "Jeton de configuration": "Setup token", "Identifiant": "Username", "Mot de passe": "Password", "Se connecter": "Log in",
+  "Créez le compte administrateur": "Create the administrator account", "Configuration initiale": "Initial setup", "Créer le compte": "Create account",
+  "Sections": "Sections", "Session": "Session", "Appairage": "Pairing", "Appareils": "Devices", "Applications": "Applications", "Hôte et journal": "Host and log", "Paramètres": "Settings",
+  "En attente d'un client": "Waiting for a client", "Aucun client ne streame en ce moment.": "No client is streaming right now.",
+  "images/s": "frames/s", "Mbit/s envoyés": "Mbit/s sent", "ms d'encodage": "ms encoding", "images clés": "keyframes", "Débit des 2 dernières minutes": "Bitrate over the last 2 minutes",
+  "Contrôle": "Control", "Arrête le stream du client, ou demande une image clé si l'image est abîmée.": "Stop the client's stream, or ask for a keyframe if the picture is corrupted.",
+  "Forcer une image clé": "Force a keyframe", "Arrêter la session": "Stop the session",
+  "Saisissez le code affiché sur le client": "Enter the code shown on the client",
+  "Lancez l'appairage depuis le client 2moon : il affiche un code à 4 chiffres, entrez-le ici.": "Start pairing from the 2moon client: it shows a 4-digit code, enter it here.",
+  "Code PIN": "PIN code", "Chiffre 1": "Digit 1", "Chiffre 2": "Digit 2", "Chiffre 3": "Digit 3", "Chiffre 4": "Digit 4", "Valider le code": "Submit code",
+  "Appareils appairés": "Paired devices", "Aucun appareil appairé.": "No paired device.", "Ajouter": "Add", "Journal": "Log", "suivre": "follow",
+  "Langue": "Language", "Langue de ce panneau d'administration.": "Language of this admin panel.", "Type de clavier": "Keyboard type",
+  "Disposition utilisée pour taper le texte envoyé par les clients (saisie de texte, coller, clavier du téléphone). Les touches, elles, suivent toujours la disposition active de l'hôte.": "Layout used to type the text sent by clients (text input, paste, phone keyboard). Keys themselves always follow the host's active layout.",
+  "Mot de passe de ce panneau d'administration.": "Password of this admin panel.", "Mot de passe actuel": "Current password", "Nouveau mot de passe": "New password",
+  "Actuel": "Current", "Nouveau (8 caractères ou plus)": "New (8 characters or more)", "Changer": "Change",
+  "Nouvelle application": "New application", "Modifier l'application": "Edit application", "Vignette · 2:3": "Cover · 2:3",
+  "Glissez une image ici ou choisissez un fichier (PNG, JPEG, WebP).": "Drop an image here or choose a file (PNG, JPEG, WebP).", "zoom": "zoom",
+  "Choisir une image": "Choose an image", "Retirer": "Remove", "Nom": "Name", "Commande au lancement": "Launch command",
+  "Exécutée par": "Run by", "quand un client lance l'application, arrêtée quand il la quitte. Vide : le bureau seul.": "when a client launches the app, stopped when it quits. Empty: just the desktop.",
+  "Annoncer le HDR pour cette application": "Advertise HDR for this application", "Supprimer": "Delete", "Annuler": "Cancel", "Enregistrer": "Save",
+  "En streaming": "Streaming", "Session ouverte": "Session open", "En attente": "Waiting", "Session en cours": "Session in progress",
+  "client {c}": "client {c}", "2moon {v} · en service depuis {u}": "2moon {v} · up for {u}",
+  "{w}×{h} @ {fps} ips · {codec} via {enc} · débit cible {br} Mbit/s · audio {ch} canaux · client {c}": "{w}×{h} @ {fps} fps · {codec} via {enc} · target bitrate {br} Mbit/s · audio {ch} channels · client {c}",
+  "{w}×{h} · {fps} ips · {codec} · client {c}": "{w}×{h} · {fps} fps · {codec} · client {c}",
+  "Hôte · {h}": "Host · {h}", "Appairage · {n}": "Pairing · {n}", "{d} j ": "{d} d ", "{h} h {m} min": "{h} h {m} min",
+  "Version": "Version", "En service depuis": "Up for", "Capture": "Capture", "Encodeur": "Encoder", "Codecs": "Codecs", "Ports": "Ports", "Entrées reçues": "Inputs received",
+  "{v} · audio {a}": "{v} · audio {a}", "{e} (preset {p})": "{e} (preset {p})", "cible {t} Mbit/s": "target {t} Mbit/s",
+  "Révoquer": "Revoke", "Révoquer « {n} » ? Il devra se réappairer.": "Revoke “{n}”? It will have to pair again.", "Appareil révoqué": "Device revoked",
+  "Modifier {n}": "Edit {n}", "En cours": "Running", "Modifier": "Edit", "bureau": "desktop", "Avancer": "Move earlier", "Reculer": "Move later",
+  "Avancer {n}": "Move {n} earlier", "Reculer {n}": "Move {n} later", "Ajouter une application": "Add an application",
+  "Choisissez un fichier image": "Choose an image file", "Image illisible": "Unreadable image", "Supprimer « {n} » ?": "Delete “{n}”?",
+  "Application supprimée": "Application deleted", "Application enregistrée": "Application saved", "Application ajoutée": "Application added", "vignette : {m}": "cover: {m}",
+  "Le code fait 4 chiffres": "The code has 4 digits", "Code transmis": "Code sent", "Aucune demande d'appairage en attente": "No pairing request waiting",
+  "Arrêter la session en cours ?": "Stop the current session?", "Session arrêtée": "Session stopped", "Image clé demandée": "Keyframe requested", "Mot de passe changé": "Password changed",
+  "Automatique (détecté : {d})": "Automatic (detected: {d})", "Paramètre enregistré": "Setting saved",
+  "Nom de l'hôte": "Host name", "Nom affiché dans les clients 2moon. Vide : le nom du système.": "Name shown in 2moon clients. Empty: the system name.",
+  "Qualité d'encodage": "Encoding quality", "Preset de l'encodeur NVENC : plus la qualité est haute, plus le GPU travaille. Appliqué au prochain lancement de stream.": "NVENC encoder preset: the higher the quality, the harder the GPU works. Applied from the next stream.",
+  "Par défaut ({p})": "Default ({p})", "{p} · la plus rapide": "{p} · fastest", "{p} · équilibrée": "{p} · balanced", "{p} · la meilleure": "{p} · best",
+  "Arrêt automatique": "Automatic stop", "Quitte l'application lancée (et arrête sa commande) quand aucun client ne streame depuis ce temps.": "Quits the running application (and stops its command) when no client has been streaming for this long.",
+  "Jamais": "Never", "Après {n} min": "After {n} min", "Après {n} h": "After {n} h",
+  "Résolution native": "Native resolution", "Pendant une session, l'écran capturé prend la résolution et la fréquence du client, puis revient à son mode d'origine. Sans mode à la bonne taille (GNOME, Windows sans écran virtuel), l'image est mise à l'échelle comme avant.": "During a session, the captured display takes the client's resolution and refresh rate, then goes back to its own mode. Without a mode of the right size (GNOME, Windows without a virtual display), the picture is scaled as before.",
+  "Adapter l'écran au client": "Match the display to the client", "Indisponible avec la mire de test (--video test).": "Unavailable with the test pattern (--video test).",
+  "Accès à distance": "Remote access", "Joindre l'hôte depuis n'importe où, sans ouvrir de port": "Reach the host from anywhere, without opening ports",
+  "Les clients 2moon joignent l'hôte depuis Internet sans rien ouvrir sur le routeur : connexion directe à travers le NAT, ou par un serveur relais en dernier recours. Passe par les serveurs publics d'iroh (n0).": "2moon clients reach the host from the Internet without opening anything on the router: direct connection through NAT, or through a relay server as a last resort. Uses iroh's public servers (n0).",
+  "Désactivé au démarrage du service (--no-remote).": "Disabled when the service was started (--no-remote).", "Démarrage…": "Starting…", "Actif : joignable depuis Internet": "Active: reachable from the Internet",
+  "Code de l'hôte": "Host code", "À saisir dans 2moon (Ajouter un ordinateur) pour s'y connecter depuis l'extérieur. Les appareils déjà appairés le reçoivent tout seuls. Il faut toujours le code PIN pour appairer un nouvel appareil.": "Type it in 2moon (Add a computer) to connect from outside. Devices already paired receive it by themselves. A new device still needs the PIN to pair.",
+  "Copier": "Copy", "Code copié": "Code copied", "Changer le code": "Change the code", "Nouveau code créé": "New code created",
+  "Changer le code de l'hôte ?\n\nL'ancien code ne fonctionnera plus, tout de suite : les appareils qui se connectent avec lui (même ceux déjà appairés) n'auront plus accès à cet hôte à distance, et un stream en cours par l'accès à distance sera coupé. Il faudra leur donner le nouveau code.": "Change the host code?\n\nThe old code stops working right away: devices that connect with it (even paired ones) will no longer reach this host remotely, and a stream running through remote access will be cut. You will have to give them the new code.",
+  "Échec : {e}": "Failed: {e}",
+  "nom d'hôte invalide (63 caractères maximum, sans point)": "invalid host name (63 characters maximum, no dot)", "qualité d'encodage inconnue": "unknown encoding quality", "délai d'arrêt automatique invalide": "invalid automatic stop delay",
+  // errors from the server
+  "non connecté": "not logged in", "requête invalide": "invalid request", "déjà configuré": "already configured", "identifiants incorrects": "wrong username or password",
+  "jeton de configuration incorrect (voir le journal du serveur)": "wrong setup token (see the server log)", "mot de passe : 8 caractères minimum": "password: 8 characters minimum",
+  "trop d'échecs, réessayez dans 5 minutes": "too many failures, try again in 5 minutes", "mot de passe actuel incorrect": "wrong current password", "8 caractères minimum": "8 characters minimum",
+  "appareil inconnu": "unknown device", "le PIN fait 4 chiffres": "the PIN has 4 digits", "le nom est obligatoire": "the name is required",
+  "nom trop long (80 caractères maximum)": "name too long (80 characters maximum)", "application inconnue": "unknown application",
+  "il faut garder au moins une application": "at least one application must remain", "la vignette doit être une image PNG": "the cover must be a PNG image",
+  "image trop lourde (8 Mo maximum)": "image too large (8 MB maximum)", "id manquant": "missing id", "langue inconnue": "unknown language", "disposition de clavier inconnue": "unknown keyboard layout",
+};
+/** Translate a French string (with {placeholders}) to the panel language. */
+function t(s, v) {
+  let r = (LANG === "en" && EN[s]) || s;
+  if (v) for (const k in v) r = r.split("{" + k + "}").join(v[k]);
+  return r;
+}
+// Static text: remember the French original of each text node / attribute, then swap.
+const frText = new WeakMap();
+function applyLang() {
+  document.documentElement.lang = LANG;
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.parentElement.closest("script,style,pre,code,[data-noi18n]") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  for (let n; (n = walk.nextNode());) {
+    const raw = frText.has(n) ? frText.get(n) : n.nodeValue, key = raw.trim();
+    if (!key || !(key in EN)) continue;
+    frText.set(n, raw);
+    n.nodeValue = raw.replace(key, t(key));
+  }
+  for (const e of document.querySelectorAll("[placeholder],[aria-label],[title]")) {
+    for (const a of ["placeholder", "aria-label", "title"]) {
+      if (!e.hasAttribute(a)) continue;
+      const k = "data-fr-" + a;
+      if (!e.hasAttribute(k)) { if (!(e.getAttribute(a) in EN)) continue; e.setAttribute(k, e.getAttribute(a)); }
+      e.setAttribute(a, t(e.getAttribute(k)));
+    }
+  }
+  document.querySelectorAll("#set-lang button").forEach(b => b.setAttribute("aria-checked", String(b.dataset.v === LANG)));
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-2moon": "1" }, body: JSON.stringify(body) };
+  const r = await fetch(path, { credentials: "same-origin", ...opt });
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (r.status === 401 && path !== "/api/login" && path !== "/api/setup" && path !== "/api/password") { showAuth(); throw new Error("non connecté"); }
+  if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
+  return data;
+}
+
+function toast(msg) { $("toast-text").textContent = t(msg); const t = $("toast"); t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2500); }
+
+let setupMode = false, tokenRequired = true, timers = [];
+function showAuth(setup) {
+  timers.forEach(clearInterval); timers = [];
+  if (setup !== undefined) setupMode = setup;
+  document.body.classList.add("auth-mode"); $("state-pill").classList.add("hidden"); $("hostname").classList.add("hidden");
+  $("app").classList.add("hidden"); $("logout").classList.add("hidden"); $("auth").classList.remove("hidden");
+  $("auth-title").textContent = t(setupMode ? "Créez le compte administrateur" : "Connexion");
+  $("auth-eyebrow").textContent = t(setupMode ? "Configuration initiale" : "Administration de l'hôte");
+  $("auth-btn").textContent = t(setupMode ? "Créer le compte" : "Se connecter");
+  $("setup-help").classList.toggle("hidden", !setupMode);
+  $("f-token").classList.toggle("hidden", !setupMode || !tokenRequired);
+  $("f-pass").autocomplete = setupMode ? "new-password" : "current-password";
+}
+
+function showApp() {
+  document.body.classList.remove("auth-mode"); $("state-pill").classList.remove("hidden");
+  $("auth").classList.add("hidden"); $("app").classList.remove("hidden"); $("logout").classList.remove("hidden");
+  refresh(); refreshClients(); refreshLogs(); refreshApps(); loadSettings();
+  timers = [setInterval(refresh, 1000), setInterval(refreshLogs, 2000), setInterval(refreshClients, 10000), setInterval(refreshApps, 4000)];
+  requestAnimationFrame(markNav);
+}
+
+$("auth-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("auth-err").textContent = "";
+  $("auth-btn").disabled = true;
+  try {
+    if (setupMode) await api("/api/setup", { token: $("f-token").value, user: $("f-user").value, password: $("f-pass").value });
+    else await api("/api/login", { user: $("f-user").value, password: $("f-pass").value });
+    $("f-pass").value = ""; showApp();
+  } catch (err) { $("auth-err").textContent = t(err.message); }
+  $("auth-btn").disabled = false;
+});
+
+$("logout").addEventListener("click", async () => { try { await api("/api/logout", {}); } catch (_) {} showAuth(false); });
+
+// ---- side navigation: highlight the section in view ----
+const navLinks = [...document.querySelectorAll("nav.side a")];
+function markNav() {
+  if ($("app").classList.contains("hidden")) return;
+  let cur = navLinks[0];
+  for (const a of navLinks) { const s = $(a.dataset.sec); if (s && s.getBoundingClientRect().top <= 160) cur = a; }
+  if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 4) cur = navLinks[navLinks.length - 1];
+  navLinks.forEach(a => a.classList.toggle("on", a === cur));
+}
+window.addEventListener("scroll", markNav, { passive: true }); markNav();
+
+// ---- live status ----
+const history = [];
+function fmtUptime(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? t("{d} j ", { d }) : "") + t("{h} h {m} min", { h, m }); }
+
+function setInfo(rows) {
+  const dl = $("host-info"); dl.replaceChildren();
+  for (const [k, v] of rows) { dl.append(el("dt", null, t(k))); const dd = el("dd"); if (v instanceof Node) dd.append(v); else dd.textContent = v; dl.append(dd); }
+}
+
+function setState(kind, text) {
+  const p = $("state-pill");
+  p.classList.toggle("live", kind === "live"); p.classList.toggle("open", kind === "open");
+  $("state-icon").firstElementChild.setAttribute("href", kind === "live" ? "#ph3" : kind === "open" ? "#ph2" : "#ph0");
+  $("state-text").textContent = t(text);
+}
+
+async function refresh() {
+  let st;
+  try { st = await api("/api/status"); } catch (_) { return; }
+  $("hostname").textContent = st.hostname; $("hostname").classList.remove("hidden");
+  const live = st.live && st.live.active ? st.live : null;
+  setState(live ? "live" : st.session ? "open" : "idle", live ? "En streaming" : st.session ? "Session ouverte" : "En attente");
+  $("hero-eyebrow").textContent = t("Hôte · {h}", { h: st.hostname });
+  $("hero-title").textContent = t(live ? "Session en cours" : st.session ? "Session ouverte" : "En attente d'un client");
+  const client = (live && live.peer) || (st.session && st.session.client) || "";
+  $("hero-sub").textContent = live ? t("{w}×{h} · {fps} ips · {codec} · client {c}", { w: live.width, h: live.height, fps: live.target_fps, codec: live.codec, c: client }) : st.session ? t("client {c}", { c: client }) : t("2moon {v} · en service depuis {u}", { v: st.version, u: fmtUptime(st.uptime_s) });
+  $("session-idle").classList.toggle("hidden", !!live);
+  $("session-live").classList.toggle("hidden", !live);
+  $("session").classList.toggle("hot", !!live);
+  $("btn-stop").disabled = !st.session; $("btn-idr").disabled = !live;
+  if (live) {
+    $("s-fps").textContent = live.fps.toFixed(1);
+    $("s-mbps").textContent = live.mbps.toFixed(1);
+    $("s-enc").textContent = live.encode_ms.toFixed(2);
+    $("s-idr").textContent = live.idr_frames;
+    $("s-desc").textContent = t("{w}×{h} @ {fps} ips · {codec} via {enc} · débit cible {br} Mbit/s · audio {ch} canaux · client {c}", { w: live.width, h: live.height, fps: live.target_fps, codec: live.codec, enc: live.encoder, br: (live.bitrate_kbps / 1000).toFixed(0), ch: live.audio_channels, c: client || "?" });
+    history.push(live.mbps); if (history.length > 120) history.shift();
+    drawChart(live.bitrate_kbps / 1000);
+  } else history.length = 0;
+
+  // pending pairing requests
+  const ul = $("pending"); ul.replaceChildren();
+  for (const p of st.pending) {
+    const li = el("li", "request"); const d = el("div", "grow");
+    d.append(el("div", "name", p.name), el("div", "sub", p.address));
+    const t = el("span", "tile"); t.append(icon("i-phone", 24));
+    li.append(t, d); ul.append(li);
+  }
+  const waiting = st.pending.length > 0;
+  $("pairing").classList.toggle("hot", waiting);
+  $("pair-eyebrow").textContent = waiting ? t("Appairage · {n}", { n: st.pending[0].name }) : t("Appairage");
+
+  const codecs = el("span");
+  for (const [k, on] of Object.entries(st.codecs)) codecs.append(el("span", "badge" + (on ? "" : " off"), k.toUpperCase()));
+  setInfo([
+    ["Version", st.version], ["En service depuis", fmtUptime(st.uptime_s)],
+    ["Capture", t("{v} · audio {a}", { v: st.video_source, a: st.audio_source })],
+    ["Encodeur", t("{e} (preset {p})", { e: st.encoder, p: st.nvenc_preset })], ["Codecs", codecs],
+    ["Ports", `HTTP ${st.ports.http} · HTTPS ${st.ports.https} · RTSP ${st.ports.rtsp}`],
+    ["Entrées reçues", String(st.input_events)],
+  ]);
+  markNav();
+}
+
+function drawChart(target) {
+  const c = $("chart"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), accent = css.getPropertyValue("--accent").trim();
+  const max = Math.max(target * 1.1, ...history, 1);
+  g.strokeStyle = css.getPropertyValue("--border-strong").trim(); g.setLineDash([4, 4]);
+  const ty = h - (target / max) * (h - 6); g.beginPath(); g.moveTo(0, ty); g.lineTo(w, ty); g.stroke(); g.setLineDash([]);
+  g.fillStyle = css.getPropertyValue("--muted").trim(); g.font = "11px 'JetBrains Mono', monospace";
+  g.fillText(t("cible {t} Mbit/s", { t: target.toFixed(0) }), 4, Math.max(12, ty - 6));
+  if (history.length < 2) return;
+  const step = w / 119, x0 = w - (history.length - 1) * step;
+  g.beginPath();
+  history.forEach((v, i) => { const x = x0 + i * step, y = h - (v / max) * (h - 6); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.strokeStyle = accent; g.lineWidth = 2; g.lineJoin = "round"; g.stroke();
+  g.lineTo(w, h); g.lineTo(x0, h); g.closePath();
+  const grad = g.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, "rgba(203,255,77,.22)"); grad.addColorStop(1, "rgba(203,255,77,0)");
+  g.fillStyle = grad; g.fill();
+}
+
+async function refreshClients() {
+  let list; try { list = await api("/api/clients"); } catch (_) { return; }
+  const ul = $("clients"); ul.replaceChildren();
+  for (const c of list) {
+    const li = el("li"), d = el("div", "grow"), t = el("span", "tile");
+    t.append(icon("i-monitor", 26));
+    d.append(el("div", "name", c.name), el("div", "sub", c.fingerprint));
+    const b = el("button", "danger", t("Révoquer"));
+    b.addEventListener("click", async () => {
+      if (!confirm(t("Révoquer « {n} » ? Il devra se réappairer.", { n: c.name }))) return;
+      try { await api("/api/clients/unpair", { fingerprint: c.fingerprint }); toast("Appareil révoqué"); refreshClients(); } catch (e) { toast(e.message); }
+    });
+    li.append(t, d, b); ul.append(li);
+  }
+  $("clients-none").classList.toggle("hidden", list.length > 0);
+}
+
+// ---- applications ----
+let appsJson = "", appsList = [];
+const coverVer = {};
+function coverUrl(id) { return `/api/apps/cover?id=${id}&v=${coverVer[id] || 0}`; }
+
+async function refreshApps(force) {
+  let list; try { list = await api("/api/apps"); } catch (_) { return; }
+  const j = JSON.stringify(list) + JSON.stringify(coverVer);
+  if (j === appsJson && !force) return;
+  appsJson = j; appsList = list;
+  const ul = $("apps-grid"); ul.replaceChildren();
+  list.forEach((a, i) => {
+    const li = el("li", "app-card");
+    const p = el("button", "poster" + (a.running ? " running" : ""));
+    p.type = "button"; p.title = t("Modifier {n}", { n: a.title });
+    if (a.cover) { const img = el("img"); img.alt = ""; img.loading = "lazy"; img.src = coverUrl(a.id); p.append(img); }
+    else { const ph = el("span", "ph"); ph.append(icon("i-gamepad", 40), el("span", null, a.title)); p.append(ph); }
+    if (a.running) { const pill = el("span", "pill live"); pill.append(icon("ph3", 10), el("span", null, t("En cours"))); p.append(pill); }
+    p.append(el("span", "edit", t("Modifier")));
+    p.addEventListener("click", () => openEditor(a));
+    const meta = el("div", "app-meta"), d = el("div", "grow");
+    d.append(el("div", "name", a.title), el("div", "sub", a.cmd || t("bureau")));
+    const up = el("button", "ghost mini", "◀"), down = el("button", "ghost mini", "▶");
+    up.title = t("Avancer"); down.title = t("Reculer"); up.disabled = i === 0; down.disabled = i === list.length - 1;
+    up.setAttribute("aria-label", t("Avancer {n}", { n: a.title })); down.setAttribute("aria-label", t("Reculer {n}", { n: a.title }));
+    up.addEventListener("click", () => moveApp(a.id, -1)); down.addEventListener("click", () => moveApp(a.id, 1));
+    meta.append(d, up, down);
+    li.append(p, meta); ul.append(li);
+  });
+  const li = el("li", "app-card"), add = el("button", "poster add-tile"), ph = el("span", "ph");
+  add.type = "button"; ph.append(icon("i-plus", 32), el("span", null, t("Ajouter une application"))); add.append(ph);
+  add.addEventListener("click", () => openEditor(null));
+  li.append(add); ul.append(li);
+}
+async function moveApp(id, dir) { try { await api("/api/apps/move", { id, dir }); refreshApps(true); } catch (e) { toast(e.message); } }
+
+// Cover editor: 600×900 frame; drag to frame, zoom with the slider or wheel.
+const crop = { img: null, zoom: 1, x: 0, y: 0, state: "keep" }; // state: keep | new | remove
+const cv = $("crop-canvas"), cg = cv.getContext("2d");
+function cropScale() { return Math.max(cv.width / crop.img.naturalWidth, cv.height / crop.img.naturalHeight) * crop.zoom; }
+function clampCrop() {
+  const s = cropScale(), mx = Math.max(0, (crop.img.naturalWidth * s - cv.width) / 2), my = Math.max(0, (crop.img.naturalHeight * s - cv.height) / 2);
+  crop.x = Math.min(mx, Math.max(-mx, crop.x)); crop.y = Math.min(my, Math.max(-my, crop.y));
+}
+function drawCrop() {
+  cg.clearRect(0, 0, cv.width, cv.height);
+  const has = !!crop.img;
+  $("crop").classList.toggle("has", has); $("crop-hint").classList.toggle("hidden", has);
+  $("crop-zoom").disabled = !has; $("cover-clear").disabled = !has;
+  if (!has) return;
+  clampCrop();
+  const s = cropScale(), w = crop.img.naturalWidth * s, h = crop.img.naturalHeight * s;
+  cg.imageSmoothingQuality = "high";
+  cg.drawImage(crop.img, (cv.width - w) / 2 + crop.x, (cv.height - h) / 2 + crop.y, w, h);
+}
+function setCropImage(img, state) { crop.img = img; crop.zoom = 1; crop.x = crop.y = 0; crop.state = state; $("crop-zoom").value = 1; drawCrop(); }
+function loadCoverFile(f) {
+  if (!f || !f.type.startsWith("image/")) { toast("Choisissez un fichier image"); return; }
+  const url = URL.createObjectURL(f), img = new Image();
+  img.onload = () => { setCropImage(img, "new"); URL.revokeObjectURL(url); };
+  img.onerror = () => { toast("Image illisible"); URL.revokeObjectURL(url); };
+  img.src = url;
+}
+$("cover-pick").addEventListener("click", () => $("cover-file").click());
+$("cover-file").addEventListener("change", (e) => { loadCoverFile(e.target.files[0]); e.target.value = ""; });
+$("cover-clear").addEventListener("click", () => { setCropImage(null, "remove"); });
+$("crop-zoom").addEventListener("input", (e) => { if (!crop.img) return; crop.zoom = +e.target.value; crop.state = "new"; drawCrop(); });
+const cropEl = $("crop");
+cropEl.addEventListener("wheel", (e) => { if (!crop.img) return; e.preventDefault(); crop.zoom = Math.min(4, Math.max(1, crop.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08))); $("crop-zoom").value = crop.zoom; crop.state = "new"; drawCrop(); }, { passive: false });
+let drag = null;
+cropEl.addEventListener("pointerdown", (e) => { if (!crop.img) return; drag = { x: e.clientX, y: e.clientY }; cropEl.setPointerCapture(e.pointerId); });
+cropEl.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const k = cv.width / cropEl.clientWidth;
+  crop.x += (e.clientX - drag.x) * k; crop.y += (e.clientY - drag.y) * k; drag = { x: e.clientX, y: e.clientY }; crop.state = "new"; drawCrop();
+});
+cropEl.addEventListener("pointerup", () => { drag = null; }); cropEl.addEventListener("pointercancel", () => { drag = null; });
+cropEl.addEventListener("dragover", (e) => { e.preventDefault(); cropEl.classList.add("drop"); });
+cropEl.addEventListener("dragleave", () => cropEl.classList.remove("drop"));
+cropEl.addEventListener("drop", (e) => { e.preventDefault(); cropEl.classList.remove("drop"); loadCoverFile(e.dataTransfer.files[0]); });
+
+let editing = null;
+function openEditor(a) {
+  editing = a;
+  $("dlg-title").textContent = t(a ? "Modifier l'application" : "Nouvelle application");
+  $("app-title").value = a ? a.title : ""; $("app-cmd").value = a ? a.cmd : ""; $("app-hdr").checked = !!(a && a.hdr);
+  $("app-err").textContent = ""; $("app-del").classList.toggle("hidden", !a);
+  setCropImage(null, "keep");
+  if (a && a.cover) { const img = new Image(); img.onload = () => { if (editing === a && crop.state === "keep") setCropImage(img, "keep"); }; img.src = coverUrl(a.id); }
+  $("app-dlg").showModal(); $("app-title").focus();
+}
+$("app-cancel").addEventListener("click", () => $("app-dlg").close());
+$("app-del").addEventListener("click", async () => {
+  if (!editing || !confirm(t("Supprimer « {n} » ?", { n: editing.title }))) return;
+  try { await api("/api/apps/delete", { id: editing.id }); $("app-dlg").close(); toast("Application supprimée"); refreshApps(true); }
+  catch (e) { $("app-err").textContent = t(e.message); }
+});
+$("app-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("app-err").textContent = ""; $("app-save").disabled = true;
+  try {
+    const r = await api("/api/apps/save", { id: editing ? editing.id : 0, title: $("app-title").value, cmd: $("app-cmd").value, hdr: $("app-hdr").checked });
+    if (crop.state !== "keep") {
+      const body = crop.state === "new" && crop.img ? await new Promise((ok) => cv.toBlob(ok, "image/png")) : new Blob([]);
+      const res = await fetch(`/api/apps/cover?id=${r.id}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "image/png", "X-2moon": "1" }, body });
+      if (!res.ok) { let m = "HTTP " + res.status; try { m = (await res.json()).error || m; } catch (_) {} throw new Error(t("vignette : {m}", { m: t(m) })); }
+      coverVer[r.id] = (coverVer[r.id] || 0) + 1;
+    }
+    $("app-dlg").close(); toast(editing ? "Application enregistrée" : "Application ajoutée"); refreshApps(true);
+  } catch (err) { $("app-err").textContent = t(err.message); }
+  $("app-save").disabled = false;
+});
+$("app-add").addEventListener("click", () => openEditor(null));
+
+async function refreshLogs() {
+  if (!$("follow").checked) return;
+  let lines; try { lines = await api("/api/logs?n=300"); } catch (_) { return; }
+  const pre = $("logs"), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+  pre.textContent = lines.map(l => l.replace(/^\S+Z\s+/, (m) => m.slice(11, 19) + " ")).join("\n");
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+// ---- PIN: four boxes, auto-advance, paste a whole code ----
+const digits = [...document.querySelectorAll(".pin-digit")];
+digits.forEach((d, i) => {
+  d.addEventListener("input", () => {
+    const v = d.value.replace(/\D/g, "");
+    if (v.length > 1) { [...v.slice(0, 4 - i)].forEach((c, j) => { digits[i + j].value = c; }); digits[Math.min(i + v.length, 3)].focus(); return; }
+    d.value = v; if (v && i < 3) digits[i + 1].focus();
+  });
+  d.addEventListener("keydown", (e) => { if (e.key === "Backspace" && !d.value && i > 0) { digits[i - 1].focus(); digits[i - 1].value = ""; e.preventDefault(); } });
+  d.addEventListener("paste", (e) => { const v = (e.clipboardData.getData("text") || "").replace(/\D/g, "").slice(0, 4); if (!v) return; e.preventDefault(); [...v].forEach((c, j) => { digits[j].value = c; }); digits[Math.min(v.length, 3)].focus(); });
+});
+$("pin-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const pin = digits.map(d => d.value).join("");
+  if (pin.length !== 4) { toast("Le code fait 4 chiffres"); return; }
+  try { const r = await api("/api/pin", { pin }); toast(r.delivered ? "Code transmis" : "Aucune demande d'appairage en attente"); digits.forEach(d => d.value = ""); }
+  catch (err) { toast(err.message); }
+});
+$("btn-stop").addEventListener("click", async () => { if (!confirm(t("Arrêter la session en cours ?"))) return; try { await api("/api/session/stop", {}); toast("Session arrêtée"); } catch (e) { toast(e.message); } });
+$("btn-idr").addEventListener("click", async () => { try { await api("/api/session/idr", {}); toast("Image clé demandée"); } catch (e) { toast(e.message); } });
+$("pw-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try { await api("/api/password", { current: $("pw-cur").value, new: $("pw-new").value }); toast("Mot de passe changé"); $("pw-cur").value = $("pw-new").value = ""; }
+  catch (err) { toast(err.message); }
+});
+
+// ---- settings ----
+async function loadSettings() {
+  let st; try { st = await api("/api/settings"); } catch (_) { return; }
+  const sel = $("set-kb"); sel.replaceChildren();
+  const auto = el("option", null, t("Automatique (détecté : {d})", { d: st.keyboard_detected })); auto.value = "auto"; sel.append(auto);
+  for (const k of st.keyboards) { const o = el("option", null, k.label); o.value = k.id; sel.append(o); }
+  sel.value = st.keyboard;
+  const name = $("set-name");
+  if (document.activeElement !== name) name.value = st.host_name;
+  name.placeholder = st.host_name_default;
+  $("preset-row").classList.toggle("hidden", !st.nvenc_preset_available);
+  const pre = $("set-preset"); pre.replaceChildren();
+  const opt = (v, label) => { const o = el("option", null, label); o.value = v; return o; };
+  pre.append(opt("", t("Par défaut ({p})", { p: st.nvenc_preset_default })));
+  for (let i = 1; i <= 7; i++) { const p = "p" + i; pre.append(opt(p, i === 1 ? t("{p} · la plus rapide", { p }) : i === 4 ? t("{p} · équilibrée", { p }) : i === 7 ? t("{p} · la meilleure", { p }) : p)); }
+  pre.value = st.nvenc_preset;
+  const aq = $("set-autoquit"); aq.replaceChildren();
+  for (const m of st.auto_quit_choices) aq.append(opt(String(m), m === 0 ? t("Jamais") : m < 60 ? t("Après {n} min", { n: m }) : t("Après {n} h", { n: m / 60 })));
+  aq.value = String(st.auto_quit_min);
+  $("set-native").checked = st.native_resolution && st.native_resolution_available; $("set-native").disabled = !st.native_resolution_available;
+  if (!st.native_resolution_available) $("native-desc").textContent = t("Indisponible avec la mire de test (--video test).");
+  $("set-remote").checked = st.remote && st.remote_available; $("set-remote").disabled = !st.remote_available;
+  const rs = st.remote_status || {};
+  $("remote-desc").textContent = !st.remote_available ? t("Désactivé au démarrage du service (--no-remote).")
+    : !st.remote || rs.state === "off" ? t("Les clients 2moon joignent l'hôte depuis Internet sans rien ouvrir sur le routeur : connexion directe à travers le NAT, ou par un serveur relais en dernier recours. Passe par les serveurs publics d'iroh (n0).")
+    : rs.state === "online" ? t("Actif : joignable depuis Internet")
+    : rs.state === "failed" ? t("Échec : {e}", { e: rs.error }) : t("Démarrage…");
+  $("remote-code-row").classList.toggle("hidden", !st.remote_id);
+  $("remote-code").textContent = st.remote_id || "";
+  if (st.language !== LANG) setLang(st.language);
+}
+async function saveSetting(body) {
+  try { await api("/api/settings", body); toast("Paramètre enregistré"); } catch (e) { toast(e.message); loadSettings(); }
+}
+function setLang(l) {
+  LANG = l; applyLang();
+  if (!$("app").classList.contains("hidden")) { appsJson = ""; refresh(); refreshClients(); refreshApps(true); loadSettings(); } else showAuth();
+}
+document.querySelectorAll("#set-lang button").forEach(b => b.addEventListener("click", async () => {
+  if (b.dataset.v === LANG) return;
+  setLang(b.dataset.v); await saveSetting({ language: LANG });
+}));
+$("set-kb").addEventListener("change", (e) => saveSetting({ keyboard: e.target.value }));
+let savedName = null;
+async function saveName() {
+  const v = $("set-name").value.trim();
+  if (v === savedName) return;
+  savedName = v; await saveSetting({ host_name: v }); refresh();
+}
+$("set-name").addEventListener("focus", () => { savedName = $("set-name").value.trim(); });
+$("set-name").addEventListener("change", saveName);
+$("name-form").addEventListener("submit", (e) => { e.preventDefault(); saveName(); });
+$("set-preset").addEventListener("change", (e) => saveSetting({ nvenc_preset: e.target.value }));
+$("set-autoquit").addEventListener("change", (e) => saveSetting({ auto_quit_min: Number(e.target.value) }));
+$("set-native").addEventListener("change", (e) => saveSetting({ native_resolution: e.target.checked }));
+$("set-remote").addEventListener("change", async (e) => { await saveSetting({ remote: e.target.checked }); setTimeout(loadSettings, 3000); });
+$("remote-regen").addEventListener("click", async () => {
+  if (!confirm(t("Changer le code de l'hôte ?\n\nL'ancien code ne fonctionnera plus, tout de suite : les appareils qui se connectent avec lui (même ceux déjà appairés) n'auront plus accès à cet hôte à distance, et un stream en cours par l'accès à distance sera coupé. Il faudra leur donner le nouveau code."))) return;
+  try { await api("/api/remote/regenerate", {}); toast("Nouveau code créé"); loadSettings(); setTimeout(loadSettings, 3000); } catch (e) { toast(e.message); }
+});
+$("remote-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("remote-code").textContent); toast("Code copié"); } catch (e) { toast(e.message); } });
+
+(async () => {
+  try { const s = await api("/api/state"); if (s.language) LANG = s.language; applyLang(); tokenRequired = s.token_required !== false; if (s.logged_in) showApp(); else showAuth(s.setup_required); }
+  catch (e) { showAuth(false); }
+})();
+</script>
+</body>
+</html>

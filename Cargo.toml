@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["vendor"]
+
+[workspace.package]
+edition = "2021"
+version = "0.8.4"
+license = "GPL-3.0-or-later"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# eframe 0.37.0 with one 2moon change: on Wayland, the next redraw can skip the
+# compositor's frame callback (minimum-latency streaming). See vendor/eframe/2MOON.md.
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }

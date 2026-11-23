@@ -1,0 +1,108 @@
+//! Zero-copy video: the picture stays on the GPU (Linux only for now).
+//! DMA-BUF capture -> OpenGL conversion -> NVENC CUDA buffer or VAAPI surface.
+
+use anyhow::Result;
+use moon_media::encoder::VideoEncoder;
+use moon_media::frame::Csc;
+use moon_media::h264::EncodedFrame;
+
+use crate::capture::VideoSource;
+
+#[cfg(target_os = "linux")]
+pub struct GpuPath {
+    conv: moon_media::glconv::GpuConverter,
+    out: Output,
+    /// Buffer generation of the source the converter's imports belong to.
+    generation: u64,
+}
+
+#[cfg(target_os = "linux")]
+enum Output {
+    Nvenc(moon_media::nvenc::CudaInput),
+    Vaapi,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub struct GpuPath(std::convert::Infallible);
+
+impl GpuPath {
+    /// The GPU path for this encoder, with the (DRM fourcc, modifiers) the capture
+    /// may hand over as DMA-BUFs.
+    #[cfg(target_os = "linux")]
+    pub fn new(enc: &mut VideoEncoder) -> Option<Result<(Self, Vec<(u32, Vec<u64>)>)>> {
+        use moon_media::glconv::GpuConverter;
+        let made = if let Some(nv) = enc.nvenc_mut() {
+            nv.cuda_input().and_then(|input| GpuConverter::new().map(|c| (c, Output::Nvenc(input))))
+        } else if enc.vaapi_mut().is_some() {
+            // The EGL device must be the GPU the VAAPI encoder runs on.
+            let node = std::env::var("MOON_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
+            GpuConverter::new_vaapi(Some(&node)).map(|c| (c, Output::Vaapi))
+        } else {
+            return None;
+        };
+        Some(made.map(|(conv, out)| {
+            let formats = capture_formats(&conv);
+            (Self { conv, out, generation: u64::MAX }, formats)
+        }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn new(_enc: &mut VideoEncoder) -> Option<Result<(Self, Vec<(u32, Vec<u64>)>)>> {
+        None
+    }
+
+    /// Convert the source's newest picture, if new, into the encoder's input.
+    #[cfg(target_os = "linux")]
+    pub fn convert(&mut self, src: &mut dyn VideoSource, enc: &mut VideoEncoder, csc: Csc) -> Option<Result<()>> {
+        let Self { conv, out, generation } = self;
+        match out {
+            Output::Nvenc(input) => src.with_dmabuf(&mut |f, g| {
+                if g != *generation {
+                    conv.forget_buffers();
+                    *generation = g;
+                }
+                conv.convert(f, input, csc)
+            }),
+            Output::Vaapi => {
+                let va = enc.vaapi_mut()?;
+                src.with_dmabuf(&mut |f, g| {
+                    if g != *generation {
+                        conv.forget_buffers();
+                        *generation = g;
+                    }
+                    let (display, surface, width, height) = va.vaapi_surface()?;
+                    // SAFETY: the display and surface belong to the live encoder.
+                    let exported = unsafe { moon_media::vaapi::export_surface_for_writing(display, surface)? };
+                    let dst = moon_media::glconv::VaSurface { id: surface, width, height, planes: &exported.planes };
+                    conv.convert_to_surface(f, &dst, csc)
+                })
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn convert(&mut self, _src: &mut dyn VideoSource, _enc: &mut VideoEncoder, _csc: Csc) -> Option<Result<()>> {
+        match self.0 {}
+    }
+
+    /// Encode the picture last converted (`pts90k`: presentation time, 90 kHz).
+    #[cfg(target_os = "linux")]
+    pub fn encode<'a>(&mut self, enc: &'a mut VideoEncoder, pts90k: i64, index: u32) -> Result<EncodedFrame<'a>> {
+        match self.out {
+            Output::Nvenc(_) => enc.nvenc_mut().expect("GPU path needs direct NVENC").encode_cuda(index as u64),
+            Output::Vaapi => enc.vaapi_mut().expect("GPU path needs the VAAPI encoder").encode_surface(pts90k),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn encode<'a>(&mut self, _enc: &'a mut VideoEncoder, _pts90k: i64, _index: u32) -> Result<EncodedFrame<'a>> {
+        match self.0 {}
+    }
+}
+
+/// (DRM fourcc, modifiers) of the 32-bit RGB layouts the converter can import.
+#[cfg(target_os = "linux")]
+pub fn capture_formats(conv: &moon_media::glconv::GpuConverter) -> Vec<(u32, Vec<u64>)> {
+    use moon_media::glconv::{DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888};
+    [DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888].into_iter().map(|f| (f, conv.modifiers(f))).filter(|(_, m)| !m.is_empty()).collect()
+}

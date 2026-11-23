@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=2moon
+GenericName=Game streaming
+GenericName[fr]=Streaming de jeux
+Comment=Play the games of another computer, or share this one
+Comment[fr]=Jouer aux jeux d'un autre ordinateur, ou partager celui-ci
+Exec=/opt/2moon/moon-client
+TryExec=/opt/2moon/moon-client
+Icon=2moon
+Terminal=false
+Categories=Game;
+Keywords=stream;streaming;gamestream;remote;game;host;
+StartupWMClass=2moon
+StartupNotify=true

@@ -1,0 +1,46 @@
+# .deb / .rpm / Arch packages, built by scripts/package-release.sh with nfpm.
+# ${VERSION} and ${STAGE} (the extracted archive) are filled in by the script.
+name: 2moon
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: "1"
+section: games
+priority: optional
+maintainer: 2moon <https://github.com/RM4Y/2moon>
+description: |
+  Game streaming client and host.
+  One app: play the games of another computer, or share this one (Host mode).
+vendor: 2moon
+homepage: https://github.com/RM4Y/2moon
+license: GPL-3.0-or-later
+contents:
+  - src: ${STAGE}/moon-client
+    dst: /opt/2moon/moon-client
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/moon-server
+    dst: /opt/2moon/moon-server
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/lib/
+    dst: /opt/2moon/lib/
+  - src: ${STAGE}/LICENSES/
+    dst: /opt/2moon/LICENSES/
+  - src: ${STAGE}/README.md
+    dst: /opt/2moon/README.md
+  - src: ${STAGE}/LICENSE
+    dst: /opt/2moon/LICENSE
+  - src: /opt/2moon/moon-client
+    dst: /usr/bin/moon-client
+    type: symlink
+  - src: /opt/2moon/moon-server
+    dst: /usr/bin/moon-server
+    type: symlink
+  - src: ./2moon.desktop
+    dst: /usr/share/applications/2moon.desktop
+  - src: ./2moon.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/2moon.svg
+  - src: ${STAGE}/2moon.png
+    dst: /usr/share/icons/hicolor/256x256/apps/2moon.png
+scripts:
+  postinstall: ./postinstall.sh
+  postremove: ./postinstall.sh
